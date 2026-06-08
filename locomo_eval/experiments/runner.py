@@ -105,6 +105,8 @@ class ExperimentRunner:
                                 perplexity_payload = self.model_adapter.compute_perplexity(messages, qa.answer)
                             except Exception:
                                 LOGGER.warning("Perplexity computation failed for %s/%s", qa.conversation_id, qa.question_id, exc_info=True)
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
 
                             gpu_memory = 0
                             if torch.cuda.is_available():
@@ -134,8 +136,12 @@ class ExperimentRunner:
                                     **answer_scores,
                                 }
                             )
-                        except torch.cuda.OutOfMemoryError:
-                            LOGGER.error("OOM for %s/%s method=%s budget=%s — skipping", conversation.conversation_id, qa.question_id, method, budget, exc_info=True)
+                        except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+                            if isinstance(exc, RuntimeError) and "CUDA" not in str(exc) and "cuda" not in str(exc):
+                                raise
+                            LOGGER.error("CUDA error for %s/%s method=%s budget=%s — skipping", conversation.conversation_id, qa.question_id, method, budget, exc_info=True)
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
                             rows.append(
                                 {
                                     "conversation_id": conversation.conversation_id,

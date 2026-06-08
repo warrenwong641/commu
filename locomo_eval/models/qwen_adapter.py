@@ -25,7 +25,7 @@ class QwenAdapter:
             model_name,
             trust_remote_code=trust_remote_code,
             device_map="auto",
-            torch_dtype="auto",
+            dtype="auto",
         )
         self.model.eval()
 
@@ -39,9 +39,10 @@ class QwenAdapter:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                temperature=0.0,
-                top_p=0.8,
-                top_k=20,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                top_k=None,
             )
         generated_ids = outputs[0][inputs.input_ids.shape[1]:]
         generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
@@ -52,19 +53,30 @@ class QwenAdapter:
             metadata={},
         )
 
-    def compute_perplexity(self, messages: list[dict[str, str]], answer_text: str) -> dict[str, Any]:
+    def compute_perplexity(self, messages: list[dict[str, str]], answer_text: str, max_context_tokens: int = 4096) -> dict[str, Any]:
         context_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         answer_prefix = "<|im_start|>assistant\n"
-        context_ids = self.tokenizer(context_text + answer_prefix, return_tensors="pt").input_ids.to(self.model.device)
-        full_ids = self.tokenizer(context_text + answer_prefix + answer_text, return_tensors="pt").input_ids.to(self.model.device)
+        full_text = context_text + answer_prefix + answer_text
+
+        encoded = self.tokenizer(full_text, return_tensors="pt", truncation=True, max_length=max_context_tokens)
+        full_ids = encoded.input_ids.to(self.model.device)
+
+        context_encoded = self.tokenizer(context_text + answer_prefix, return_tensors="pt", truncation=True, max_length=max_context_tokens)
+        context_len = min(context_encoded.input_ids.shape[1], full_ids.shape[1])
+
         labels = full_ids.clone()
-        labels[:, : context_ids.shape[1]] = -100
+        labels[:, :context_len] = -100
+
         with torch.no_grad():
             outputs = self.model(input_ids=full_ids, labels=labels)
         nll = float(outputs.loss.item())
         logits = outputs.logits
-        shift_logits = logits[0, context_ids.shape[1] - 1 : -1, :]
-        shift_labels = full_ids[0, context_ids.shape[1] :]
+
+        if context_len >= full_ids.shape[1]:
+            return {"perplexity": math.exp(nll) if nll > 0 else 1.0, "nll": nll, "token_nlls": [], "answer_tokens": []}
+
+        shift_logits = logits[0, context_len - 1 : -1, :]
+        shift_labels = full_ids[0, context_len:]
         token_nlls = F.cross_entropy(shift_logits, shift_labels, reduction="none")
         answer_tokens = self.tokenizer.convert_ids_to_tokens(shift_labels)
         return {

@@ -34,14 +34,15 @@ def _parse_session(raw: dict, index: int) -> Session:
 
 
 def _parse_qa(raw: dict, conversation_id: str, index: int) -> QAExample:
+    answer = str(raw.get("answer") or raw.get("adversarial_answer", ""))
     return QAExample(
         question_id=str(raw.get("question_id", index)),
         conversation_id=conversation_id,
         question=raw["question"],
-        answer=raw["answer"],
+        answer=answer,
         evidence_ids=[str(item) for item in raw.get("evidence", [])],
         category=int(raw["category"]),
-        metadata={k: v for k, v in raw.items() if k not in {"question_id", "question", "answer", "evidence", "category"}},
+        metadata={k: v for k, v in raw.items() if k not in {"question_id", "question", "answer", "adversarial_answer", "evidence", "category"}},
     )
 
 
