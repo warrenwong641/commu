@@ -1,0 +1,18 @@
+model: Qwen/Qwen3-4B-Instruct-2507
+compression_methods:
+  - no_compression
+  - last_k_turns
+  - sliding_window
+  - retrieval
+  - hybrid
+  - oracle_evidence
+budgets: [512, 1024, 2048, 4096, null]
+max_samples: null
+output_dir: results/exp_001_first_run
+system_prompt: "You are Qwen, a helpful AI assistant. Answer the following question based on the conversation history provided. Only use information from the conversation. If the conversation does not contain enough information to answer, say so."
+seed: 42
+last_k_default: 20
+hybrid_allocation:
+  recent_ratio: 0.3
+  retrieval_ratio: 0.4
+  summary_ratio: 0.3
