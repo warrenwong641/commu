@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .schemas import Conversation, QAExample, Session, Turn
@@ -44,7 +45,81 @@ def _parse_qa(raw: dict, conversation_id: str, index: int) -> QAExample:
     )
 
 
+def _session_sort_key(session_key: str) -> tuple[int, str]:
+    match = re.match(r"session_(\d+)$", session_key)
+    if match:
+        return (int(match.group(1)), session_key)
+    return (0, session_key)
+
+
+def _normalize_session_id(session_key: str) -> str:
+    return session_key.replace("session_", "s", 1)
+
+
+def _parse_locomo_github_format(raw: dict, source_name: str = "") -> Conversation:
+    conversation_block = raw["conversation"]
+    conversation_id = str(raw.get("sample_id") or raw.get("conversation_id") or raw.get("id") or source_name)
+    session_summary = raw.get("session_summary") or {}
+    event_summary = raw.get("event_summary") or {}
+    observation = raw.get("observation") or {}
+
+    sessions: list[Session] = []
+    session_keys = sorted(
+        [
+            key
+            for key, value in conversation_block.items()
+            if key.startswith("session_") and not key.endswith("_date_time") and isinstance(value, list)
+        ],
+        key=_session_sort_key,
+    )
+
+    for session_key in session_keys:
+        session_id = _normalize_session_id(session_key)
+        timestamp = conversation_block.get(f"{session_key}_date_time")
+        turns = [_parse_turn(turn, session_id, timestamp) for turn in conversation_block.get(session_key, [])]
+        summary_key = f"{session_key}_summary"
+        event_key = f"{session_key}_summary"
+        observation_values = observation.get(session_key, [])
+        if isinstance(observation_values, str):
+            observations = [observation_values]
+        elif isinstance(observation_values, list):
+            observations = [str(item) for item in observation_values]
+        elif isinstance(observation_values, dict):
+            observations = [str(value) for value in observation_values.values()]
+        else:
+            observations = []
+
+        sessions.append(
+            Session(
+                session_id=session_id,
+                timestamp=timestamp,
+                turns=turns,
+                summary=session_summary.get(summary_key),
+                event_summary=event_summary.get(event_key),
+                observations=observations,
+            )
+        )
+
+    qas = [_parse_qa(qa, conversation_id, index) for index, qa in enumerate(raw.get("qa", []) or raw.get("qas", []), start=1)]
+    return Conversation(
+        conversation_id=conversation_id,
+        speaker_a=conversation_block["speaker_a"],
+        speaker_b=conversation_block["speaker_b"],
+        sessions=sessions,
+        qa_examples=qas,
+        metadata={
+            "source_format": "locomo_github",
+            "session_summary": session_summary,
+            "event_summary": event_summary,
+            "observation": observation,
+        },
+    )
+
+
 def parse_conversation_record(raw: dict, source_name: str = "") -> Conversation:
+    if isinstance(raw.get("conversation"), dict) and "speaker_a" in raw["conversation"] and "speaker_b" in raw["conversation"]:
+        return _parse_locomo_github_format(raw, source_name=source_name)
+
     conversation_id = str(raw.get("conversation_id") or raw.get("conv_id") or raw.get("id") or source_name)
     sessions = [_parse_session(session, index) for index, session in enumerate(raw.get("sessions", []), start=1)]
     qas = [_parse_qa(qa, conversation_id, index) for index, qa in enumerate(raw.get("qa", []) or raw.get("qas", []), start=1)]
