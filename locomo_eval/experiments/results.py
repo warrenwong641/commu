@@ -26,9 +26,10 @@ def load_completed(output_dir: str | Path, file_name: str = "results.parquet") -
     required = {"conversation_id", "question_id", "method", "budget"}
     if not required.issubset(existing.columns):
         return set()
+    budget_col = "budget_label" if "budget_label" in existing.columns else "budget"
     completed: set[tuple[str, str, str, Any]] = set()
     for _, row in existing.iterrows():
-        completed.add((str(row["conversation_id"]), str(row["question_id"]), str(row["method"]), row["budget"]))
+        completed.add((str(row["conversation_id"]), str(row["question_id"]), str(row["method"]), str(row[budget_col])))
     return completed
 
 

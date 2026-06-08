@@ -14,6 +14,16 @@ class ExperimentConfig:
     budgets: list[int | str | None]  # int=absolute tokens, str="50%"=percentage, None=full
     output_dir: str
     max_samples: int | None = None
+    sample_strategy: str = "sequential"  # "sequential" or "stratified"
+    context_format: str = "chat"  # "chat" or "evidence"
+    retrieval_top_k: int | None = None
+    retrieval_candidate_k: int = 64
+    neighbor_window_size: int = 1
+    dense_retrieval_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    enable_llm_judge: bool = False
+    attention_examples_per_method: int = 0
+    attention_budget_labels: list[str] = field(default_factory=list)
+    attention_layers: list[str | int] = field(default_factory=lambda: ["early", "mid", "late"])
     system_prompt: str = (
         "You are Qwen, a helpful AI assistant. Answer the following question based on the conversation history provided. "
         "Only use information from the conversation. If the conversation does not contain enough information to answer, say so."

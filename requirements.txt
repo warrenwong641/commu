@@ -10,6 +10,7 @@ numpy
 pyarrow
 pyyaml
 scikit-learn
+sentence-transformers
 matplotlib
 seaborn
 tqdm

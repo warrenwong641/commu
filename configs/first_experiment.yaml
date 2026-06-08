@@ -1,4 +1,7 @@
 budgets:
+- 64
+- 128
+- 256
 - 512
 - 1024
 - 2048
@@ -9,6 +12,11 @@ compression_methods:
 - last_k_turns
 - sliding_window
 - retrieval
+- retrieval_window
+- bm25
+- bm25_window
+- dense_retrieval
+- dense_retrieval_window
 - hybrid
 - oracle_evidence
 hybrid_allocation:
@@ -16,11 +24,26 @@ hybrid_allocation:
   retrieval_ratio: 0.4
   summary_ratio: 0.3
 last_k_default: 20
-max_samples: 20
+max_samples: 200
+sample_strategy: stratified
+context_format: evidence
+retrieval_top_k: null
+retrieval_candidate_k: 64
+neighbor_window_size: 1
+dense_retrieval_model: sentence-transformers/all-MiniLM-L6-v2
+enable_llm_judge: true
+attention_examples_per_method: 1
+attention_budget_labels:
+- 512
+attention_layers:
+- early
+- mid
+- late
 model: Qwen/Qwen3-4B-Instruct-2507
-output_dir: results/exp_001_small_run
+output_dir: results/exp_002_stratified_budgeted
 seed: 42
 session_summary_source: dataset
 system_prompt: You are Qwen, a helpful AI assistant. Answer the following question
   based on the conversation history provided. Only use information from the conversation.
-  If the conversation does not contain enough information to answer, say so.
+  If the conversation does not contain enough information to answer, say so. Answer
+  in one short phrase unless the question requires a full sentence.

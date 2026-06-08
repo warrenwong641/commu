@@ -12,10 +12,12 @@ from locomo_eval.experiments.runner import ExperimentRunner
 from locomo_eval.locomo.loader import load_conversations
 from locomo_eval.locomo.qa_builder import ConversationPrecomputed, conversations_to_frame, precompute_retrieval, save_precomputed
 from locomo_eval.models.qwen_adapter import QwenAdapter
+from locomo_eval.reports.attention_examples import plot_attention_examples
 from locomo_eval.reports.failure_cases import export_failure_cases
 from locomo_eval.reports.heatmaps import plot_attention_heatmap
+from locomo_eval.reports.perplexity import plot_token_perplexity_distribution
 from locomo_eval.reports.plots import plot_budget_vs_performance
-from locomo_eval.reports.tables import build_ablation_table
+from locomo_eval.reports.tables import build_ablation_table, build_category_table
 
 LOGGER = logging.getLogger(__name__)
 
@@ -130,8 +132,15 @@ def cmd_report(args: argparse.Namespace) -> int:
     results = pd.read_parquet(results_path)
     table = build_ablation_table(results)
     print(table.to_string(index=False))
+    table.to_csv(Path(args.results_dir) / "ablation_table.csv", index=False)
+    category_table = build_category_table(results)
+    if not category_table.empty:
+        print(category_table.to_string(index=False))
+        category_table.to_csv(Path(args.results_dir) / "category_table.csv", index=False)
     plot_budget_vs_performance(results, Path(args.results_dir) / "plots")
     plot_attention_heatmap(results, Path(args.results_dir) / "plots")
+    plot_attention_examples(results, Path(args.results_dir) / "plots")
+    plot_token_perplexity_distribution(results, Path(args.results_dir) / "plots")
     export_failure_cases(results, args.results_dir)
     return 0
 
