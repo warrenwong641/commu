@@ -116,11 +116,48 @@ def cmd_pregenerate_summaries(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    import os
+    if args.gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
     config = ExperimentConfig.from_yaml(args.config)
+    if args.output_dir:
+        config.output_dir = args.output_dir
     adapter = QwenAdapter(config.model)
     conversations = load_conversations(args.data_dir)
     runner = ExperimentRunner(config, adapter)
-    runner.run(conversations, dry_run=args.dry_run)
+    runner.run(
+        conversations,
+        dry_run=args.dry_run,
+        shard_index=args.shard_index,
+        num_shards=args.num_shards,
+    )
+    return 0
+
+
+def cmd_merge(args: argparse.Namespace) -> int:
+    import glob
+    frames = []
+    for pattern in args.input_dirs:
+        paths = sorted(glob.glob(str(Path(pattern) / "results.parquet")))
+        if not paths:
+            paths = sorted(glob.glob(str(Path(pattern) / "*.parquet")))
+            if not paths:
+                print(f"Warning: no parquet files found in {pattern}")
+                continue
+        for p in paths:
+            frames.append(pd.read_parquet(p))
+    if not frames:
+        print("No results to merge")
+        return 1
+    merged = pd.concat(frames, ignore_index=True).drop_duplicates(
+        subset=["conversation_id", "question_id", "method", "budget_label"],
+        keep="last",
+    )
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / "results.parquet"
+    merged.to_parquet(target, index=False)
+    print(f"Merged {len(frames)} shards → {len(merged)} rows → {target}")
     return 0
 
 
@@ -169,7 +206,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", default="configs/first_experiment.yaml")
     run_parser.add_argument("--data-dir", default="data/raw")
     run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument("--gpu-id", type=int, default=None)
+    run_parser.add_argument("--num-shards", type=int, default=1)
+    run_parser.add_argument("--shard-index", type=int, default=0)
+    run_parser.add_argument("--output-dir", default=None)
     run_parser.set_defaults(func=cmd_run)
+
+    merge_parser = subparsers.add_parser("merge")
+    merge_parser.add_argument("--input-dirs", nargs="+", required=True)
+    merge_parser.add_argument("--output-dir", required=True)
+    merge_parser.set_defaults(func=cmd_merge)
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--results-dir", required=True)

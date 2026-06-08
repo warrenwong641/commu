@@ -25,7 +25,7 @@ class QwenAdapter:
             "trust_remote_code": trust_remote_code,
             "device_map": "auto",
             "dtype": "auto",
-            "attn_implementation": "eager",
+            "attn_implementation": "sdpa",
         }
         try:
             self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)

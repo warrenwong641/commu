@@ -24,7 +24,7 @@ hybrid_allocation:
   retrieval_ratio: 0.4
   summary_ratio: 0.3
 last_k_default: 20
-max_samples: 200
+max_samples: 32
 sample_strategy: stratified
 context_format: evidence
 retrieval_top_k: null

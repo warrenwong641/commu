@@ -138,12 +138,17 @@ class ExperimentRunner:
             return False
         return captured_counts.get(method, 0) < self.config.attention_examples_per_method
 
-    def run(self, conversations: list, dry_run: bool = False) -> list[dict[str, Any]]:
+    def run(self, conversations: list, dry_run: bool = False, shard_index: int = 0, num_shards: int = 1) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         completed = load_completed(self.config.output_dir)
         captured_attention_counts: dict[str, int] = {}
 
-        for qa_index, (conversation, precomputed, qa) in enumerate(self._build_work_items(conversations)):
+        work_items = self._build_work_items(conversations)
+        if num_shards > 1:
+            work_items = [item for i, item in enumerate(work_items) if i % num_shards == shard_index]
+            LOGGER.info("Shard %d/%d: %d work items", shard_index, num_shards, len(work_items))
+
+        for qa_index, (conversation, precomputed, qa) in enumerate(work_items):
                 format_and_count_fn = make_format_and_count_fn(
                     tokenizer=self.model_adapter.tokenizer,
                     speaker_a=conversation.speaker_a,
