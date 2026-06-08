@@ -8,6 +8,14 @@ from locomo_eval.locomo.schemas import Turn
 
 
 class RetrievalCompressor(BaseCompressor):
+    """TF-IDF cosine similarity retrieval over conversation turns.
+
+    Uses sklearn TfidfVectorizer (L2-normalized rows) with dot-product scoring,
+    which is equivalent to cosine similarity. Precomputed per conversation for speed.
+    This is TF-IDF cosine, not BM25 — it lacks BM25's term-frequency saturation
+    and document-length normalization.
+    """
+
     name = "retrieval"
 
     def __init__(self, conversation_precomputed: ConversationPrecomputed, top_k: int = 8) -> None:

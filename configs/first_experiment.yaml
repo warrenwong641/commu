@@ -7,11 +7,14 @@ compression_methods:
   - hybrid
   - oracle_evidence
 budgets: [512, 1024, 2048, 4096, null]
+# Percentage budgets alternative (comment out the line above and uncomment below):
+# budgets: ["50%", "25%", "10%", "5%", null]
 max_samples: null
 output_dir: results/exp_001_first_run
 system_prompt: "You are Qwen, a helpful AI assistant. Answer the following question based on the conversation history provided. Only use information from the conversation. If the conversation does not contain enough information to answer, say so."
 seed: 42
 last_k_default: 20
+session_summary_source: dataset  # "dataset" uses LoCoMo built-in summaries; "generated" uses model
 hybrid_allocation:
   recent_ratio: 0.3
   retrieval_ratio: 0.4

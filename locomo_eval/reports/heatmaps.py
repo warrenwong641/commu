@@ -11,7 +11,9 @@ def plot_attention_heatmap(results: pd.DataFrame, output_dir: str | Path) -> Pat
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     figure_path = output_path / "attention_heatmap.png"
-    pivot = results.pivot_table(index="method", columns="budget", values="evidence_recall", aggfunc="mean")
+    idx_col = "budget_label" if "budget_label" in results.columns else "budget"
+    value_col = "evidence_recall" if "evidence_recall" in results.columns else "token_f1"
+    pivot = results.pivot_table(index="method", columns=idx_col, values=value_col, aggfunc="mean")
     plt.figure(figsize=(8, 5))
     sns.heatmap(pivot, annot=True, fmt=".2f", cmap="viridis")
     plt.tight_layout()

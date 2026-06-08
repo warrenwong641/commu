@@ -15,6 +15,9 @@ class DummyAdapter:
             text = "Taipei"
         return Result()
 
+    def compute_perplexity(self, messages, answer_text):
+        return {"perplexity": 2.5, "nll": 0.9, "token_nlls": [], "answer_tokens": []}
+
 
 def test_runner_outputs_rows(tmp_path, mock_conversation, simple_tokenizer):
     config = ExperimentConfig(
@@ -22,9 +25,15 @@ def test_runner_outputs_rows(tmp_path, mock_conversation, simple_tokenizer):
         compression_methods=["no_compression", "oracle_evidence"],
         budgets=[32],
         output_dir=str(tmp_path),
-        max_samples=2,
+        max_samples=1,  # limits to 1 QA
     )
     runner = ExperimentRunner(config, DummyAdapter(simple_tokenizer))
-    rows = runner.run([mock_conversation], dry_run=True)
+    rows = runner.run([mock_conversation], dry_run=False)
+    # 1 QA × 2 methods × 1 budget = 2 rows
     assert len(rows) == 2
     assert (Path(tmp_path) / "results.parquet").exists()
+    assert "perplexity" in rows[0]
+    assert "latency" in rows[0]
+    assert "gpu_memory_mb" in rows[0]
+    assert "token_saving" in rows[0]
+    assert "budget_label" in rows[0]

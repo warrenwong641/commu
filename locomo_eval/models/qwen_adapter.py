@@ -75,8 +75,53 @@ class QwenAdapter:
         }
 
     def extract_attention(self, messages: list[dict[str, str]], target_layers: tuple[int, ...] = (4, 18, 32)) -> dict[str, Any]:
-        return {
-            "status": "not_verified",
-            "target_layers": list(target_layers),
-            "note": "Attention extraction requires runtime verification against the loaded Qwen implementation.",
-        }
+        result: dict[str, Any] = {"layers": {}, "target_layers": list(target_layers)}
+        context_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.tokenizer(context_text, return_tensors="pt", truncation=True, max_length=2048).to(self.model.device)
+        seq_len = int(inputs.input_ids.shape[1])
+
+        try:
+            num_layers = len(self.model.model.layers)
+        except AttributeError:
+            result["status"] = "unsupported_architecture"
+            result["note"] = "Model does not expose .model.layers; attention extraction requires model-specific adaptation."
+            return result
+
+        # Set layers that aren't targeted to NOT output attentions to save memory
+        for i, layer in enumerate(self.model.model.layers):
+            try:
+                attn_module = layer.self_attn if hasattr(layer, "self_attn") else layer.self_attn
+            except AttributeError:
+                continue
+            if hasattr(attn_module, "_orig_output_attentions"):
+                attn_module.output_attentions = getattr(attn_module, "_orig_output_attentions", False)
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=inputs.input_ids, output_attentions=True)
+
+        all_attentions = getattr(outputs, "attentions", None)
+        if all_attentions is None:
+            result["status"] = "no_attention_returned"
+            return result
+
+        for layer_idx in target_layers:
+            if layer_idx >= num_layers or layer_idx >= len(all_attentions):
+                result["layers"][layer_idx] = {"status": "out_of_range"}
+                continue
+            attn_tensor = all_attentions[layer_idx].detach()
+            layer_result: dict[str, Any] = {
+                "status": "ok",
+                "num_heads": int(attn_tensor.shape[1]),
+                "seq_len": seq_len,
+                "mean_max_attention": float(attn_tensor.max(dim=-1).values.mean().cpu()),
+                "mean_entropy": float(
+                    -(attn_tensor * (attn_tensor + 1e-9).log()).sum(dim=-1).mean().cpu()
+                ),
+            }
+            result["layers"][layer_idx] = layer_result
+            del attn_tensor
+
+        del all_attentions
+        del outputs
+        result["status"] = "ok"
+        return result

@@ -11,7 +11,7 @@ import yaml
 class ExperimentConfig:
     model: str
     compression_methods: list[str]
-    budgets: list[int | None]
+    budgets: list[int | str | None]  # int=absolute tokens, str="50%"=percentage, None=full
     output_dir: str
     max_samples: int | None = None
     system_prompt: str = (
@@ -21,9 +21,18 @@ class ExperimentConfig:
     seed: int = 42
     last_k_default: int = 20
     hybrid_allocation: dict[str, float] = field(default_factory=lambda: {"recent_ratio": 0.3, "retrieval_ratio": 0.4, "summary_ratio": 0.3})
+    session_summary_source: str = "dataset"  # "dataset" or "generated"
 
     @classmethod
     def from_yaml(cls, file_path: str | Path) -> "ExperimentConfig":
         with Path(file_path).open("r", encoding="utf-8") as handle:
             raw: dict[str, Any] = yaml.safe_load(handle)
         return cls(**raw)
+
+    def resolve_budget(self, budget: int | str | None, original_tokens: int) -> int | None:
+        if budget is None:
+            return None
+        if isinstance(budget, str) and budget.endswith("%"):
+            pct = float(budget.rstrip("%")) / 100.0
+            return max(1, int(original_tokens * pct))
+        return int(budget)

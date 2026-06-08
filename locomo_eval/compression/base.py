@@ -17,6 +17,7 @@ class CompressedResult:
     compressed_context: str
     token_count: int
     metadata: dict[str, Any] = field(default_factory=dict)
+    extra_context: str | None = None
 
 
 class BaseCompressor(ABC):
