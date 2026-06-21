@@ -23,3 +23,14 @@ data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+
+# Generated report artifacts
+results/exp_002_merged/exp_002_report.aux
+results/exp_002_merged/exp_002_report.log
+results/exp_002_merged/exp_002_report.nav
+results/exp_002_merged/exp_002_report.out
+results/exp_002_merged/exp_002_report.pdf
+results/exp_002_merged/exp_002_report.snm
+results/exp_002_merged/exp_002_report.toc
+results/exp_002_merged/exp_002_report.vrb
+results/exp_002_merged/texput.log
