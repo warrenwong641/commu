@@ -32,6 +32,11 @@ class ExperimentConfig:
     last_k_default: int = 20
     hybrid_allocation: dict[str, float] = field(default_factory=lambda: {"recent_ratio": 0.3, "retrieval_ratio": 0.4, "summary_ratio": 0.3})
     session_summary_source: str = "dataset"  # "dataset" or "generated"
+    claude_recent_turns: int = 4
+    claude_retrieval_turns: int = 2
+    claude_max_summary_turns: int = 12
+    claude_summary_preview_chars: int = 120
+    claude_stub_preview_chars: int = 80
 
     @classmethod
     def from_yaml(cls, file_path: str | Path) -> "ExperimentConfig":

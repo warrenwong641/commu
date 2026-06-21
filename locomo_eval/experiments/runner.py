@@ -11,6 +11,7 @@ import torch
 
 from locomo_eval.compression.hybrid import HybridCompressor
 from locomo_eval.compression.bm25 import BM25Compressor
+from locomo_eval.compression.claude_context import ClaudeContextCompressor, ClaudeContextPolicy
 from locomo_eval.compression.dense_retrieval import DenseRetrievalCompressor
 from locomo_eval.compression.last_k_turns import LastKTurnsCompressor
 from locomo_eval.compression.no_compression import NoCompressionCompressor
@@ -100,6 +101,16 @@ class ExperimentRunner:
         if method == "session_summary":
             summary_text = "\n".join(session.summary or "" for session in precomputed.conversation.sessions if session.summary)
             return SessionSummaryCompressor(summary_text=summary_text)
+        if method in {"claude_context", "claude_server_context"}:
+            return ClaudeContextCompressor(
+                ClaudeContextPolicy(
+                    recent_turns=self.config.claude_recent_turns,
+                    retrieval_turns=self.config.claude_retrieval_turns,
+                    max_summary_turns=self.config.claude_max_summary_turns,
+                    summary_preview_chars=self.config.claude_summary_preview_chars,
+                    stub_preview_chars=self.config.claude_stub_preview_chars,
+                )
+            )
         raise ValueError(f"Unknown compression method: {method}")
 
     def _build_work_items(self, conversations: list) -> list[tuple[Any, ConversationPrecomputed, Any]]:

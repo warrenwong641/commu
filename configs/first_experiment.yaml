@@ -18,11 +18,17 @@ compression_methods:
 - dense_retrieval
 - dense_retrieval_window
 - hybrid
+- claude_context
 - oracle_evidence
 hybrid_allocation:
   recent_ratio: 0.3
   retrieval_ratio: 0.4
   summary_ratio: 0.3
+claude_recent_turns: 4
+claude_retrieval_turns: 2
+claude_max_summary_turns: 12
+claude_summary_preview_chars: 120
+claude_stub_preview_chars: 80
 last_k_default: 20
 max_samples: 32
 sample_strategy: stratified
