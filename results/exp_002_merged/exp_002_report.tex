@@ -1,0 +1,517 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{hyperref}
+
+\title[LoCoMo Compression Experiment]{LoCoMo Compression Experiment: Exp 002}
+\subtitle{Budgeted retrieval, neighbor windows, semantic judging, and failure modes}
+\author{Codex analysis}
+\date{June 8, 2026}
+
+\newcommand{\method}[1]{\texttt{#1}}
+\newcommand{\metric}[1]{\textbf{#1}}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{What Was Checked}
+\begin{itemize}
+  \item Pulled latest repository state and inspected result artifacts.
+  \item Found output files in \method{results/exp\_002\_merged/}:
+  \begin{itemize}
+    \item \method{results.parquet}
+    \item \method{ablation\_table.csv}
+    \item \method{category\_table.csv}
+    \item \method{failure\_cases.csv}
+    \item \method{plots/budget\_vs\_performance.png}
+    \item \method{plots/attention\_heatmap.png}
+  \end{itemize}
+  \item No additional result directories, token-NLL plots, or true early/mid/late attention-map images were present.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Experiment Setting}
+\begin{itemize}
+  \item Dataset/task: LoCoMo long-conversation QA.
+  \item Sample size: 32 stratified QAs.
+  \item Methods: 11 compression/retrieval methods.
+  \item Budgets: 8 budget labels: 64, 128, 256, 512, 1024, 2048, 4096, and unbounded.
+  \item Total rows: \(32 \times 11 \times 8 = 2816\).
+  \item Model: \method{Qwen/Qwen3-4B-Instruct-2507}.
+  \item Context format: quoted evidence blocks with session, date, turn id, speaker, and text.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{What Does ``Budget'' Mean?}
+\metric{Definition.} The budget is the maximum number of tokenizer tokens allowed in the retained conversation context before asking the QA question.
+
+\vspace{0.5em}
+\begin{itemize}
+  \item A small budget, e.g. 64, forces a compressor to keep only a tiny amount of memory.
+  \item A larger budget, e.g. 4096, lets it keep more retrieved or recent turns.
+  \item Unbounded / \method{None} means the compressor's natural output is used with no token cap.
+  \item Some controls ignore budget: \method{no\_compression}, \method{oracle\_evidence}, and \method{last\_k\_turns}.
+\end{itemize}
+
+\vspace{0.5em}
+\metric{Example.} For \method{dense\_retrieval}, judge score rose from 0.063 at budget 64 to 0.625 at budget 4096, showing that the cap was actually binding.
+\end{frame}
+
+\begin{frame}[fragile]{What Does ``Context Format'' Mean?}
+\metric{Definition.} Context format is how retained conversation turns are written into the model prompt.
+
+\vspace{0.5em}
+\metric{Old chat-style risk.} Retrieved non-contiguous turns can look like a real dialogue history, even though turns may be missing.
+
+\vspace{0.5em}
+\metric{Exp 002 evidence format.} Retained turns are quoted as evidence blocks:
+\begin{verbatim}
+Conversation history:
+
+[session=D2 date=2023-05-07 turn=D2:8 speaker=Caroline]
+I researched adoption agencies today.
+
+Question:
+What did Caroline research?
+\end{verbatim}
+\vspace{-0.5em}
+This preserves metadata such as session, date, turn id, and speaker.
+\end{frame}
+
+\begin{frame}{Concrete QA Examples Used}
+\begin{tabular}{p{0.31\linewidth}p{0.20\linewidth}p{0.38\linewidth}}
+\toprule
+Question & Reference & What it tests \\
+\midrule
+What did Caroline research? & Adoption agencies & Old fact retrieval; verbose answers can be semantically correct but low token F1. \\
+Who did Maria have dinner with on May 3, 2023? & her mother & Date-conditioned memory; exact answer is a person, not the date in the question. \\
+Which recreational activity was James pursuing on March 16, 2022? & bowling & Context may contain the answer, but the model can still choose a distracting activity. \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{LoCoMo QA Categories}
+\metric{Definition.} LoCoMo labels each QA with a category number describing the reasoning type. Exp 002 evaluates categories 1--4 and filters out category 5.
+
+\vspace{0.5em}
+\begin{tabular}{p{0.13\linewidth}p{0.28\linewidth}p{0.48\linewidth}}
+\toprule
+Category & Name & Meaning \\
+\midrule
+1 & Single-hop & Retrieve one fact from the conversation. \\
+2 & Multi-hop & Combine multiple facts or turns. \\
+3 & Temporal & Reason about dates, order, or when events happened. \\
+4 & Commonsense / world knowledge & Combine conversation facts with outside/common knowledge. \\
+5 & Adversarial & Information is absent; model should avoid hallucinating. Not used here. \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{Compression Methods}
+\begin{tabular}{p{0.29\linewidth}p{0.62\linewidth}}
+\toprule
+Method & Logic \\
+\midrule
+\method{no\_compression} & Keep all turns. Budget ignored. \\
+\method{last\_k\_turns} & Keep last 20 turns. Budget ignored. \\
+\method{sliding\_window} & Keep most recent turns that fit budget. \\
+\method{retrieval} & TF-IDF ranked turns, budget filled from candidates. \\
+\method{bm25} & BM25 lexical ranked turns. \\
+\method{dense\_retrieval} & Sentence embedding retrieval using MiniLM. \\
+\method{*\_window} & Expand retrieved turns with neighboring turns. \\
+\method{hybrid} & Recent turns plus TF-IDF retrieval. \\
+\method{oracle\_evidence} & Gold evidence only; reported as upper bound. \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{What Does \method{*\_window} Mean?}
+\metric{Definition.} A \method{*\_window} method first retrieves seed turns, then adds neighboring turns before and after each seed.
+
+\vspace{0.5em}
+\begin{itemize}
+  \item \method{retrieval}: keep only TF-IDF selected turns.
+  \item \method{retrieval\_window}: keep TF-IDF selected turns plus nearby turns.
+  \item \method{bm25\_window}: BM25 seeds plus nearby turns.
+  \item \method{dense\_retrieval\_window}: embedding-retrieved seeds plus nearby turns.
+\end{itemize}
+
+\vspace{0.5em}
+\metric{Why it helps.} A gold fact is often spread across adjacent dialogue turns. The retrieved turn may mention ``adoption'', while the previous or next turn clarifies who, when, or why.
+\end{frame}
+
+\begin{frame}{What Is Dense Window?}
+\metric{Dense retrieval.} Encode each conversation turn as a semantic embedding using \method{sentence-transformers/all-MiniLM-L6-v2}; encode the question the same way; rank turns by embedding similarity.
+
+\vspace{0.5em}
+\metric{Dense window.} After dense retrieval selects the most semantically similar seed turns, add neighboring turns around each seed.
+
+\vspace{0.5em}
+\begin{itemize}
+  \item Base dense retrieval answers: ``Which turns are semantically closest to the question?''
+  \item Dense window answers: ``Which nearby mini-dialogue around those turns should the model read?''
+  \item In Exp 002, unbounded dense retrieval scored 0.609, while dense window scored 0.694.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Window Example}
+\begin{tabular}{p{0.18\linewidth}p{0.72\linewidth}}
+\toprule
+Turn & Evidence text \\
+\midrule
+\(D2{:}7\) & Caroline says she is thinking seriously about becoming a parent. \\
+\(D2{:}8\) & Caroline says she researched adoption agencies. \\
+\(D2{:}9\) & The conversation continues with paperwork and next steps. \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.7em}
+If retrieval selects only \(D2{:}8\), it may answer the direct fact. If the question requires context, \method{retrieval\_window} keeps \(D2{:}7\), \(D2{:}8\), and \(D2{:}9\), making the retained memory more coherent.
+\end{frame}
+
+\begin{frame}{What Is the Oracle Evidence Upper Bound?}
+\metric{Definition.} \method{oracle\_evidence} keeps the dataset's gold evidence turns directly. It uses labels that a real retrieval system would not know at test time.
+
+\vspace{0.5em}
+\begin{itemize}
+  \item It is not a deployable compression method.
+  \item It estimates how well the model could answer if retrieval were nearly perfect.
+  \item In plots/tables it is labeled \method{upper\_bound\_oracle}.
+  \item The gap between best real method and oracle is the remaining headroom for better retrieval, reranking, or context construction.
+\end{itemize}
+
+\vspace{0.5em}
+\metric{Exp 002 example.} Oracle judge score is 0.766; best real method \method{retrieval\_window} is 0.726. The small gap suggests retrieval is close on this sample, but not solved.
+\end{frame}
+
+\begin{frame}{Experiment Logic}
+\begin{enumerate}
+  \item Build a stratified QA worklist from conversations.
+  \item For each QA, compress the full conversation using each method and budget.
+  \item Format retained context as evidence, not as fake chat history.
+  \item Ask the model to answer from retained context only.
+  \item Score answer quality, evidence retention, cost, latency, and perplexity diagnostics.
+  \item Aggregate rows into ablation and category tables with bootstrap confidence intervals.
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Metric: LLM Judge Score}
+\metric{Definition.} A model-based semantic score in \(\{0, 0.5, 1\}\) judging whether the prediction answers the question equivalently to the reference.
+
+\vspace{0.5em}
+\metric{Example from this experiment.}
+\begin{itemize}
+  \item Question: ``What did Caroline research?''
+  \item Reference: ``Adoption agencies''
+  \item Prediction: ``Caroline researched adoption agencies and career options...''
+  \item Token F1 is low because the prediction is verbose, but LLM judge score is 1.0 because the key answer is present.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric: Token F1}
+\metric{Definition.} Lowercase split tokens, count overlap with the reference, then compute
+\[
+F1 = \frac{2PR}{P+R}.
+\]
+
+\vspace{0.5em}
+\metric{Example.}
+\begin{itemize}
+  \item Reference: ``Adoption agencies''
+  \item Prediction includes many extra words: ``Caroline researched adoption agencies and career options...''
+  \item Overlap exists, but precision is low because many predicted tokens are extra.
+  \item Result in failure table: token F1 about 0.11 while LLM judge is 1.0.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric: ROUGE-L}
+\metric{Definition.} Longest-common-subsequence F-measure between prediction and reference.
+
+\vspace{0.5em}
+\metric{How it behaves here.}
+\begin{itemize}
+  \item Rewards phrase order overlap.
+  \item Like token F1, it penalizes verbose correct answers.
+  \item Example: ``Adoption agencies'' appears inside a long generated answer, so ROUGE-L is nonzero but still small.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric: Exact Match}
+\metric{Definition.} Normalize text by lowercasing, removing articles and punctuation, and collapsing whitespace. Score 1 only if normalized prediction equals normalized reference.
+
+\vspace{0.5em}
+\metric{Example.}
+\begin{itemize}
+  \item Reference: ``her mother''
+  \item Prediction: ``The conversation history does not mention who Maria had dinner with on May 3, 2023.''
+  \item Exact match: 0.
+  \item In this run, exact match is mostly 0 because model answers are often verbose or explanatory.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric: Date, Number, and Entity F1}
+\metric{Definition.} Extract dates, numbers, and capitalized entity-like spans with regexes; compute set-level F1 against extracted reference items.
+
+\vspace{0.5em}
+\metric{Example.}
+\begin{itemize}
+  \item Question: ``Who did Maria have dinner with on May 3, 2023?''
+  \item Reference: ``her mother''
+  \item Prediction mentions ``May 3, 2023'' but not ``her mother''.
+  \item Date F1 can be 0 or misleadingly about question text, so this metric is useful only when the reference itself contains a date.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric: Evidence Recall and Precision}
+\metric{Evidence recall.} Fraction of gold evidence turn ids retained:
+\[
+\frac{|\mathrm{kept} \cap \mathrm{gold}|}{|\mathrm{gold}|}.
+\]
+
+\metric{Evidence precision.} Fraction of retained turn ids that are gold evidence:
+\[
+\frac{|\mathrm{kept} \cap \mathrm{gold}|}{|\mathrm{kept}|}.
+\]
+
+\vspace{0.5em}
+\metric{Example.}
+If gold evidence is \(\{D2{:}8\}\) and kept turns include \(D2{:}8\), recall is 1.0. If 20 turns were kept and only one is gold, precision is 0.05.
+\end{frame}
+
+\begin{frame}{Metric: Evidence Session Recall}
+\metric{Definition.} Convert gold evidence turn ids to their sessions. Score the fraction of gold evidence sessions represented in retained turns.
+
+\[
+\mathrm{EvidenceSessionRecall}
+= \frac{|\mathrm{kept\ sessions} \cap \mathrm{gold\ evidence\ sessions}|}
+{|\mathrm{gold\ evidence\ sessions}|}.
+\]
+
+\vspace{0.25em}
+\metric{Terminology.} In this report, ``session recall'' is shorthand for \metric{evidence session recall}; it is not a separate metric.
+
+\vspace{0.5em}
+\metric{Why it matters.}
+\begin{itemize}
+  \item Retrieval can miss the exact gold turn but keep the right session.
+  \item Example from results: \method{retrieval\_window} unbounded has evidence recall 0.585 but session recall 0.988.
+  \item This means it often finds the right conversation episode even if exact turn labels are missed.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric: Answerable Context Rate}
+\metric{Definition.} Normalize the reference answer and retained text, then check whether the reference string literally appears in retained context.
+
+\vspace{0.5em}
+\metric{Example.}
+\begin{itemize}
+  \item Reference: ``bowling''
+  \item Context contains ``bowling'', so answerable context rate is 1.0.
+  \item Model prediction: ``video gaming''.
+  \item Judge score is 0, showing that answerable context does not guarantee correct answer generation.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric: Perplexity and Token NLL}
+\metric{Definition.} Negative log likelihood is computed over reference answer tokens after left-truncating context so answer tokens remain scored. Perplexity is \(\exp(\mathrm{NLL})\).
+
+\vspace{0.5em}
+\metric{Use in this experiment.}
+\begin{itemize}
+  \item Intended as a diagnostic of how surprising the reference answer is under the retained context.
+  \item Values are very large and unstable in the CSV, so they should not be used as the primary ranking metric.
+  \item Token-NLL output exists in row data, but token-NLL plots were not present in pulled artifacts.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Full/Unbounded Ranking}
+\begin{tabular}{lrrrr}
+\toprule
+Method & Judge & Token F1 & Evidence Recall & Latency \\
+\midrule
+Upper-bound oracle & 0.766 & 0.174 & 0.990 & 0.42s \\
+\method{retrieval\_window} & 0.726 & 0.114 & 0.585 & 1.91s \\
+\method{dense\_retrieval\_window} & 0.694 & 0.110 & 0.763 & 2.07s \\
+\method{sliding\_window} & 0.661 & 0.106 & 0.990 & 10.54s \\
+\method{no\_compression} & 0.661 & 0.106 & 0.990 & 10.62s \\
+\method{bm25\_window} & 0.609 & 0.092 & 0.583 & 2.17s \\
+\method{last\_k\_turns} & 0.141 & 0.024 & 0.000 & 0.61s \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{Budget Curve: Dense Retrieval}
+\begin{tabular}{rrrr}
+\toprule
+Budget & Judge & Evidence Recall & Latency \\
+\midrule
+64 & 0.063 & 0.031 & 0.41s \\
+128 & 0.226 & 0.203 & 0.45s \\
+256 & 0.419 & 0.266 & 0.84s \\
+512 & 0.468 & 0.336 & 0.47s \\
+1024 & 0.581 & 0.378 & 0.62s \\
+2048 & 0.581 & 0.479 & 0.72s \\
+4096 & 0.625 & 0.544 & 0.94s \\
+Unbounded & 0.609 & 0.555 & 1.00s \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+The budget curve now slopes, unlike exp 001.
+\end{frame}
+
+\begin{frame}{Neighbor Windows Help}
+\begin{tabular}{lrrr}
+\toprule
+Comparison & Judge Delta & Evidence Delta & Latency Delta \\
+\midrule
+\method{retrieval} to \method{retrieval\_window} & +0.242 & +0.250 & +1.00s \\
+\method{bm25} to \method{bm25\_window} & +0.109 & +0.158 & +1.10s \\
+\method{dense} to \method{dense\_window} & +0.084 & +0.209 & +1.07s \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+The strongest methodological result is not simply ``dense is best''; it is that retrieved turns need nearby context.
+\end{frame}
+
+\begin{frame}{Category-Level Full/Unbounded Results}
+\begin{tabular}{lrrrr}
+\toprule
+Category & No comp. & Retrieval win. & Dense win. & Oracle \\
+\midrule
+1 & 0.778 & 0.722 & 0.722 & 0.944 \\
+2 & 0.143 & 0.571 & 0.429 & 0.500 \\
+3 & 0.643 & 0.571 & 0.571 & 0.857 \\
+4 & 1.000 & 1.000 & 1.000 & 0.750 \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.5em}
+Category variation is large, so conclusions should be stratified by QA type in the next run.
+\end{frame}
+
+\begin{frame}{Main Findings}
+\begin{itemize}
+  \item Budget constraints now matter: retrieval quality rises as token budget increases.
+  \item \method{retrieval\_window} beats full context on judge score while being about 5x faster.
+  \item Windowed retrieval is consistently better than base retrieval.
+  \item Full context is not automatically best; irrelevant history appears to distract the model.
+  \item \method{last\_k\_turns} performs poorly, confirming the task targets older memories.
+  \item Oracle remains above real methods, so retrieval/context construction can still improve.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Plot: Budget vs Token F1}
+\centering
+\includegraphics[height=0.76\textheight]{results/exp_002_merged/plots/split/token_f1.png}
+\end{frame}
+
+\begin{frame}{Plot: Budget vs Exact Match}
+\centering
+\includegraphics[height=0.76\textheight]{results/exp_002_merged/plots/split/exact_match.png}
+\end{frame}
+
+\begin{frame}{Plot: Budget vs LLM Judge Score}
+\centering
+\includegraphics[height=0.76\textheight]{results/exp_002_merged/plots/split/llm_judge_score.png}
+\end{frame}
+
+\begin{frame}{Plot: Budget vs Evidence Recall}
+\centering
+\includegraphics[height=0.76\textheight]{results/exp_002_merged/plots/split/evidence_recall.png}
+\end{frame}
+
+\begin{frame}{Plot: Budget vs Evidence Session Recall}
+\centering
+\includegraphics[height=0.76\textheight]{results/exp_002_merged/plots/split/evidence_session_recall.png}
+\end{frame}
+
+\begin{frame}{Plot: Budget vs Answerable Context Rate}
+\centering
+\includegraphics[height=0.76\textheight]{results/exp_002_merged/plots/split/answerable_context_rate.png}
+\end{frame}
+
+\begin{frame}{Plot: Evidence Recall Heatmap}
+\metric{Definition.} This heatmap summarizes \metric{evidence recall} for each method and budget. Each cell is the mean fraction of gold evidence turns retained across the 32 QAs.
+
+\vspace{0.4em}
+\begin{itemize}
+  \item Rows are methods.
+  \item Columns are token budgets.
+  \item Brighter cells mean more gold evidence turns survived compression.
+  \item It is not a transformer attention map; the file name is misleading.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Evidence Recall Heatmap}
+\centering
+\includegraphics[width=0.72\linewidth]{results/exp_002_merged/plots/attention_heatmap.png}
+
+\vspace{0.5em}
+\small Example: \method{last\_k\_turns} is dark because it keeps recent turns while the questions target older evidence; \method{upper\_bound\_oracle} is bright because it receives gold evidence directly.
+\end{frame}
+
+\begin{frame}{Statistical Caution}
+\begin{itemize}
+  \item Only 32 QAs were evaluated.
+  \item Bootstrap confidence intervals overlap:
+  \begin{itemize}
+    \item \method{retrieval\_window}: 0.726, CI [0.565, 0.855]
+    \item \method{no\_compression}: 0.661, CI [0.500, 0.806]
+    \item oracle: 0.766, CI [0.609, 0.906]
+  \end{itemize}
+  \item The result is promising, not definitive.
+  \item Next experiment should use at least 200 stratified QAs.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Code/Reporting Issues Found}
+\begin{itemize}
+  \item Result artifacts include no true early/mid/late attention example PNGs.
+  \item \method{attention\_heatmap.png} is misnamed; it is not a transformer attention map.
+  \item Token-NLL plots were expected by code but are absent from pulled outputs.
+  \item Non-budgeted methods are plotted across all budgets, which can mislead budget comparisons.
+  \item \method{failure\_cases.csv} is very large because token F1 flags many semantically correct verbose answers as failures.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Metric Issues and Improvements}
+\begin{itemize}
+  \item LLM judge uses the same model family as answer generation; use an external stronger judge for final claims.
+  \item Literal \metric{answerable context rate} misses paraphrases and aliases.
+  \item Regex entity/date extraction is brittle; use a date parser and NER if this becomes a core metric.
+  \item Perplexity values are huge and unstable; keep token NLL as diagnostic, not headline ranking.
+  \item Exact match is too strict for verbose model answers; use concise decoding prompts or postprocess answers.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Method Improvements}
+\begin{itemize}
+  \item Increase sample size and report paired bootstrap deltas.
+  \item Tune neighbor window size by category and budget.
+  \item Retrieve at session-chunk level, then compress within the retrieved session.
+  \item Add reranking after dense/BM25 retrieval.
+  \item Separate budget-sensitive methods from fixed controls in all plots.
+  \item Add true attention example export or rename the existing heatmap to avoid confusion.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Bottom Line}
+\begin{block}{Best current interpretation}
+Small, relevant, neighbor-expanded memory is a better latency/accuracy tradeoff than dumping the full LoCoMo conversation into the model.
+\end{block}
+
+\begin{block}{Confidence level}
+The conclusion is directionally strong but statistically preliminary because the run uses only 32 QAs and the judge-score confidence intervals overlap.
+\end{block}
+\end{frame}
+
+\end{document}

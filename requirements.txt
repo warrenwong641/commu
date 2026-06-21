@@ -1,0 +1,16 @@
+torch>=2.0
+transformers>=4.51.0
+accelerate>=0.20.0
+datasets>=2.0.0
+rouge-score
+bert-score
+evaluate
+pandas
+numpy
+pyarrow
+pyyaml
+scikit-learn
+sentence-transformers
+matplotlib
+seaborn
+tqdm
