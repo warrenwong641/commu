@@ -10,15 +10,25 @@ budgets:
 compression_methods:
 - no_compression
 - last_k_turns
-- sliding_window
-- retrieval
-- retrieval_window
-- bm25
-- bm25_window
-- dense_retrieval
-- dense_retrieval_window
 - hybrid
-- oracle_evidence
+- claude_context
+method_options:
+  claude_context:
+    recent_turns: 4
+    retrieval_turns: 2
+    max_summary_turns: 12
+    summary_preview_chars: 120
+    stub_preview_chars: 80
+    enable_tool_clearing: true
+    enable_thinking_clearing: true
+    enable_compaction: true
+    enable_artifact_stubs: true
+    enable_cache_awareness: true
+    tool_clear_threshold_tokens: null
+    thinking_clear_threshold_tokens: null
+    compaction_threshold_tokens: null
+    cache_prefix_turns: 0
+    allow_cache_invalidation_on_emergency: true
 hybrid_allocation:
   recent_ratio: 0.3
   retrieval_ratio: 0.4
@@ -40,10 +50,11 @@ attention_layers:
 - mid
 - late
 model: Qwen/Qwen3-4B-Instruct-2507
-output_dir: results/exp_002_stratified_budgeted
+output_dir: results/claude_context_experiment
 seed: 42
 session_summary_source: dataset
 system_prompt: You are Qwen, a helpful AI assistant. Answer the following question
   based on the conversation history provided. Only use information from the conversation.
   If the conversation does not contain enough information to answer, say so. Answer
   in one short phrase unless the question requires a full sentence.
+

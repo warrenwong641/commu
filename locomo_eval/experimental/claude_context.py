@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .base import BaseCompressor, CompressedResult
+from locomo_eval.compression.base import BaseCompressor, CompressedResult
 from locomo_eval.locomo.schemas import Turn
 
 
@@ -569,3 +569,9 @@ class ClaudeContextCompressor(BaseCompressor):
             seen.add(turn.dia_id)
             kept.append(turn)
         return kept
+
+
+def build_claude_context_compressor(options: dict[str, Any] | None = None) -> ClaudeContextCompressor:
+    """Factory used by the generic experiment runner extension hook."""
+
+    return ClaudeContextCompressor(ClaudeContextPolicy(**(options or {})))

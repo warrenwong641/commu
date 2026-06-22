@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from locomo_eval.compression.bm25 import BM25Compressor
-from locomo_eval.compression.claude_context import ClaudeContextCompressor, ClaudeContextPolicy
 from locomo_eval.compression.hybrid import HybridCompressor
 from locomo_eval.compression.last_k_turns import LastKTurnsCompressor
 from locomo_eval.compression.oracle_evidence import OracleEvidenceCompressor
@@ -9,6 +8,7 @@ from locomo_eval.compression.neighbor_window import NeighborWindowCompressor
 from locomo_eval.compression.retrieval import RetrievalCompressor
 from locomo_eval.compression.session_summary import SessionSummaryCompressor
 from locomo_eval.compression.sliding_window import SlidingWindowCompressor
+from locomo_eval.experimental.claude_context import ClaudeContextCompressor, ClaudeContextPolicy
 from locomo_eval.locomo.formatter import build_chat_messages, make_format_and_count_fn
 from locomo_eval.locomo.qa_builder import precompute_retrieval
 from locomo_eval.locomo.schemas import Turn

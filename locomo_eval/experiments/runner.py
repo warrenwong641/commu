@@ -4,6 +4,7 @@ import logging
 import json
 import time
 from dataclasses import asdict
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,6 @@ import torch
 
 from locomo_eval.compression.hybrid import HybridCompressor
 from locomo_eval.compression.bm25 import BM25Compressor
-from locomo_eval.compression.claude_context import ClaudeContextCompressor, ClaudeContextPolicy
 from locomo_eval.compression.dense_retrieval import DenseRetrievalCompressor
 from locomo_eval.compression.last_k_turns import LastKTurnsCompressor
 from locomo_eval.compression.no_compression import NoCompressionCompressor
@@ -30,6 +30,11 @@ from locomo_eval.metrics.perplexity_metrics import summarize_perplexity
 
 LOGGER = logging.getLogger(__name__)
 
+EXPERIMENTAL_COMPRESSOR_FACTORIES = {
+    "claude_context": "locomo_eval.experimental.claude_context:build_claude_context_compressor",
+    "claude_server_context": "locomo_eval.experimental.claude_context:build_claude_context_compressor",
+}
+
 
 class ExperimentRunner:
     def __init__(self, config, model_adapter) -> None:
@@ -38,6 +43,9 @@ class ExperimentRunner:
         self._dense_retrieval_cache: dict[tuple[str, str], DenseRetrievalCompressor] = {}
 
     def _build_compressor(self, method: str, precomputed: ConversationPrecomputed, evidence_ids: list[str]):
+        experimental = self._build_experimental_compressor(method)
+        if experimental is not None:
+            return experimental
         if method == "no_compression":
             return NoCompressionCompressor()
         if method == "last_k_turns":
@@ -101,27 +109,16 @@ class ExperimentRunner:
         if method == "session_summary":
             summary_text = "\n".join(session.summary or "" for session in precomputed.conversation.sessions if session.summary)
             return SessionSummaryCompressor(summary_text=summary_text)
-        if method in {"claude_context", "claude_server_context"}:
-            return ClaudeContextCompressor(
-                ClaudeContextPolicy(
-                    recent_turns=self.config.claude_recent_turns,
-                    retrieval_turns=self.config.claude_retrieval_turns,
-                    max_summary_turns=self.config.claude_max_summary_turns,
-                    summary_preview_chars=self.config.claude_summary_preview_chars,
-                    stub_preview_chars=self.config.claude_stub_preview_chars,
-                    enable_tool_clearing=self.config.claude_enable_tool_clearing,
-                    enable_thinking_clearing=self.config.claude_enable_thinking_clearing,
-                    enable_compaction=self.config.claude_enable_compaction,
-                    enable_artifact_stubs=self.config.claude_enable_artifact_stubs,
-                    enable_cache_awareness=self.config.claude_enable_cache_awareness,
-                    tool_clear_threshold_tokens=self.config.claude_tool_clear_threshold_tokens,
-                    thinking_clear_threshold_tokens=self.config.claude_thinking_clear_threshold_tokens,
-                    compaction_threshold_tokens=self.config.claude_compaction_threshold_tokens,
-                    cache_prefix_turns=self.config.claude_cache_prefix_turns,
-                    allow_cache_invalidation_on_emergency=self.config.claude_allow_cache_invalidation_on_emergency,
-                )
-            )
         raise ValueError(f"Unknown compression method: {method}")
+
+    def _build_experimental_compressor(self, method: str):
+        target = EXPERIMENTAL_COMPRESSOR_FACTORIES.get(method)
+        if target is None:
+            return None
+        module_name, factory_name = target.split(":", 1)
+        module = import_module(module_name)
+        factory = getattr(module, factory_name)
+        return factory(self.config.method_options.get(method, {}))
 
     def _build_work_items(self, conversations: list) -> list[tuple[Any, ConversationPrecomputed, Any]]:
         by_conversation: list[tuple[Any, ConversationPrecomputed, list]] = []

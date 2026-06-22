@@ -1,6 +1,6 @@
 # Claude-Code-Like Context Management Reconstruction
 
-This repo implements a clean-room baseline for Claude-Code-like context management as `claude_context`.
+This repo implements a clean-room experimental baseline for Claude-Code-like context management as `claude_context`.
 It is a behavioral reconstruction for evaluation, not a claim about Anthropic private source.
 
 ## Public References
@@ -15,7 +15,7 @@ It is a behavioral reconstruction for evaluation, not a claim about Anthropic pr
 
 ## Implemented Baseline
 
-The compressor lives in [`locomo_eval/compression/claude_context.py`](locomo_eval/compression/claude_context.py).
+The compressor lives in [`locomo_eval/experimental/claude_context.py`](locomo_eval/experimental/claude_context.py).
 It projects a full immutable transcript into an API-visible context:
 
 ```text
@@ -50,26 +50,28 @@ model-visible context
 
 ## Experiment Usage
 
-Add `claude_context` to `compression_methods` in an experiment config. The sample config already includes it.
+Use `configs/claude_context_experiment.yaml` for the CC-like proxy. The default LoCoMo config stays provider-neutral and does not include this experimental baseline.
 
-Config knobs:
+Config knobs live under `method_options.claude_context`:
 
 ```yaml
-claude_recent_turns: 4
-claude_retrieval_turns: 2
-claude_max_summary_turns: 12
-claude_summary_preview_chars: 120
-claude_stub_preview_chars: 80
-claude_enable_tool_clearing: true
-claude_enable_thinking_clearing: true
-claude_enable_compaction: true
-claude_enable_artifact_stubs: true
-claude_enable_cache_awareness: true
-claude_tool_clear_threshold_tokens: null
-claude_thinking_clear_threshold_tokens: null
-claude_compaction_threshold_tokens: null
-claude_cache_prefix_turns: 0
-claude_allow_cache_invalidation_on_emergency: true
+method_options:
+  claude_context:
+    recent_turns: 4
+    retrieval_turns: 2
+    max_summary_turns: 12
+    summary_preview_chars: 120
+    stub_preview_chars: 80
+    enable_tool_clearing: true
+    enable_thinking_clearing: true
+    enable_compaction: true
+    enable_artifact_stubs: true
+    enable_cache_awareness: true
+    tool_clear_threshold_tokens: null
+    thinking_clear_threshold_tokens: null
+    compaction_threshold_tokens: null
+    cache_prefix_turns: 0
+    allow_cache_invalidation_on_emergency: true
 ```
 
 Primary metadata fields for analysis:
