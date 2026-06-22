@@ -44,8 +44,9 @@ model-visible context
 | Recent-turn preservation | `recent_turn_ids` and verbatim kept turns | High | Common server/client policy; directly useful for active task continuity. |
 | Carry-forward state | `compaction_block_id` and `extra_context` | Medium-high | Models pass-forward behavior without claiming private encoding. |
 | Dual-view transcript | `canonical_transcript_turns` vs `api_visible_turns` | High | Matches documented context-editing split between client history and server-visible context. |
-| Exact clearing ranker | Heuristic classifier | Low | Private production ranking remains unrecovered. |
-| Remote config/feature flags | `ClaudeContextPolicy` knobs | Low | Represented as configurable policy, not as production constants. |
+| Cache-aware editing | `stable_prefix_hash`, `cache_boundary_index`, and invalidation metadata | Medium | Models stable-prefix preservation; does not claim provider cache internals. |
+| Exact clearing ranker | Auditable clear candidate scores | Medium-low | Scores cost, age, noise, relevance, and protection reasons; private production ranking remains unrecovered. |
+| Remote config/feature flags | `ClaudeContextPolicy` and YAML knobs | Low | Represented as configurable policy, not as production constants. |
 
 ## Experiment Usage
 
@@ -59,6 +60,16 @@ claude_retrieval_turns: 2
 claude_max_summary_turns: 12
 claude_summary_preview_chars: 120
 claude_stub_preview_chars: 80
+claude_enable_tool_clearing: true
+claude_enable_thinking_clearing: true
+claude_enable_compaction: true
+claude_enable_artifact_stubs: true
+claude_enable_cache_awareness: true
+claude_tool_clear_threshold_tokens: null
+claude_thinking_clear_threshold_tokens: null
+claude_compaction_threshold_tokens: null
+claude_cache_prefix_turns: 0
+claude_allow_cache_invalidation_on_emergency: true
 ```
 
 Primary metadata fields for analysis:
@@ -74,10 +85,19 @@ artifact_stub_turn_ids
 thinking_cleared_turn_ids
 canonical_transcript_turns
 api_visible_turns
+stable_prefix_turn_ids
+stable_prefix_hash
+cache_boundary_index
+edits_before_cache_boundary
+cache_invalidated_by_edits
+cache_invalidated_by_emergency
+clearing_rankings
+clearing_policy
+protected_turn_ids
+clear_reasons
 ignored_before_latest_compaction
 ```
 
 ## Known Limits
 
 This baseline does not recover Anthropic private thresholds, rankers, hidden prompts, prompt-cache invalidation rules, remote feature flags, telemetry, or model-serving KV-cache policies. Those should be studied with black-box API experiments and represented as policy parameters rather than hard-coded implementation claims.
-

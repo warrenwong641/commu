@@ -129,3 +129,62 @@ def test_claude_context_handles_empty_transcript(simple_tokenizer):
     assert result.metadata["mode"] == "empty_transcript"
     assert result.metadata["server_side_items"] == []
     assert result.extra_context is not None
+
+
+def test_claude_context_cache_prefix_protects_stable_turn(simple_tokenizer):
+    turns = [
+        Turn(dia_id="1", speaker="Bob", text="[tool_result] stable cached setup output should stay byte stable.", session_id="s1"),
+        Turn(dia_id="2", speaker="Alice", text="Old implementation detail.", session_id="s1"),
+        Turn(dia_id="3", speaker="Bob", text="[tool_result] stale command output can be cleared.", session_id="s1"),
+        Turn(dia_id="4", speaker="Alice", text="Current question is active.", session_id="s2"),
+    ]
+    fn = make_format_and_count_fn(simple_tokenizer, "Alice", "Bob", context_format="evidence")
+    compressor = ClaudeContextCompressor(
+        ClaudeContextPolicy(recent_turns=1, cache_prefix_turns=1, retrieval_turns=0)
+    )
+
+    result = compressor.compress(turns, "What is active now?", 220, fn)
+
+    assert result.metadata["stable_prefix_turn_ids"] == ["1"]
+    assert result.metadata["cache_invalidated_by_edits"] is False
+    assert result.metadata["edits_before_cache_boundary"] == []
+    assert "1" in result.kept_turn_ids
+    assert result.metadata["artifact_stub_turn_ids"] == ["3"]
+
+
+def test_claude_context_ranker_preserves_relevant_tool_result(simple_tokenizer):
+    turns = [
+        Turn(dia_id="1", speaker="Bob", text="[tool_result] noisy old logs stdout stderr stdout stderr.", session_id="s1"),
+        Turn(dia_id="2", speaker="Bob", text="[tool_result] Taipei train leaves at 8 AM with platform details.", session_id="s1"),
+        Turn(dia_id="3", speaker="Alice", text="Please answer the travel question.", session_id="s2"),
+    ]
+    fn = make_format_and_count_fn(simple_tokenizer, "Alice", "Bob", context_format="evidence")
+    compressor = ClaudeContextCompressor(
+        ClaudeContextPolicy(recent_turns=1, retrieval_turns=0, max_summary_turns=2)
+    )
+
+    result = compressor.compress(turns, "When does the Taipei train leave?", 220, fn)
+
+    assert "1" in result.metadata["artifact_stub_turn_ids"]
+    assert "2" not in result.metadata["artifact_stub_turn_ids"]
+    assert "2" in result.kept_turn_ids
+    relevant = [item for item in result.metadata["clearing_rankings"] if item["turn_id"] == "2"][0]
+    assert "question_relevant" in relevant["protected_reasons"]
+
+
+def test_claude_context_feature_flag_disables_tool_clearing(simple_tokenizer):
+    turns = [
+        Turn(dia_id="1", speaker="Bob", text="[tool_result] command output should remain raw.", session_id="s1"),
+        Turn(dia_id="2", speaker="Alice", text="Current turn.", session_id="s2"),
+    ]
+    fn = make_format_and_count_fn(simple_tokenizer, "Alice", "Bob", context_format="evidence")
+    compressor = ClaudeContextCompressor(
+        ClaudeContextPolicy(recent_turns=1, enable_tool_clearing=False, enable_compaction=False)
+    )
+
+    result = compressor.compress(turns, "What remains?", 220, fn)
+
+    assert "clear_tool_uses_20250919" not in result.metadata["server_side_items"]
+    assert result.metadata["artifact_stub_turn_ids"] == []
+    assert result.kept_turn_ids == ["1", "2"]
+    assert result.metadata["clearing_policy"]["enable_tool_clearing"] is False

@@ -37,6 +37,16 @@ class ExperimentConfig:
     claude_max_summary_turns: int = 12
     claude_summary_preview_chars: int = 120
     claude_stub_preview_chars: int = 80
+    claude_enable_tool_clearing: bool = True
+    claude_enable_thinking_clearing: bool = True
+    claude_enable_compaction: bool = True
+    claude_enable_artifact_stubs: bool = True
+    claude_enable_cache_awareness: bool = True
+    claude_tool_clear_threshold_tokens: int | None = None
+    claude_thinking_clear_threshold_tokens: int | None = None
+    claude_compaction_threshold_tokens: int | None = None
+    claude_cache_prefix_turns: int = 0
+    claude_allow_cache_invalidation_on_emergency: bool = True
 
     @classmethod
     def from_yaml(cls, file_path: str | Path) -> "ExperimentConfig":

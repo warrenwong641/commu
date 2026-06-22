@@ -29,6 +29,16 @@ claude_retrieval_turns: 2
 claude_max_summary_turns: 12
 claude_summary_preview_chars: 120
 claude_stub_preview_chars: 80
+claude_enable_tool_clearing: true
+claude_enable_thinking_clearing: true
+claude_enable_compaction: true
+claude_enable_artifact_stubs: true
+claude_enable_cache_awareness: true
+claude_tool_clear_threshold_tokens: null
+claude_thinking_clear_threshold_tokens: null
+claude_compaction_threshold_tokens: null
+claude_cache_prefix_turns: 0
+claude_allow_cache_invalidation_on_emergency: true
 last_k_default: 20
 max_samples: 32
 sample_strategy: stratified

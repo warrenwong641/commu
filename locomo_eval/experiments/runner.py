@@ -109,6 +109,16 @@ class ExperimentRunner:
                     max_summary_turns=self.config.claude_max_summary_turns,
                     summary_preview_chars=self.config.claude_summary_preview_chars,
                     stub_preview_chars=self.config.claude_stub_preview_chars,
+                    enable_tool_clearing=self.config.claude_enable_tool_clearing,
+                    enable_thinking_clearing=self.config.claude_enable_thinking_clearing,
+                    enable_compaction=self.config.claude_enable_compaction,
+                    enable_artifact_stubs=self.config.claude_enable_artifact_stubs,
+                    enable_cache_awareness=self.config.claude_enable_cache_awareness,
+                    tool_clear_threshold_tokens=self.config.claude_tool_clear_threshold_tokens,
+                    thinking_clear_threshold_tokens=self.config.claude_thinking_clear_threshold_tokens,
+                    compaction_threshold_tokens=self.config.claude_compaction_threshold_tokens,
+                    cache_prefix_turns=self.config.claude_cache_prefix_turns,
+                    allow_cache_invalidation_on_emergency=self.config.claude_allow_cache_invalidation_on_emergency,
                 )
             )
         raise ValueError(f"Unknown compression method: {method}")

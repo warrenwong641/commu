@@ -24,6 +24,7 @@ _TOOL_HINTS = (
     "stderr",
 )
 _THINKING_HINTS = ("[thinking]", "<thinking", "thinking:", "reasoning:")
+_CONSTRAINT_HINTS = ("must", "always", "never", "do not", "don't", "remember", "important", "requirement", "constraint")
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,16 @@ class ClaudeContextPolicy:
     summary_preview_chars: int = 120
     stub_preview_chars: int = 80
     min_recent_turns: int = 1
+    enable_tool_clearing: bool = True
+    enable_thinking_clearing: bool = True
+    enable_compaction: bool = True
+    enable_artifact_stubs: bool = True
+    enable_cache_awareness: bool = True
+    tool_clear_threshold_tokens: int | None = None
+    thinking_clear_threshold_tokens: int | None = None
+    compaction_threshold_tokens: int | None = None
+    cache_prefix_turns: int = 0
+    allow_cache_invalidation_on_emergency: bool = True
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,30 @@ class ContextEdit:
             "type": self.edit_type,
             "turn_ids": self.turn_ids,
             "cleared_input_tokens": self.cleared_input_tokens,
+        }
+
+
+@dataclass(frozen=True)
+class ClearCandidate:
+    turn: Turn
+    kind: str
+    token_cost: int
+    age_score: float
+    relevance_score: float
+    noise_score: float
+    protected_reasons: list[str]
+    clear_score: float
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "turn_id": self.turn.dia_id,
+            "kind": self.kind,
+            "token_cost": self.token_cost,
+            "age_score": round(self.age_score, 4),
+            "relevance_score": round(self.relevance_score, 4),
+            "noise_score": round(self.noise_score, 4),
+            "protected_reasons": self.protected_reasons,
+            "clear_score": round(self.clear_score, 4),
         }
 
 
@@ -142,18 +177,52 @@ class ClaudeContextCompressor(BaseCompressor):
         force_minimal_summary: bool = False,
         summary_turn_limit: int | None = None,
     ) -> CompressedResult:
+        original_tokens = self._count_turn_tokens(turns, format_and_count_fn)
         recent = list(turns[-recent_count:]) if recent_count > 0 else []
         recent_ids = {turn.dia_id for turn in recent}
+        stable_prefix = self._stable_prefix_turns(turns, recent_ids)
+        stable_prefix_ids = {turn.dia_id for turn in stable_prefix}
+        protected_ids = set(recent_ids)
+        if self.policy.enable_cache_awareness and (
+            not force_minimal_summary or not self.policy.allow_cache_invalidation_on_emergency
+        ):
+            protected_ids.update(stable_prefix_ids)
+        cache_invalidated_by_emergency = bool(stable_prefix_ids - protected_ids)
         stale = [turn for turn in turns if turn.dia_id not in recent_ids]
 
-        tool_turns = [turn for turn in stale if self._is_tool_like(turn)]
-        thinking_turns = [turn for turn in stale if turn not in tool_turns and self._is_thinking_like(turn)]
+        clear_candidates = self._rank_clear_candidates(stale, question, original_tokens, protected_ids, turns, format_and_count_fn)
+        protected_candidate_ids = {candidate.turn.dia_id for candidate in clear_candidates if candidate.protected_reasons}
+        effective_protected_ids = protected_ids | protected_candidate_ids
+        tool_turns = [
+            candidate.turn
+            for candidate in clear_candidates
+            if candidate.kind == "tool"
+            and not candidate.protected_reasons
+            and self.policy.enable_tool_clearing
+            and self._threshold_met(original_tokens, self.policy.tool_clear_threshold_tokens)
+        ]
+        thinking_turns = [
+            candidate.turn
+            for candidate in clear_candidates
+            if candidate.kind == "thinking"
+            and not candidate.protected_reasons
+            and self.policy.enable_thinking_clearing
+            and self._threshold_met(original_tokens, self.policy.thinking_clear_threshold_tokens)
+        ]
+        chronological_key = lambda turn: self._turn_sort_key(turns)(turn.dia_id)
+        tool_turns = sorted(tool_turns, key=chronological_key)
+        thinking_turns = sorted(thinking_turns, key=chronological_key)
         compactable = [turn for turn in stale if turn not in tool_turns and turn not in thinking_turns]
         retrieval_limit = 0 if force_minimal_summary else self.policy.retrieval_turns
         retrieved = self._retrieve_relevant(compactable, question, retrieval_limit)
         retrieved_ids = {turn.dia_id for turn in retrieved}
 
-        compaction_sources = [turn for turn in compactable if turn.dia_id not in retrieved_ids]
+        should_compact = self.policy.enable_compaction and self._threshold_met(original_tokens, self.policy.compaction_threshold_tokens)
+        compaction_sources = [
+            turn
+            for turn in compactable
+            if turn.dia_id not in retrieved_ids and turn.dia_id not in effective_protected_ids
+        ] if should_compact else []
         max_summary_turns = self.policy.max_summary_turns if summary_turn_limit is None else summary_turn_limit
         summary_turns = compaction_sources[-max_summary_turns:] if max_summary_turns > 0 else []
         if force_minimal_summary:
@@ -167,9 +236,24 @@ class ClaudeContextCompressor(BaseCompressor):
             recent_turns=recent,
             force_minimal_summary=force_minimal_summary,
         )
-        kept = self._dedupe_preserve_order([*retrieved, *recent])
+        retained_stale = [
+            turn
+            for turn in compactable
+            if (not should_compact or turn.dia_id in effective_protected_ids) and turn.dia_id not in retrieved_ids
+        ]
+        kept = self._dedupe_preserve_order([*stable_prefix, *retained_stale, *retrieved, *recent])
         text, token_count = format_and_count_fn(kept, extra_context)
         edits = self._build_edits(tool_turns, thinking_turns, compaction_sources, format_and_count_fn)
+        cache_metadata = self._cache_metadata(
+            turns=turns,
+            stable_prefix=stable_prefix,
+            edited_turn_ids={turn.dia_id for turn in [*tool_turns, *thinking_turns, *compaction_sources]},
+            cache_invalidated_by_emergency=cache_invalidated_by_emergency,
+        )
+        protected_turn_ids = sorted(
+            {candidate.turn.dia_id for candidate in clear_candidates if candidate.protected_reasons},
+            key=self._turn_sort_key(turns),
+        )
 
         return CompressedResult(
             kept_turns=kept,
@@ -182,7 +266,9 @@ class ClaudeContextCompressor(BaseCompressor):
                 "mode": "claude_code_like_projection",
                 "canonical_transcript_turns": len(turns),
                 "api_visible_turns": len(kept),
+                "original_tokens": original_tokens,
                 "recent_turn_ids": [turn.dia_id for turn in recent],
+                "stable_prefix_turn_ids": [turn.dia_id for turn in stable_prefix],
                 "retrieved_turn_ids": [turn.dia_id for turn in retrieved],
                 "compaction_source_turn_ids": [turn.dia_id for turn in compaction_sources],
                 "compaction_summary_turn_ids": [turn.dia_id for turn in summary_turns],
@@ -190,9 +276,14 @@ class ClaudeContextCompressor(BaseCompressor):
                 "thinking_cleared_turn_ids": [turn.dia_id for turn in thinking_turns],
                 "server_side_items": self._server_side_items(tool_turns, thinking_turns, compaction_sources),
                 "applied_edits": [edit.asdict() for edit in edits],
+                "clearing_rankings": [candidate.asdict() for candidate in clear_candidates],
+                "clearing_policy": self._policy_metadata(),
+                "protected_turn_ids": protected_turn_ids,
+                "clear_reasons": self._clear_reasons(clear_candidates, tool_turns, thinking_turns),
                 "compaction_block_id": self._block_id(summary_turns, retrieved, recent),
                 "ignored_before_latest_compaction": bool(compaction_sources or tool_turns or thinking_turns),
                 "force_minimal_summary": force_minimal_summary,
+                **cache_metadata,
             },
         )
 
@@ -249,9 +340,12 @@ class ClaudeContextCompressor(BaseCompressor):
         if compaction_sources:
             lines.append("Compacted prior state:")
             lines.extend(self._format_turn(turn, "summary", minimal=force_minimal_summary) for turn in compaction_sources)
-        if tool_turns:
+        if tool_turns and self.policy.enable_artifact_stubs:
             lines.append("Externalized artifact stubs after clear_tool_uses_20250919:")
             lines.extend(self._format_stub(turn) for turn in tool_turns)
+        elif tool_turns:
+            lines.append("Cleared tool blocks after clear_tool_uses_20250919:")
+            lines.extend(f"- turn={turn.dia_id} speaker={turn.speaker}" for turn in tool_turns)
         if thinking_turns:
             lines.append("Cleared thinking blocks after clear_thinking_20251015:")
             lines.extend(f"- turn={turn.dia_id} speaker={turn.speaker}" for turn in thinking_turns)
@@ -289,6 +383,153 @@ class ClaudeContextCompressor(BaseCompressor):
         chosen = [turn for _, _, turn in scored[:limit]]
         index_by_id = {turn.dia_id: index for index, turn in enumerate(turns)}
         return sorted(chosen, key=lambda turn: index_by_id[turn.dia_id])
+
+    def _rank_clear_candidates(
+        self,
+        stale_turns: list[Turn],
+        question: str,
+        original_tokens: int,
+        protected_ids: set[str],
+        all_turns: list[Turn],
+        format_and_count_fn,
+    ) -> list[ClearCandidate]:
+        del original_tokens
+        query_terms = self._terms(question)
+        max_index = max(1, len(all_turns) - 1)
+        index_by_id = {turn.dia_id: index for index, turn in enumerate(all_turns)}
+        candidates: list[ClearCandidate] = []
+        for turn in stale_turns:
+            kind = self._candidate_kind(turn)
+            token_cost = self._count_turn_tokens([turn], format_and_count_fn)
+            turn_terms = self._terms(turn.text)
+            overlap = len(query_terms & turn_terms)
+            relevance_score = overlap / max(1, len(query_terms))
+            age_score = 1.0 - (index_by_id.get(turn.dia_id, max_index) / max_index)
+            noise_score = self._noise_score(turn, kind)
+            protected_reasons = self._protected_reasons(turn, relevance_score, protected_ids)
+            clear_score = (token_cost / 100.0) + age_score + noise_score - (2.5 * relevance_score)
+            if protected_reasons:
+                clear_score -= 100.0
+            candidates.append(
+                ClearCandidate(
+                    turn=turn,
+                    kind=kind,
+                    token_cost=token_cost,
+                    age_score=age_score,
+                    relevance_score=relevance_score,
+                    noise_score=noise_score,
+                    protected_reasons=protected_reasons,
+                    clear_score=clear_score,
+                )
+            )
+        candidates.sort(key=lambda candidate: (-candidate.clear_score, index_by_id.get(candidate.turn.dia_id, 0)))
+        return candidates
+
+    def _candidate_kind(self, turn: Turn) -> str:
+        if self._is_tool_like(turn):
+            return "tool"
+        if self._is_thinking_like(turn):
+            return "thinking"
+        return "normal"
+
+    def _noise_score(self, turn: Turn, kind: str) -> float:
+        kind_score = {"tool": 1.0, "thinking": 0.85, "normal": 0.0}[kind]
+        length_score = min(len(turn.text) / 1_200.0, 1.0)
+        repeat_score = 0.3 if self._looks_repetitive(turn.text) else 0.0
+        return kind_score + length_score + repeat_score
+
+    def _protected_reasons(self, turn: Turn, relevance_score: float, protected_ids: set[str]) -> list[str]:
+        reasons: list[str] = []
+        if turn.dia_id in protected_ids:
+            reasons.append("cache_or_recent_boundary")
+        if relevance_score >= 0.30:
+            reasons.append("question_relevant")
+        lower = turn.text.lower()
+        if any(hint in lower for hint in _CONSTRAINT_HINTS):
+            reasons.append("user_constraint")
+        return reasons
+
+    def _stable_prefix_turns(self, turns: list[Turn], recent_ids: set[str]) -> list[Turn]:
+        if not self.policy.enable_cache_awareness or self.policy.cache_prefix_turns <= 0:
+            return []
+        stable: list[Turn] = []
+        for turn in turns:
+            if turn.dia_id in recent_ids:
+                continue
+            stable.append(turn)
+            if len(stable) >= self.policy.cache_prefix_turns:
+                break
+        return stable
+
+    def _cache_metadata(
+        self,
+        turns: list[Turn],
+        stable_prefix: list[Turn],
+        edited_turn_ids: set[str],
+        cache_invalidated_by_emergency: bool,
+    ) -> dict[str, Any]:
+        stable_ids = [turn.dia_id for turn in stable_prefix]
+        stable_id_set = set(stable_ids)
+        edits_before_boundary = sorted(stable_id_set & edited_turn_ids, key=self._turn_sort_key(turns))
+        return {
+            "cache_awareness_enabled": self.policy.enable_cache_awareness,
+            "cache_boundary_index": len(stable_prefix),
+            "stable_prefix_turn_ids": stable_ids,
+            "stable_prefix_hash": self._prefix_hash(stable_prefix),
+            "edits_before_cache_boundary": edits_before_boundary,
+            "cache_invalidated_by_edits": bool(edits_before_boundary),
+            "cache_invalidated_by_emergency": cache_invalidated_by_emergency,
+        }
+
+    def _policy_metadata(self) -> dict[str, Any]:
+        return {
+            "enable_tool_clearing": self.policy.enable_tool_clearing,
+            "enable_thinking_clearing": self.policy.enable_thinking_clearing,
+            "enable_compaction": self.policy.enable_compaction,
+            "enable_artifact_stubs": self.policy.enable_artifact_stubs,
+            "enable_cache_awareness": self.policy.enable_cache_awareness,
+            "tool_clear_threshold_tokens": self.policy.tool_clear_threshold_tokens,
+            "thinking_clear_threshold_tokens": self.policy.thinking_clear_threshold_tokens,
+            "compaction_threshold_tokens": self.policy.compaction_threshold_tokens,
+            "cache_prefix_turns": self.policy.cache_prefix_turns,
+            "allow_cache_invalidation_on_emergency": self.policy.allow_cache_invalidation_on_emergency,
+        }
+
+    def _clear_reasons(
+        self,
+        candidates: list[ClearCandidate],
+        tool_turns: list[Turn],
+        thinking_turns: list[Turn],
+    ) -> dict[str, str]:
+        cleared_ids = {turn.dia_id for turn in [*tool_turns, *thinking_turns]}
+        reasons: dict[str, str] = {}
+        for candidate in candidates:
+            if candidate.turn.dia_id in cleared_ids:
+                reasons[candidate.turn.dia_id] = (
+                    f"{candidate.kind} block cleared; score={candidate.clear_score:.4f}; "
+                    f"tokens={candidate.token_cost}; noise={candidate.noise_score:.4f}; relevance={candidate.relevance_score:.4f}"
+                )
+        return reasons
+
+    def _threshold_met(self, original_tokens: int, threshold: int | None) -> bool:
+        return threshold is None or original_tokens >= threshold
+
+    def _prefix_hash(self, turns: list[Turn]) -> str | None:
+        if not turns:
+            return None
+        payload = "\n".join(f"{turn.dia_id}\0{turn.speaker}\0{turn.text}" for turn in turns)
+        return "cache_" + hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+    def _turn_sort_key(self, turns: list[Turn]):
+        index_by_id = {turn.dia_id: index for index, turn in enumerate(turns)}
+        return lambda turn_id: index_by_id.get(turn_id, len(turns))
+
+    def _looks_repetitive(self, text: str) -> bool:
+        terms = list(_WORD_RE.finditer(text.lower()))
+        if len(terms) < 16:
+            return False
+        words = [term.group(0) for term in terms]
+        return len(set(words)) / len(words) < 0.45
 
     def _is_tool_like(self, turn: Turn) -> bool:
         text = turn.text.lower()
