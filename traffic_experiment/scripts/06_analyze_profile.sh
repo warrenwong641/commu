@@ -14,7 +14,7 @@ if [[ ! -f "${RESULTS}" ]]; then
   exit 2
 fi
 
-"${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli analyze \
+"${RUNNER_PYTHON}" -P -m traffic_experiment.traffic_measure.cli analyze \
   --results "${RESULTS}" \
   --output "${OUTPUT}"
 
