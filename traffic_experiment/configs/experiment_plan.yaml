@@ -36,7 +36,10 @@ generation:
   seed: 42  # Use only when the selected backend supports it.
 
 measurement:
-  run_serially: true
+  run_serially_per_worker: true
+  parallel_workers: 2
+  isolation: one_gpu_and_tcp_port_per_worker
+  assignment: deterministic_disjoint_sample_blocks
   observation_seconds: 30
   setup_and_teardown_seconds_per_call: 5
   primary_connection_mode: warm
@@ -52,7 +55,9 @@ backends:
     enabled: true
     role: primary_controlled
     base_url: http://127.0.0.1:8000/v1
-    model: Qwen/Qwen3-8B
+    model: Qwen/Qwen3.5-9B
+    max_model_len: 65536
+    language_model_only: true
     api_key_env: LOCAL_VLLM_API_KEY
     pin_model_revision: true
 

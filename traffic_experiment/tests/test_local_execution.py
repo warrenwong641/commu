@@ -7,7 +7,12 @@ from pathlib import Path
 
 from traffic_experiment.traffic_measure.common import read_jsonl, write_jsonl
 from traffic_experiment.traffic_measure.prepare import merge_manifest_shards, prepare_manifest
-from traffic_experiment.traffic_measure.runner import RunSettings, parse_sse_lines, run_experiment
+from traffic_experiment.traffic_measure.runner import (
+    RunSettings,
+    _trial_rows,
+    parse_sse_lines,
+    run_experiment,
+)
 
 
 def _write_minimal_locomo(path: Path, count: int = 1) -> None:
@@ -102,6 +107,42 @@ def test_parse_streaming_response():
     assert text == "Taipei"
     assert usage == {"prompt_tokens": 10, "completion_tokens": 2}
     assert response_id == "abc"
+
+
+def test_trial_workers_are_disjoint_balanced_and_keep_sample_conditions_together():
+    manifest = [
+        {
+            "sample_id": f"sample-{sample}",
+            "request_id": f"sample-{sample}::{condition}",
+            "condition": condition,
+        }
+        for sample in range(8)
+        for condition in ("no_compression", "longllmlingua_2x", "longllmlingua_4x")
+    ]
+    worker_trials = [
+        _trial_rows(
+            manifest,
+            sample_limit=8,
+            repetitions=3,
+            seed=42,
+            worker_count=2,
+            worker_index=worker,
+        )
+        for worker in range(2)
+    ]
+
+    keys = [
+        {(row["request_id"], repetition) for row, repetition in trials}
+        for trials in worker_trials
+    ]
+    sample_sets = [
+        {row["sample_id"] for row, _ in trials}
+        for trials in worker_trials
+    ]
+    assert len(worker_trials[0]) == len(worker_trials[1]) == 36
+    assert keys[0].isdisjoint(keys[1])
+    assert sample_sets[0].isdisjoint(sample_sets[1])
+    assert len(sample_sets[0] | sample_sets[1]) == 8
 
 
 class _VllmLikeHandler(BaseHTTPRequestHandler):

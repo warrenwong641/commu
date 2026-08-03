@@ -7,6 +7,11 @@ require_command "${VLLM_BIN}"
 echo "Starting ${VLLM_MODEL} on ${VLLM_HOST}:${VLLM_PORT}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 
+revision_args=()
+if [[ -n "${VLLM_MODEL_REVISION:-}" ]]; then
+  revision_args=(--revision "${VLLM_MODEL_REVISION}")
+fi
+
 exec "${VLLM_BIN}" serve "${VLLM_MODEL}" \
   --host "${VLLM_HOST}" \
   --port "${VLLM_PORT}" \
@@ -15,4 +20,7 @@ exec "${VLLM_BIN}" serve "${VLLM_MODEL}" \
   --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
   --max-model-len "${MAX_MODEL_LEN}" \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+  --reasoning-parser qwen3 \
+  --language-model-only \
+  "${revision_args[@]}" \
   --generation-config vllm

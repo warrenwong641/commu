@@ -59,7 +59,7 @@ Compression metadata and prompt hashes are saved in the manifest.
 LongLLMLingua loads a separate compressor model. Let the command exit and confirm
 its GPU memory has been released before starting Qwen.
 
-## Start Qwen3-8B
+## Start Qwen3.5-9B
 
 In terminal 1:
 
@@ -68,6 +68,14 @@ In terminal 1:
 ```
 
 Wait until the server reports that it is listening.
+
+For the controlled two-GPU profile, start one server per GPU and port:
+
+```bash
+./scripts/03_start_vllm_dual.sh
+```
+
+The default mapping is GPU 0 to port 8000 and GPU 1 to port 8001.
 
 ## Run a pilot
 
@@ -86,11 +94,23 @@ It checks the endpoint and capture interface first, then writes:
 
 Inspect these outputs before starting the full experiment.
 
+For the two-GPU isolated pilot:
+
+```bash
+PROFILE=pilot ./scripts/run_local_experiment_parallel.sh
+```
+
+Each worker runs 36 serial trials. The workers execute concurrently with
+port-specific captures, then their disjoint results are validated and merged.
+
 ## Run the main experiment
 
 ```bash
 PROFILE=main ./scripts/run_local_experiment.sh
 ```
+
+Use `PROFILE=main ./scripts/run_local_experiment_parallel.sh` for the two-GPU
+isolated profile.
 
 This performs 32 samples x 3 conditions x 5 repetitions = 480 measured requests.
 The runner is resumable: restarting the same profile skips successful

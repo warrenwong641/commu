@@ -61,6 +61,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--capture-interface", default="")
     run.add_argument("--capture-filter", default="tcp port 8000")
     run.add_argument("--capture-startup-delay-seconds", type=float, default=0.5)
+    run.add_argument("--worker-count", type=int, default=1)
+    run.add_argument("--worker-index", type=int, default=0)
     run.add_argument("--no-capture", action="store_true")
     run.add_argument("--no-wait-after-request", action="store_true", help=argparse.SUPPRESS)
 
@@ -121,6 +123,8 @@ def main() -> int:
                 capture_interface=args.capture_interface,
                 capture_filter=args.capture_filter,
                 capture_startup_delay_seconds=args.capture_startup_delay_seconds,
+                worker_count=args.worker_count,
+                worker_index=args.worker_index,
                 no_capture=args.no_capture,
                 no_wait_after_request=args.no_wait_after_request,
             )

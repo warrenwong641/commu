@@ -33,6 +33,8 @@ class RunSettings:
     capture_interface: str
     capture_filter: str
     capture_startup_delay_seconds: float
+    worker_count: int = 1
+    worker_index: int = 0
     no_capture: bool = False
     no_wait_after_request: bool = False
 
@@ -73,22 +75,33 @@ def _trial_rows(
     sample_limit: int,
     repetitions: int,
     seed: int,
+    worker_count: int = 1,
+    worker_index: int = 0,
 ) -> list[tuple[dict[str, Any], int]]:
     sample_ids = sorted({str(row["sample_id"]) for row in manifest})
     if sample_limit <= 0:
         raise ValueError("sample limit must be positive")
     if repetitions <= 0:
         raise ValueError("repetitions must be positive")
+    if worker_count <= 0:
+        raise ValueError("worker count must be positive")
+    if worker_index < 0 or worker_index >= worker_count:
+        raise ValueError("worker index must be in [0, worker_count)")
     if len(sample_ids) < sample_limit:
         raise ValueError(f"manifest has {len(sample_ids)} samples, but {sample_limit} were requested")
-    chosen = set(random.Random(seed).sample(sample_ids, sample_limit))
+    chosen_order = random.Random(seed).sample(sample_ids, sample_limit)
+    chosen = {
+        sample_id
+        for position, sample_id in enumerate(chosen_order)
+        if position % worker_count == worker_index
+    }
     trials = [
         (row, repetition)
         for row in manifest
         if str(row["sample_id"]) in chosen
         for repetition in range(1, repetitions + 1)
     ]
-    random.Random(seed + 1).shuffle(trials)
+    random.Random(seed + 1 + worker_index).shuffle(trials)
     return trials
 
 
@@ -159,7 +172,14 @@ def health_check(base_url: str, api_key: str, timeout_seconds: float = 10) -> di
 
 def run_experiment(settings: RunSettings) -> Path:
     manifest = read_jsonl(settings.manifest_path)
-    trials = _trial_rows(manifest, settings.sample_limit, settings.repetitions, settings.seed)
+    trials = _trial_rows(
+        manifest,
+        settings.sample_limit,
+        settings.repetitions,
+        settings.seed,
+        worker_count=settings.worker_count,
+        worker_index=settings.worker_index,
+    )
     results_path = settings.output_dir / "results.jsonl"
     captures_dir = settings.output_dir / "captures"
     completed = _completed_keys(results_path)
@@ -231,6 +251,8 @@ def run_experiment(settings: RunSettings) -> Path:
                 "question_id": request["question_id"],
                 "condition": request["condition"],
                 "repetition": repetition,
+                "worker_count": settings.worker_count,
+                "worker_index": settings.worker_index,
                 "backend": "local_vllm",
                 "backend_ip": backend_ip,
                 "backend_port": backend_port,

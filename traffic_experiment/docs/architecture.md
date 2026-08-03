@@ -8,7 +8,7 @@ LoCoMo runner container
         | OpenAI-compatible HTTP/SSE
         v
 isolated bridge or veth pair ---- dumpcap on the bridge ---- vLLM container
-                                                        Qwen/Qwen3-8B
+                                                        Qwen/Qwen3.5-9B
 ```
 
 Run the client and vLLM server in separate containers or network namespaces.
@@ -18,6 +18,12 @@ traffic from entering the measurement and makes client-to-server direction expli
 vLLM exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Streaming uses
 server-sent events (SSE) over HTTP, normally carried by TCP. This lets the same
 logical request interface drive the local and OpenRouter backends.
+
+For the two-GPU local profile, two independent vLLM processes listen on ports
+8000 and 8001. Each runner receives a disjoint deterministic set of complete
+sample blocks, and each dumpcap filter selects only its worker's TCP port. Requests
+remain serial within a worker; concurrency exists only across isolated workers.
+GPU/worker identity is recorded and treated as a blocking factor in analysis.
 
 ## External API path
 

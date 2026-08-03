@@ -16,8 +16,12 @@ network trials reuse the exact artifact.
 
 ## Phase 1: validate the local path
 
-1. Pin the Qwen3-8B model revision and vLLM version.
+1. Pin the Qwen3.5-9B model revision, tokenizer revision, and vLLM container or
+   wheel digest.
 2. Start vLLM and perform unmeasured warm-up calls until latency stabilizes.
+   Include the longest uncompressed prompt in this preflight; the server must
+   accept it without truncation. Set the context limit from the target model's
+   tokenizer count, not the compressor tokenizer count.
 3. Verify that the client reaches vLLM only across the measured interface.
 4. Run one request and confirm that the application timestamps fall inside the
    packet-capture timestamps.
@@ -27,8 +31,13 @@ network trials reuse the exact artifact.
 
 Run 8 samples x 3 conditions x 3 repetitions = 72 calls per backend.
 
-- Randomize trial order within each backend using the fixed seed.
-- Keep backends in separate blocks; never overlap captures.
+- Randomize trial order within each worker using the fixed seed.
+- For a two-GPU local run, assign complete sample blocks (all three conditions
+  and repetitions) to one GPU. Use one vLLM process and one TCP port per GPU.
+  Port-specific capture filters prevent cross-worker packet attribution.
+- Treat GPU/worker as a blocking factor. Do not pool the workers as if their
+  hardware were identical replicates without reporting the block.
+- Keep external backends in separate blocks; never overlap external captures.
 - Use a 30-second observation window and approximately 5 seconds for setup/teardown.
 - Log failures without silently retrying.
 - Check token counts, captures, and result completeness before moving forward.
@@ -49,7 +58,7 @@ statistical analysis justifies it.
 
 Recommended backend order:
 
-1. local vLLM/Qwen3-8B;
+1. local vLLM/Qwen3.5-9B;
 2. OpenRouter/Qwen3-8B with one pinned provider and fallback disabled;
 3. direct Gemini 3.5 Flash-Lite.
 
@@ -71,10 +80,25 @@ compression condition and report:
 
 Use paired comparisons because the same sample appears in every compression
 condition. Treat backend as an environment factor, not merely another replicate.
+For local parallel runs, estimate the compression effect within sample and include
+worker/GPU as a fixed blocking factor. Report medians, interquartile ranges,
+paired effect sizes, and bootstrap 95% confidence intervals. Correct families of
+multiple comparisons (for example, Holm correction), publish all exclusions, and
+run a sensitivity analysis with failed trials retained as failures.
+
+Before the main run, use pilot variance to justify the repetition count or perform
+a power analysis for the smallest traffic reduction considered practically
+important. Calibrate capture overhead under the same two-worker load used in the
+experiment, and report clock source, versions, GPU model, CPU, memory, kernel,
+CUDA, driver, vLLM, model revision, tokenizer revision, command lines, seeds,
+manifest hash, and PCAP hashes.
 
 ## Important confounders
 
 - Provider-side batching, caching, routing, and model revision can change latency.
+- Parallel workers share CPU scheduling, memory bandwidth, storage, and the host
+  network stack. Run a serial calibration subset on both GPUs and report whether
+  concurrent execution changes the primary byte or latency metrics.
 - Reusing prompts may trigger provider caching even though request bytes are still
   transmitted; record cache-related usage fields when exposed.
 - Streaming chunk boundaries are provider-specific and affect packet counts.
