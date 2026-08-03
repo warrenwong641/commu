@@ -29,6 +29,10 @@ For the two-GPU pilot, use `scripts/08_run_transport_profile_parallel.sh`.
 It assigns disjoint complete sample blocks to ports 8000 and 8001 through separate
 secure listeners, merges the 72 rows, and runs tshark analysis automatically.
 
+After starting the TLS QA pilot, `scripts/10_run_local_transport_pipeline.sh`
+can supervise it, validate all captures, then run the HTTP/3 QA pilot and the
+no-compression LoCoMo event-summary smoke pilots over both secure transports.
+
 ## External API pilot
 
 Fill the OpenRouter or Gemini variables in the untracked `server.env`. OpenRouter

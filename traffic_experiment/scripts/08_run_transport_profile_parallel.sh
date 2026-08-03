@@ -47,8 +47,12 @@ if [[ ! -f "${CA_FILE}" ]]; then
   exit 2
 fi
 
-MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH}")"
-RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/local_vllm_${TRANSPORT}_${PROFILE}"
+MANIFEST_PATH_EFFECTIVE="${MANIFEST_PATH_OVERRIDE:-${MANIFEST_PATH}}"
+RUNS_ROOT_EFFECTIVE="${RUNS_ROOT_OVERRIDE:-${RUNS_ROOT}}"
+MAX_OUTPUT_TOKENS_EFFECTIVE="${MAX_OUTPUT_TOKENS_OVERRIDE:-${MAX_OUTPUT_TOKENS}}"
+OBSERVATION_SECONDS_EFFECTIVE="${OBSERVATION_SECONDS_OVERRIDE:-${OBSERVATION_SECONDS}}"
+MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH_EFFECTIVE}")"
+RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")/local_vllm_${TRANSPORT}_${PROFILE}"
 mkdir -p "${RUN_DIR}"
 
 pids=()
@@ -67,9 +71,9 @@ for worker in 0 1; do
     --samples "${SAMPLES}" \
     --repetitions "${REPETITIONS}" \
     --seed "${RANDOM_SEED}" \
-    --max-output-tokens "${MAX_OUTPUT_TOKENS}" \
+    --max-output-tokens "${MAX_OUTPUT_TOKENS_EFFECTIVE}" \
     --request-timeout-seconds "${REQUEST_TIMEOUT_SECONDS}" \
-    --observation-seconds "${OBSERVATION_SECONDS}" \
+    --observation-seconds "${OBSERVATION_SECONDS_EFFECTIVE}" \
     --capture-interface "${CAPTURE_INTERFACE}" \
     --capture-filter "${FILTER_PROTOCOL} port ${port}" \
     --worker-count 2 \
