@@ -66,6 +66,23 @@ def _build_messages(system_prompt: str, context: str, question: str) -> list[dic
 
 
 def _event_reference(conversation: Conversation, speaker: str) -> str:
+    def reference_strings(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [
+                text
+                for item in value
+                for text in reference_strings(item)
+            ]
+        if isinstance(value, dict):
+            return [
+                text
+                for item in value.values()
+                for text in reference_strings(item)
+            ]
+        return [str(value)] if value is not None else []
+
     references: list[str] = []
     speaker_lower = speaker.casefold()
     aliases = {speaker_lower}
@@ -81,13 +98,22 @@ def _event_reference(conversation: Conversation, speaker: str) -> str:
                 matching = [
                     item for item in value.values() if speaker_lower in str(item).casefold()
                 ]
-            references.extend(str(item) for item in matching if item)
+            references.extend(
+                text
+                for item in matching
+                for text in reference_strings(item)
+                if text
+            )
         elif isinstance(value, list):
             references.extend(
-                str(item) for item in value if speaker_lower in str(item).casefold()
+                text
+                for item in value
+                if speaker_lower in str(item).casefold()
+                for text in reference_strings(item)
+                if text
             )
         elif value:
-            references.append(str(value))
+            references.extend(reference_strings(value))
     return "\n".join(dict.fromkeys(references))
 
 

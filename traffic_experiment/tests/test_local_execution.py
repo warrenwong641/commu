@@ -119,9 +119,9 @@ def test_prepare_event_summary_manifest(tmp_path):
                 ],
             },
             "event_summary": {
-                "session_1_summary": {
-                    "Alice": "Alice moved to Taipei.",
-                    "Bob": "Bob started a new job.",
+                "events_session_1": {
+                    "Alice": ["Alice moved to Taipei."],
+                    "Bob": ["Bob started a new job."],
                 }
             },
             "qa": [],
