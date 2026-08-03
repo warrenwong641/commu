@@ -16,6 +16,10 @@ fi
 source "${ENV_FILE}"
 
 RUNNER_PYTHON="${RUNNER_PYTHON:-${EXPERIMENT_ROOT}/.venv-runner/bin/python}"
+if [[ -n "${VLLM_BIN:-}" ]]; then
+  VLLM_BIN_DIR="$(cd -- "$(dirname -- "${VLLM_BIN}")" && pwd)"
+  export PATH="${VLLM_BIN_DIR}:${PATH}"
+fi
 export PYTHONPATH="${REPOSITORY_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export LOCAL_VLLM_API_KEY
 export CUDA_VISIBLE_DEVICES
