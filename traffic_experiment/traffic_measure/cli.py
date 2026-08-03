@@ -6,7 +6,12 @@ import os
 from pathlib import Path
 
 from .analyze import analyze_results
-from .prepare import DEFAULT_SYSTEM_PROMPT, SUPPORTED_CONDITIONS, prepare_manifest
+from .prepare import (
+    DEFAULT_SYSTEM_PROMPT,
+    SUPPORTED_CONDITIONS,
+    merge_manifest_shards,
+    prepare_manifest,
+)
 from .runner import RunSettings, health_check, run_experiment
 
 
@@ -28,6 +33,13 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--compressor-model", default="NousResearch/Llama-2-7b-hf")
     prepare.add_argument("--compressor-device", default="cuda")
     prepare.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
+    prepare.add_argument("--shard-count", type=int, default=1)
+    prepare.add_argument("--shard-index", type=int, default=0)
+
+    merge = subparsers.add_parser("merge-manifests", help="merge deterministic preparation shards")
+    merge.add_argument("--input", type=Path, nargs="+", required=True)
+    merge.add_argument("--output", type=Path, required=True)
+    merge.add_argument("--expected-rows", type=int)
 
     check = subparsers.add_parser("check", help="verify the local vLLM endpoint")
     check.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
@@ -71,8 +83,19 @@ def main() -> int:
             compressor_model=args.compressor_model,
             compressor_device=args.compressor_device,
             system_prompt=args.system_prompt,
+            shard_count=args.shard_count,
+            shard_index=args.shard_index,
         )
         print(f"Wrote {len(rows)} condition rows to {args.output}")
+        return 0
+
+    if args.command == "merge-manifests":
+        rows = merge_manifest_shards(
+            input_paths=args.input,
+            output_path=args.output,
+            expected_rows=args.expected_rows,
+        )
+        print(f"Merged {len(rows)} condition rows into {args.output}")
         return 0
 
     if args.command == "check":

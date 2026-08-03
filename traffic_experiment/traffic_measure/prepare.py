@@ -9,7 +9,7 @@ from locomo_eval.locomo.formatter import format_turn_as_evidence
 from locomo_eval.locomo.loader import load_conversations
 from locomo_eval.locomo.schemas import Conversation, QAExample
 
-from .common import sha256_json, utc_now, write_jsonl
+from .common import read_jsonl, sha256_json, utc_now, write_jsonl
 
 DEFAULT_SYSTEM_PROMPT = (
     "Answer the question using only the supplied conversation history. "
@@ -80,19 +80,27 @@ def prepare_manifest(
     compressor_model: str,
     compressor_device: str,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    shard_count: int = 1,
+    shard_index: int = 0,
 ) -> list[dict[str, Any]]:
     unknown = sorted(set(conditions) - set(SUPPORTED_CONDITIONS))
     if unknown:
         raise ValueError(f"unsupported condition(s): {', '.join(unknown)}")
 
     conversations = load_conversations(data_dir)
-    selected = select_examples(conversations, sample_count, seed)
+    if shard_count <= 0:
+        raise ValueError("shard count must be positive")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError(f"shard index must be in [0, {shard_count})")
+
+    selected = list(enumerate(select_examples(conversations, sample_count, seed)))
+    selected = selected[shard_index::shard_count]
     requires_compressor = any(name != "no_compression" for name in conditions)
     compressor = _load_compressor(compressor_model, compressor_device) if requires_compressor else None
 
     rows: list[dict[str, Any]] = []
     prepared_at = utc_now()
-    for conversation, qa in selected:
+    for selection_index, (conversation, qa) in selected:
         blocks = _context_blocks(conversation)
         uncompressed_context = "\n\n".join(blocks)
         sample_id = f"{conversation.conversation_id}::{qa.question_id}"
@@ -153,8 +161,50 @@ def prepare_manifest(
                 "compression": compression_metadata,
                 "prepared_at_utc": prepared_at,
                 "selection_seed": seed,
+                "selection_index": selection_index,
+                "preparation_shard": {
+                    "index": shard_index,
+                    "count": shard_count,
+                },
             }
             rows.append(row)
+
+    write_jsonl(output_path, rows)
+    return rows
+
+
+def merge_manifest_shards(
+    input_paths: list[Path],
+    output_path: Path,
+    expected_rows: int | None = None,
+) -> list[dict[str, Any]]:
+    if not input_paths:
+        raise ValueError("at least one input manifest is required")
+
+    rows: list[dict[str, Any]] = []
+    seen_request_ids: set[str] = set()
+    for input_path in input_paths:
+        for row in read_jsonl(input_path):
+            request_id = str(row.get("request_id", ""))
+            if not request_id:
+                raise ValueError(f"{input_path}: row is missing request_id")
+            if request_id in seen_request_ids:
+                raise ValueError(f"duplicate request_id across shards: {request_id}")
+            if not isinstance(row.get("selection_index"), int):
+                raise ValueError(f"{input_path}: {request_id} is missing integer selection_index")
+            seen_request_ids.add(request_id)
+            rows.append(row)
+
+    condition_order = {name: index for index, name in enumerate(SUPPORTED_CONDITIONS)}
+    rows.sort(
+        key=lambda row: (
+            int(row["selection_index"]),
+            condition_order.get(str(row.get("condition")), len(condition_order)),
+            str(row["request_id"]),
+        )
+    )
+    if expected_rows is not None and len(rows) != expected_rows:
+        raise ValueError(f"expected {expected_rows} rows across shards, found {len(rows)}")
 
     write_jsonl(output_path, rows)
     return rows

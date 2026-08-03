@@ -6,20 +6,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from traffic_experiment.traffic_measure.common import read_jsonl, write_jsonl
-from traffic_experiment.traffic_measure.prepare import prepare_manifest
+from traffic_experiment.traffic_measure.prepare import merge_manifest_shards, prepare_manifest
 from traffic_experiment.traffic_measure.runner import RunSettings, parse_sse_lines, run_experiment
 
 
-def _write_minimal_locomo(path: Path) -> None:
+def _write_minimal_locomo(path: Path, count: int = 1) -> None:
     raw = [
         {
-            "sample_id": "conversation-1",
+            "sample_id": f"conversation-{index}",
             "conversation": {
                 "speaker_a": "Alice",
                 "speaker_b": "Bob",
                 "session_1": [
-                    {"speaker": "Alice", "dia_id": "D1:1", "text": "I moved to Taipei."},
-                    {"speaker": "Bob", "dia_id": "D1:2", "text": "How exciting!"},
+                    {"speaker": "Alice", "dia_id": f"D{index}:1", "text": "I moved to Taipei."},
+                    {"speaker": "Bob", "dia_id": f"D{index}:2", "text": "How exciting!"},
                 ],
             },
             "qa": [
@@ -27,11 +27,12 @@ def _write_minimal_locomo(path: Path) -> None:
                     "question_id": "q1",
                     "question": "Where did Alice move?",
                     "answer": "Taipei",
-                    "evidence": ["D1:1"],
+                    "evidence": [f"D{index}:1"],
                     "category": 2,
                 }
             ],
         }
+        for index in range(1, count + 1)
     ]
     path.mkdir(parents=True)
     (path / "locomo.json").write_text(json.dumps(raw), encoding="utf-8")
@@ -56,6 +57,37 @@ def test_prepare_manifest_without_compressor(tmp_path):
     assert rows[0]["request_id"] == "conversation-1::q1::no_compression"
     assert rows[0]["messages_sha256"]
     assert read_jsonl(output) == rows
+
+
+def test_prepare_manifest_shards_merge_in_original_order(tmp_path):
+    data_dir = tmp_path / "data"
+    shard_zero = tmp_path / "shard-zero.jsonl"
+    shard_one = tmp_path / "shard-one.jsonl"
+    merged = tmp_path / "merged.jsonl"
+    _write_minimal_locomo(data_dir, count=4)
+
+    for shard_index, output in enumerate((shard_zero, shard_one)):
+        prepare_manifest(
+            data_dir=data_dir,
+            output_path=output,
+            sample_count=4,
+            seed=42,
+            conditions=["no_compression"],
+            compressor_model="unused",
+            compressor_device="cpu",
+            shard_count=2,
+            shard_index=shard_index,
+        )
+
+    rows = merge_manifest_shards(
+        input_paths=[shard_zero, shard_one],
+        output_path=merged,
+        expected_rows=4,
+    )
+
+    assert [row["selection_index"] for row in rows] == [0, 1, 2, 3]
+    assert len({row["request_id"] for row in rows}) == 4
+    assert read_jsonl(merged) == rows
 
 
 def test_parse_streaming_response():
