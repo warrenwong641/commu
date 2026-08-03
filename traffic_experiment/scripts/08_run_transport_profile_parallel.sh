@@ -129,7 +129,10 @@ output.write_text(
 print(f"Merged {len(rows)} disjoint worker results into {output}")
 PY
 
-"${RUNNER_PYTHON}" -P -m traffic_experiment.traffic_measure.cli analyze \
-  --results "${RESULTS}" \
-  --output "${RUN_DIR}/traffic_metrics.csv"
+(
+  cd /tmp
+  "${RUNNER_PYTHON}" -P -m traffic_experiment.traffic_measure.cli analyze \
+    --results "${RESULTS}" \
+    --output "${RUN_DIR}/traffic_metrics.csv"
+)
 echo "Parallel ${TRANSPORT} profile complete: ${RESULTS}"
