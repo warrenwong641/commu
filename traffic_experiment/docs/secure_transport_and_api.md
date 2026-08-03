@@ -17,12 +17,17 @@ the local CA path. Keep vLLM on port 8000.
 
 - TCP 8443: TLS 1.3 plus HTTP/1.1.
 - UDP 8444: TLS 1.3 as used by QUIC plus HTTP/3 only.
+- TCP/UDP 8543/8544: identical transports routed only to the second vLLM worker.
 
 The runner uses aioquic for an HTTP/3-only client, so there is no TCP fallback.
 Run `TRANSPORT=tls13 scripts/08_run_transport_profile.sh` and then
 `TRANSPORT=http3 scripts/08_run_transport_profile.sh`. Analyze each output
 directory separately. A valid QUIC row must record HTTP version 3 and the capture
 must contain UDP/QUIC packets on port 8444.
+
+For the two-GPU pilot, use `scripts/08_run_transport_profile_parallel.sh`.
+It assigns disjoint complete sample blocks to ports 8000 and 8001 through separate
+secure listeners, merges the 72 rows, and runs tshark analysis automatically.
 
 ## External API pilot
 

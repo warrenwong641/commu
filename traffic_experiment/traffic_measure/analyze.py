@@ -65,6 +65,10 @@ def summarize_capture(
         "tls.record.version",
         "-e",
         "tls.handshake.extensions_alpn_str",
+        "-e",
+        "tls.handshake.version",
+        "-e",
+        "tls.handshake.extensions.supported_version",
         ]
     )
     process = subprocess.run(command, check=True, capture_output=True, text=True)
@@ -84,11 +88,15 @@ def summarize_capture(
         "tls_records": 0,
         "observed_tls_versions": "",
         "observed_alpn": "",
+        "observed_tls_handshake_versions": "",
+        "observed_tls_supported_versions": "",
     }
     tls_versions: set[str] = set()
     alpn_values: set[str] = set()
+    tls_handshake_versions: set[str] = set()
+    tls_supported_versions: set[str] = set()
     for raw_line in process.stdout.splitlines():
-        fields = (raw_line.split("\t") + [""] * 11)[:11]
+        fields = (raw_line.split("\t") + [""] * 13)[:13]
         (
             frame_len,
             tcp_src,
@@ -101,6 +109,8 @@ def summarize_capture(
             quic_header,
             tls_version,
             alpn,
+            tls_handshake_version,
+            tls_supported_version,
         ) = fields
         src_port = udp_src if transport == "http3" else tcp_src
         dst_port = udp_dst if transport == "http3" else tcp_dst
@@ -118,6 +128,14 @@ def summarize_capture(
             tls_versions.update(item for item in tls_version.split(",") if item)
         if alpn:
             alpn_values.update(item for item in alpn.split(",") if item)
+        if tls_handshake_version:
+            tls_handshake_versions.update(
+                item for item in tls_handshake_version.split(",") if item
+            )
+        if tls_supported_version:
+            tls_supported_versions.update(
+                item for item in tls_supported_version.split(",") if item
+            )
         if _integer(dst_port) == server_port:
             metrics["packets_client_to_server"] += 1
             metrics["bytes_client_to_server"] += frame_bytes
@@ -130,6 +148,12 @@ def summarize_capture(
             metrics["udp_payload_bytes_server_to_client"] += udp_payload_bytes
     metrics["observed_tls_versions"] = ";".join(sorted(tls_versions))
     metrics["observed_alpn"] = ";".join(sorted(alpn_values))
+    metrics["observed_tls_handshake_versions"] = ";".join(
+        sorted(tls_handshake_versions)
+    )
+    metrics["observed_tls_supported_versions"] = ";".join(
+        sorted(tls_supported_versions)
+    )
     return metrics
 
 
