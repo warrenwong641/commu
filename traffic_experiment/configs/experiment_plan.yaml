@@ -1,0 +1,96 @@
+experiment:
+  id: locomo-traffic-v1
+  dataset: LoCoMo
+  sample_ids_file: null  # Freeze this before the pilot.
+  random_seed: 42
+  profiles:
+    pilot:
+      samples: 8
+      repetitions: 3
+    main:
+      samples: 32
+      repetitions: 5
+    robustness:
+      samples: 32
+      repetitions: 10
+
+conditions:
+  - id: no_compression
+    target_ratio: 1.0
+  - id: longllmlingua_2x
+    target_ratio: 0.5
+  - id: longllmlingua_4x
+    target_ratio: 0.25
+
+compression:
+  method: LongLLMLingua
+  precompute_before_capture: true
+  reuse_across_repetitions: true
+  record_actual_input_tokens: true
+
+generation:
+  temperature: 0
+  max_output_tokens: 256
+  expected_output_tokens_for_budgeting: 128
+  stream: true
+  seed: 42  # Use only when the selected backend supports it.
+
+measurement:
+  run_serially: true
+  observation_seconds: 30
+  setup_and_teardown_seconds_per_call: 5
+  primary_connection_mode: warm
+  secondary_connection_mode: cold
+  capture_tool: dumpcap
+  analysis_tool: tshark
+  capture_filter: host BACKEND_IP
+  store_payload_decryption_keys: false
+  time_zone: UTC
+
+backends:
+  local_vllm:
+    enabled: true
+    role: primary_controlled
+    base_url: http://127.0.0.1:8000/v1
+    model: Qwen/Qwen3-8B
+    api_key_env: LOCAL_VLLM_API_KEY
+    pin_model_revision: true
+
+  openrouter:
+    enabled: true
+    role: external_validation
+    base_url: https://openrouter.ai/api/v1
+    model: qwen/qwen3-8b
+    api_key_env: OPENROUTER_API_KEY
+    pin_provider: true
+    provider: null  # Select and record one provider before the pilot.
+    allow_fallbacks: false
+    request_usage_accounting: true
+
+  gemini:
+    enabled: true
+    role: external_validation
+    model: gemini-3.5-flash-lite
+    api_key_env: GEMINI_API_KEY
+    use_stable_model_alias: true
+
+budget_assumptions:
+  average_uncompressed_input_tokens: 9000
+  average_output_tokens: 128
+  prices_usd_per_million_tokens:
+    openrouter_qwen3_8b:
+      input: 0.05
+      output: 0.40
+    gemini_3_5_flash_lite:
+      input: 0.30
+      output: 2.50
+    gemini_3_5_flash_reference:
+      input: 1.50
+      output: 9.00
+  local_machine:
+    gpu_watts: 350
+    host_watts: 100
+    electricity_usd_per_kwh: 0.15
+    illustrative_rental_usd_per_gpu_hour:
+      low: 0.50
+      high: 1.50

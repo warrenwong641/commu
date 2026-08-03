@@ -1,0 +1,12 @@
+.env
+server.env
+.venv-runner/
+captures/
+runs/
+artifacts/
+__pycache__/
+*.pyc
+*.pcap
+*.pcapng
+*.key
+*.log

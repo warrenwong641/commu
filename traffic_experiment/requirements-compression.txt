@@ -1,0 +1,3 @@
+# Install this in the environment used only for manifest preparation.
+# LLMLingua loads a separate compressor model; stop it before starting vLLM.
+llmlingua==0.2.2

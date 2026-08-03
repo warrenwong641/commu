@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+from .analyze import analyze_results
+from .prepare import DEFAULT_SYSTEM_PROMPT, SUPPORTED_CONDITIONS, prepare_manifest
+from .runner import RunSettings, health_check, run_experiment
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Local vLLM traffic measurement tools")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    prepare = subparsers.add_parser("prepare", help="freeze LoCoMo prompts and precompute compression")
+    prepare.add_argument("--data-dir", type=Path, required=True)
+    prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument("--samples", type=int, default=32)
+    prepare.add_argument("--seed", type=int, default=42)
+    prepare.add_argument(
+        "--conditions",
+        nargs="+",
+        choices=sorted(SUPPORTED_CONDITIONS),
+        default=list(SUPPORTED_CONDITIONS),
+    )
+    prepare.add_argument("--compressor-model", default="NousResearch/Llama-2-7b-hf")
+    prepare.add_argument("--compressor-device", default="cuda")
+    prepare.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
+
+    check = subparsers.add_parser("check", help="verify the local vLLM endpoint")
+    check.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
+    check.add_argument("--api-key", default=os.environ.get("LOCAL_VLLM_API_KEY", "local-test-key"))
+
+    run = subparsers.add_parser("run", help="run measured requests")
+    run.add_argument("--manifest", type=Path, required=True)
+    run.add_argument("--output-dir", type=Path, required=True)
+    run.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
+    run.add_argument("--model", default="Qwen/Qwen3-8B")
+    run.add_argument("--api-key", default=os.environ.get("LOCAL_VLLM_API_KEY", "local-test-key"))
+    run.add_argument("--samples", type=int, required=True)
+    run.add_argument("--repetitions", type=int, required=True)
+    run.add_argument("--seed", type=int, default=42)
+    run.add_argument("--temperature", type=float, default=0)
+    run.add_argument("--max-output-tokens", type=int, default=256)
+    run.add_argument("--request-timeout-seconds", type=float, default=120)
+    run.add_argument("--observation-seconds", type=int, default=30)
+    run.add_argument("--capture-interface", default="")
+    run.add_argument("--capture-filter", default="tcp port 8000")
+    run.add_argument("--capture-startup-delay-seconds", type=float, default=0.5)
+    run.add_argument("--no-capture", action="store_true")
+    run.add_argument("--no-wait-after-request", action="store_true", help=argparse.SUPPRESS)
+
+    analyze = subparsers.add_parser("analyze", help="extract traffic metrics with tshark")
+    analyze.add_argument("--results", type=Path, required=True)
+    analyze.add_argument("--output", type=Path, required=True)
+    analyze.add_argument("--tshark", default="tshark")
+    return parser
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    if args.command == "prepare":
+        rows = prepare_manifest(
+            data_dir=args.data_dir,
+            output_path=args.output,
+            sample_count=args.samples,
+            seed=args.seed,
+            conditions=args.conditions,
+            compressor_model=args.compressor_model,
+            compressor_device=args.compressor_device,
+            system_prompt=args.system_prompt,
+        )
+        print(f"Wrote {len(rows)} condition rows to {args.output}")
+        return 0
+
+    if args.command == "check":
+        models = health_check(args.base_url, args.api_key)
+        print(json.dumps(models, indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "run":
+        results = run_experiment(
+            RunSettings(
+                manifest_path=args.manifest,
+                output_dir=args.output_dir,
+                base_url=args.base_url,
+                model=args.model,
+                api_key=args.api_key,
+                sample_limit=args.samples,
+                repetitions=args.repetitions,
+                seed=args.seed,
+                temperature=args.temperature,
+                max_output_tokens=args.max_output_tokens,
+                request_timeout_seconds=args.request_timeout_seconds,
+                observation_seconds=args.observation_seconds,
+                capture_interface=args.capture_interface,
+                capture_filter=args.capture_filter,
+                capture_startup_delay_seconds=args.capture_startup_delay_seconds,
+                no_capture=args.no_capture,
+                no_wait_after_request=args.no_wait_after_request,
+            )
+        )
+        print(f"Results: {results}")
+        return 0
+
+    if args.command == "analyze":
+        output = analyze_results(args.results, args.output, tshark=args.tshark)
+        print(f"Analysis: {output}")
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
