@@ -8,9 +8,11 @@ from pathlib import Path
 from .analyze import analyze_results
 from .prepare import (
     DEFAULT_SYSTEM_PROMPT,
+    SUMMARY_SYSTEM_PROMPT,
     SUPPORTED_CONDITIONS,
     merge_manifest_shards,
     prepare_manifest,
+    prepare_summary_manifest,
 )
 from .runner import RunSettings, health_check, run_experiment
 
@@ -36,6 +38,23 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--shard-count", type=int, default=1)
     prepare.add_argument("--shard-index", type=int, default=0)
 
+    prepare_summary = subparsers.add_parser(
+        "prepare-summaries", help="freeze LoCoMo event-summary prompts and references"
+    )
+    prepare_summary.add_argument("--data-dir", type=Path, required=True)
+    prepare_summary.add_argument("--output", type=Path, required=True)
+    prepare_summary.add_argument("--conversations", type=int, default=10)
+    prepare_summary.add_argument("--seed", type=int, default=42)
+    prepare_summary.add_argument(
+        "--conditions",
+        nargs="+",
+        choices=sorted(SUPPORTED_CONDITIONS),
+        default=list(SUPPORTED_CONDITIONS),
+    )
+    prepare_summary.add_argument("--compressor-model", default="NousResearch/Llama-2-7b-hf")
+    prepare_summary.add_argument("--compressor-device", default="cuda")
+    prepare_summary.add_argument("--system-prompt", default=SUMMARY_SYSTEM_PROMPT)
+
     merge = subparsers.add_parser("merge-manifests", help="merge deterministic preparation shards")
     merge.add_argument("--input", type=Path, nargs="+", required=True)
     merge.add_argument("--output", type=Path, required=True)
@@ -48,9 +67,19 @@ def _parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run measured requests")
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--output-dir", type=Path, required=True)
-    run.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
+    run.add_argument("--base-url")
     run.add_argument("--model", default="Qwen/Qwen3-8B")
-    run.add_argument("--api-key", default=os.environ.get("LOCAL_VLLM_API_KEY", "local-test-key"))
+    run.add_argument(
+        "--backend",
+        choices=["local_vllm", "openrouter", "gemini"],
+        default="local_vllm",
+    )
+    run.add_argument("--api-key")
+    run.add_argument("--openrouter-provider")
+    run.add_argument("--transport", choices=["http1", "tls13", "http3"], default="http1")
+    run.add_argument("--connection-mode", choices=["warm", "cold"], default="warm")
+    run.add_argument("--tls-ca-file", type=Path)
+    run.add_argument("--curl-executable", default="curl")
     run.add_argument("--samples", type=int, required=True)
     run.add_argument("--repetitions", type=int, required=True)
     run.add_argument("--seed", type=int, default=42)
@@ -91,6 +120,20 @@ def main() -> int:
         print(f"Wrote {len(rows)} condition rows to {args.output}")
         return 0
 
+    if args.command == "prepare-summaries":
+        rows = prepare_summary_manifest(
+            data_dir=args.data_dir,
+            output_path=args.output,
+            conversation_count=args.conversations,
+            seed=args.seed,
+            conditions=args.conditions,
+            compressor_model=args.compressor_model,
+            compressor_device=args.compressor_device,
+            system_prompt=args.system_prompt,
+        )
+        print(f"Wrote {len(rows)} event-summary condition rows to {args.output}")
+        return 0
+
     if args.command == "merge-manifests":
         rows = merge_manifest_shards(
             input_paths=args.input,
@@ -106,13 +149,25 @@ def main() -> int:
         return 0
 
     if args.command == "run":
+        base_url = args.base_url or {
+            "local_vllm": "http://127.0.0.1:8000/v1",
+            "openrouter": "https://openrouter.ai/api/v1",
+            "gemini": "https://generativelanguage.googleapis.com/v1beta",
+        }[args.backend]
+        api_key = args.api_key
+        if api_key is None:
+            api_key = {
+                "local_vllm": os.environ.get("LOCAL_VLLM_API_KEY", "local-test-key"),
+                "openrouter": os.environ.get("OPENROUTER_API_KEY", ""),
+                "gemini": os.environ.get("GEMINI_API_KEY", ""),
+            }[args.backend]
         results = run_experiment(
             RunSettings(
                 manifest_path=args.manifest,
                 output_dir=args.output_dir,
-                base_url=args.base_url,
+                base_url=base_url,
                 model=args.model,
-                api_key=args.api_key,
+                api_key=api_key,
                 sample_limit=args.samples,
                 repetitions=args.repetitions,
                 seed=args.seed,
@@ -127,6 +182,12 @@ def main() -> int:
                 worker_index=args.worker_index,
                 no_capture=args.no_capture,
                 no_wait_after_request=args.no_wait_after_request,
+                backend=args.backend,
+                transport=args.transport,
+                connection_mode=args.connection_mode,
+                openrouter_provider=args.openrouter_provider,
+                tls_ca_file=args.tls_ca_file,
+                curl_executable=args.curl_executable,
             )
         )
         print(f"Results: {results}")

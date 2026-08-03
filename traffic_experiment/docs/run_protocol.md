@@ -10,6 +10,9 @@
    time, and artifact hash.
 5. Manually inspect at least five samples for answer-bearing information lost during
    compression.
+6. Separately freeze the event-summary manifest: select 10 annotated LoCoMo
+   conversations, create one unit per speaker with an available reference, and use
+   a 512-token output cap.
 
 Compression is performed once per sample and ratio, before packet capture. Repeated
 network trials reuse the exact artifact.
@@ -26,6 +29,8 @@ network trials reuse the exact artifact.
 4. Run one request and confirm that the application timestamps fall inside the
    packet-capture timestamps.
 5. Compare application request/response byte counts with TCP/TLS capture totals.
+6. Start Caddy, verify TLS 1.3 on TCP 8443, then verify that the HTTP/3 client
+   negotiates version 3 on UDP 8444 with no TCP fallback.
 
 ## Phase 2: pilot
 
@@ -75,6 +80,7 @@ compression condition and report:
 - TCP payload and protocol overhead;
 - completion latency and time to first token;
 - request and output token counts;
+- workload quality (token F1 for QA and ROUGE-L plus token F1 for summaries);
 - bytes per input token and bytes per output token;
 - failure/retry rate.
 
@@ -106,3 +112,6 @@ manifest hash, and PCAP hashes.
   occurs before the capture ends.
 - Output token variation can dominate server-to-client traffic. Keep the output cap
   fixed and use observed token count as a covariate.
+- TLS record boundaries and QUIC packetization are transport effects of interest;
+  compare them within the same frozen prompt and backend, not across different
+  API providers as though they were interchangeable.

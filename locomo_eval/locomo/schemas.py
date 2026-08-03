@@ -21,7 +21,7 @@ class Session:
     timestamp: str | None
     turns: list[Turn]
     summary: str | None = None
-    event_summary: str | None = None
+    event_summary: Any = None
     observations: list[str] = field(default_factory=list)
 
 

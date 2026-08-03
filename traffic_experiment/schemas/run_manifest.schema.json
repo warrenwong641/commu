@@ -34,6 +34,18 @@
     "backend": {
       "enum": ["local_vllm", "openrouter", "gemini"]
     },
+    "task_type": {
+      "enum": ["qa", "event_summary"]
+    },
+    "transport": {
+      "enum": ["http1", "tls13", "http3"]
+    },
+    "connection_mode": {
+      "enum": ["warm", "cold"]
+    },
+    "negotiated_http_version": {
+      "type": ["string", "null"]
+    },
     "provider": {
       "type": ["string", "null"]
     },
@@ -41,6 +53,9 @@
       "type": "string"
     },
     "model_revision": {
+      "type": ["string", "null"]
+    },
+    "model_version": {
       "type": ["string", "null"]
     },
     "request_sha256": {

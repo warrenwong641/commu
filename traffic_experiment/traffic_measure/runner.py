@@ -3,17 +3,28 @@ from __future__ import annotations
 import json
 import random
 import socket
+import subprocess
+import tempfile
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
+from .backends import (
+    BackendRequest,
+    build_backend_request,
+    normalized_usage,
+    parse_backend_response,
+    parse_openai_sse,
+)
 from .capture import CaptureResult, DumpcapCapture
 from .common import append_jsonl, read_jsonl, sha256_file, sha256_json, utc_now
+from .http3_client import post_http3
 
 
 @dataclass(frozen=True)
@@ -37,29 +48,17 @@ class RunSettings:
     worker_index: int = 0
     no_capture: bool = False
     no_wait_after_request: bool = False
+    backend: str = "local_vllm"
+    transport: str = "http1"
+    connection_mode: str = "warm"
+    openrouter_provider: str | None = None
+    tls_ca_file: Path | None = None
+    curl_executable: str = "curl"
 
 
 def parse_sse_lines(lines: Iterable[str]) -> tuple[str, dict[str, Any] | None, str | None]:
-    pieces: list[str] = []
-    usage: dict[str, Any] | None = None
-    response_id: str | None = None
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith(":") or not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
-        if payload == "[DONE]":
-            break
-        event = json.loads(payload)
-        response_id = response_id or event.get("id")
-        if event.get("usage"):
-            usage = event["usage"]
-        for choice in event.get("choices", []):
-            delta = choice.get("delta") or {}
-            content = delta.get("content")
-            if content:
-                pieces.append(str(content))
-    return "".join(pieces), usage, response_id
+    parsed = parse_openai_sse(lines)
+    return parsed.text, parsed.usage, parsed.response_id
 
 
 def _resolved_backend(base_url: str) -> tuple[str, int]:
@@ -117,8 +116,8 @@ def _completed_keys(results_path: Path) -> set[tuple[str, int]]:
 
 def _request_once(
     client: httpx.Client,
-    endpoint: str,
-    payload: dict[str, Any],
+    request: BackendRequest,
+    backend: str,
 ) -> dict[str, Any]:
     request_started = utc_now()
     start = time.perf_counter()
@@ -128,7 +127,7 @@ def _request_once(
     status_code: int | None = None
     response_headers: dict[str, str] = {}
 
-    with client.stream("POST", endpoint, json=payload) as response:
+    with client.stream("POST", request.endpoint, headers=request.headers, json=request.payload) as response:
         status_code = response.status_code
         response_headers = {
             key: value
@@ -147,7 +146,7 @@ def _request_once(
                     pass
             event_lines.append(line)
 
-    text, usage, response_id = parse_sse_lines(event_lines)
+    parsed = parse_backend_response(backend, event_lines)
     return {
         "started_at_utc": request_started,
         "first_byte_at_utc": first_byte_at,
@@ -156,9 +155,120 @@ def _request_once(
         "elapsed_seconds": round(time.perf_counter() - start, 6),
         "http_status": status_code,
         "response_headers": response_headers,
-        "provider_response_id": response_id,
-        "response_text": text,
-        "usage": usage,
+        "provider_response_id": parsed.response_id,
+        "provider": parsed.provider,
+        "model_version": parsed.model_version,
+        "response_text": parsed.text,
+        "usage": parsed.usage,
+        "negotiated_http_version": response.http_version,
+    }
+
+
+def _request_once_curl(
+    request: BackendRequest,
+    backend: str,
+    transport: str,
+    timeout_seconds: float,
+    curl_executable: str,
+    tls_ca_file: Path | None,
+) -> dict[str, Any]:
+    request_started = utc_now()
+    start = time.perf_counter()
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", encoding="utf-8", delete=False) as handle:
+        json.dump(request.payload, handle, ensure_ascii=False)
+        payload_path = Path(handle.name)
+    try:
+        command = [
+            curl_executable,
+            "--silent",
+            "--show-error",
+            "--no-buffer",
+            "--max-time",
+            str(timeout_seconds),
+            "--request",
+            "POST",
+            "--header",
+            "Content-Type: application/json",
+            "--data-binary",
+            f"@{payload_path}",
+        ]
+        for name, value in request.headers.items():
+            command.extend(["--header", f"{name}: {value}"])
+        if transport == "tls13":
+            command.extend(["--http1.1", "--tlsv1.3", "--tls-max", "1.3"])
+        else:
+            raise ValueError("curl transport must be tls13")
+        if tls_ca_file:
+            command.extend(["--cacert", str(tls_ca_file)])
+        command.extend(
+            [
+                "--write-out",
+                "\n__TRAFFIC_META__%{http_code},%{http_version},%{time_starttransfer}\n",
+                request.endpoint,
+            ]
+        )
+        process = subprocess.run(command, capture_output=True, text=True, check=False)
+        if process.returncode:
+            raise RuntimeError(f"curl exited {process.returncode}: {process.stderr.strip()}")
+        marker = "\n__TRAFFIC_META__"
+        body, metadata = process.stdout.rsplit(marker, 1)
+        status, http_version, time_starttransfer = metadata.strip().split(",", 2)
+        if int(status) >= 400:
+            raise RuntimeError(f"HTTP {status}: {body[-1000:]}")
+        parsed = parse_backend_response(backend, body.splitlines())
+        return {
+            "started_at_utc": request_started,
+            "first_byte_at_utc": None,
+            "first_token_at_utc": None,
+            "finished_at_utc": utc_now(),
+            "elapsed_seconds": round(time.perf_counter() - start, 6),
+            "time_to_first_byte_seconds": float(time_starttransfer),
+            "http_status": int(status),
+            "response_headers": {},
+            "provider_response_id": parsed.response_id,
+            "provider": parsed.provider,
+            "model_version": parsed.model_version,
+            "response_text": parsed.text,
+            "usage": parsed.usage,
+            "negotiated_http_version": http_version,
+        }
+    finally:
+        payload_path.unlink(missing_ok=True)
+
+
+def _request_once_http3(
+    request: BackendRequest,
+    backend: str,
+    timeout_seconds: float,
+    tls_ca_file: Path | None,
+) -> dict[str, Any]:
+    request_started = utc_now()
+    start = time.perf_counter()
+    response = post_http3(
+        request.endpoint,
+        request.headers,
+        request.payload,
+        timeout_seconds,
+        tls_ca_file,
+    )
+    if response.status >= 400:
+        raise RuntimeError(f"HTTP {response.status}: {response.body[-1000:]}")
+    parsed = parse_backend_response(backend, response.body.splitlines())
+    return {
+        "started_at_utc": request_started,
+        "first_byte_at_utc": None,
+        "first_token_at_utc": None,
+        "finished_at_utc": utc_now(),
+        "elapsed_seconds": round(time.perf_counter() - start, 6),
+        "time_to_first_byte_seconds": response.time_to_first_byte_seconds,
+        "http_status": response.status,
+        "response_headers": response.headers,
+        "provider_response_id": parsed.response_id,
+        "provider": parsed.provider,
+        "model_version": parsed.model_version,
+        "response_text": parsed.text,
+        "usage": parsed.usage,
+        "negotiated_http_version": "3",
     }
 
 
@@ -184,14 +294,19 @@ def run_experiment(settings: RunSettings) -> Path:
     captures_dir = settings.output_dir / "captures"
     completed = _completed_keys(results_path)
     backend_ip, backend_port = _resolved_backend(settings.base_url)
-    endpoint = settings.base_url.rstrip("/") + "/chat/completions"
-    headers = {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key else {}
+    if settings.transport not in {"http1", "tls13", "http3"}:
+        raise ValueError("transport must be http1, tls13, or http3")
+    if settings.connection_mode not in {"warm", "cold"}:
+        raise ValueError("connection mode must be warm or cold")
+    if settings.transport != "http1" and settings.connection_mode != "cold":
+        raise ValueError("strict TLS 1.3 and HTTP/3 profiles currently require cold connections")
 
     settings.output_dir.mkdir(parents=True, exist_ok=True)
-    with httpx.Client(
-        headers=headers,
+    shared_client = httpx.Client(
         timeout=httpx.Timeout(settings.request_timeout_seconds),
-    ) as client:
+        verify=str(settings.tls_ca_file) if settings.tls_ca_file else True,
+    )
+    try:
         for index, (request, repetition) in enumerate(trials, start=1):
             key = (str(request["request_id"]), repetition)
             if key in completed:
@@ -209,8 +324,16 @@ def run_experiment(settings: RunSettings) -> Path:
                 "stream_options": {"include_usage": True},
                 "chat_template_kwargs": {"enable_thinking": False},
             }
-            payload = {"model": settings.model, "messages": request["messages"], **generation}
-            request_sha = sha256_json(payload)
+            backend_request = build_backend_request(
+                backend=settings.backend,
+                base_url=settings.base_url,
+                model=settings.model,
+                api_key=settings.api_key,
+                messages=request["messages"],
+                generation=generation,
+                openrouter_provider=settings.openrouter_provider,
+            )
+            request_sha = sha256_json(backend_request.payload)
             capture: DumpcapCapture | None = None
             capture_result = CaptureResult(path=None, return_code=None, stderr="")
             response_data: dict[str, Any] = {}
@@ -227,7 +350,36 @@ def run_experiment(settings: RunSettings) -> Path:
                         startup_delay_seconds=settings.capture_startup_delay_seconds,
                     )
                     capture.start()
-                response_data = _request_once(client, endpoint, payload)
+                if settings.transport == "http1":
+                    client = (
+                        shared_client
+                        if settings.connection_mode == "warm"
+                        else httpx.Client(
+                            timeout=httpx.Timeout(settings.request_timeout_seconds),
+                            verify=str(settings.tls_ca_file) if settings.tls_ca_file else True,
+                        )
+                    )
+                    try:
+                        response_data = _request_once(client, backend_request, settings.backend)
+                    finally:
+                        if settings.connection_mode == "cold":
+                            client.close()
+                elif settings.transport == "tls13":
+                    response_data = _request_once_curl(
+                        backend_request,
+                        settings.backend,
+                        settings.transport,
+                        settings.request_timeout_seconds,
+                        settings.curl_executable,
+                        settings.tls_ca_file,
+                    )
+                else:
+                    response_data = _request_once_http3(
+                        backend_request,
+                        settings.backend,
+                        settings.request_timeout_seconds,
+                        settings.tls_ca_file,
+                    )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
             finally:
@@ -248,15 +400,20 @@ def run_experiment(settings: RunSettings) -> Path:
                 "request_id": request["request_id"],
                 "sample_id": request["sample_id"],
                 "conversation_id": request["conversation_id"],
-                "question_id": request["question_id"],
+                "question_id": request.get("question_id"),
+                "task_type": request.get("task_type", "qa"),
+                "reference_answer": request.get("reference_answer"),
+                "target_speaker": request.get("target_speaker"),
                 "condition": request["condition"],
                 "repetition": repetition,
                 "worker_count": settings.worker_count,
                 "worker_index": settings.worker_index,
-                "backend": "local_vllm",
+                "backend": settings.backend,
                 "backend_ip": backend_ip,
                 "backend_port": backend_port,
                 "model": settings.model,
+                "transport": settings.transport,
+                "connection_mode": settings.connection_mode,
                 "request_sha256": request_sha,
                 "messages_sha256": request["messages_sha256"],
                 "capture_file": str(capture_result.path) if capture_result.path else None,
@@ -274,11 +431,13 @@ def run_experiment(settings: RunSettings) -> Path:
                 "error": error,
                 **response_data,
             }
-            usage = result.get("usage") or {}
-            result["input_tokens"] = usage.get("prompt_tokens")
-            result["output_tokens"] = usage.get("completion_tokens")
+            result["input_tokens"], result["output_tokens"] = normalized_usage(
+                settings.backend, result.get("usage")
+            )
             append_jsonl(results_path, result)
             if completed_ok:
                 completed.add(key)
 
+    finally:
+        shared_client.close()
     return results_path

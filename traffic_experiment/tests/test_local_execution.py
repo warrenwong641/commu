@@ -5,8 +5,17 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from traffic_experiment.traffic_measure.backends import (
+    build_backend_request,
+    normalized_usage,
+    parse_gemini_sse,
+)
 from traffic_experiment.traffic_measure.common import read_jsonl, write_jsonl
-from traffic_experiment.traffic_measure.prepare import merge_manifest_shards, prepare_manifest
+from traffic_experiment.traffic_measure.prepare import (
+    merge_manifest_shards,
+    prepare_manifest,
+    prepare_summary_manifest,
+)
 from traffic_experiment.traffic_measure.runner import (
     RunSettings,
     _trial_rows,
@@ -95,6 +104,49 @@ def test_prepare_manifest_shards_merge_in_original_order(tmp_path):
     assert read_jsonl(merged) == rows
 
 
+def test_prepare_event_summary_manifest(tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    raw = [
+        {
+            "sample_id": "conversation-summary",
+            "conversation": {
+                "speaker_a": "Alice",
+                "speaker_b": "Bob",
+                "session_1": [
+                    {"speaker": "Alice", "dia_id": "D1:1", "text": "I moved to Taipei."},
+                    {"speaker": "Bob", "dia_id": "D1:2", "text": "I started a new job."},
+                ],
+            },
+            "event_summary": {
+                "session_1_summary": {
+                    "Alice": "Alice moved to Taipei.",
+                    "Bob": "Bob started a new job.",
+                }
+            },
+            "qa": [],
+        }
+    ]
+    (data_dir / "locomo.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    rows = prepare_summary_manifest(
+        data_dir=data_dir,
+        output_path=tmp_path / "summaries.jsonl",
+        conversation_count=1,
+        seed=42,
+        conditions=["no_compression"],
+        compressor_model="unused",
+        compressor_device="cpu",
+    )
+
+    assert len(rows) == 2
+    assert {row["target_speaker"] for row in rows} == {"Alice", "Bob"}
+    assert all(row["task_type"] == "event_summary" for row in rows)
+    assert "moved to Taipei" in next(row for row in rows if row["target_speaker"] == "Alice")[
+        "reference_answer"
+    ]
+
+
 def test_parse_streaming_response():
     text, usage, response_id = parse_sse_lines(
         [
@@ -107,6 +159,47 @@ def test_parse_streaming_response():
     assert text == "Taipei"
     assert usage == {"prompt_tokens": 10, "completion_tokens": 2}
     assert response_id == "abc"
+
+
+def test_gemini_request_and_stream_parsing():
+    request = build_backend_request(
+        backend="gemini",
+        base_url="https://example.test/v1beta",
+        model="gemini-test",
+        api_key="secret",
+        messages=[
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Where?"},
+        ],
+        generation={"temperature": 0, "max_tokens": 16, "stream": True},
+    )
+    assert request.endpoint.endswith("streamGenerateContent?alt=sse")
+    assert request.headers == {"x-goog-api-key": "secret"}
+    assert request.payload["systemInstruction"]["parts"][0]["text"] == "Be concise."
+    parsed = parse_gemini_sse(
+        [
+            'data: {"responseId":"g1","modelVersion":"v1","candidates":[{"content":{"parts":[{"text":"Tai"}]}}]}',
+            'data: {"candidates":[{"content":{"parts":[{"text":"pei"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}',
+        ]
+    )
+    assert parsed.text == "Taipei"
+    assert normalized_usage("gemini", parsed.usage) == (10, 2)
+
+
+def test_openrouter_provider_is_pinned():
+    request = build_backend_request(
+        backend="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/test",
+        api_key="secret",
+        messages=[{"role": "user", "content": "Hello"}],
+        generation={"temperature": 0, "max_tokens": 16, "stream": True},
+        openrouter_provider="ProviderName",
+    )
+    assert request.payload["provider"] == {
+        "only": ["ProviderName"],
+        "allow_fallbacks": False,
+    }
 
 
 def test_trial_workers_are_disjoint_balanced_and_keep_sample_conditions_together():

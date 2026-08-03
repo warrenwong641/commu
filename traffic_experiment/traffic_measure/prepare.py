@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import random
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from locomo_eval.locomo.formatter import format_turn_as_evidence
 from locomo_eval.locomo.loader import load_conversations
@@ -14,6 +15,10 @@ from .common import read_jsonl, sha256_json, utc_now, write_jsonl
 DEFAULT_SYSTEM_PROMPT = (
     "Answer the question using only the supplied conversation history. "
     "Give one short phrase unless a full sentence is necessary."
+)
+SUMMARY_SYSTEM_PROMPT = (
+    "Summarize only significant events supported by the supplied conversation. "
+    "Order events chronologically, preserve dates when available, and do not invent details."
 )
 
 SUPPORTED_CONDITIONS = {
@@ -60,6 +65,72 @@ def _build_messages(system_prompt: str, context: str, question: str) -> list[dic
     ]
 
 
+def _event_reference(conversation: Conversation, speaker: str) -> str:
+    references: list[str] = []
+    speaker_lower = speaker.casefold()
+    aliases = {speaker_lower}
+    if speaker == conversation.speaker_a:
+        aliases.add("speaker_a")
+    if speaker == conversation.speaker_b:
+        aliases.add("speaker_b")
+    for session in conversation.sessions:
+        value = session.event_summary
+        if isinstance(value, dict):
+            matching = [item for key, item in value.items() if str(key).casefold() in aliases]
+            if not matching:
+                matching = [
+                    item for item in value.values() if speaker_lower in str(item).casefold()
+                ]
+            references.extend(str(item) for item in matching if item)
+        elif isinstance(value, list):
+            references.extend(
+                str(item) for item in value if speaker_lower in str(item).casefold()
+            )
+        elif value:
+            references.append(str(value))
+    return "\n".join(dict.fromkeys(references))
+
+
+def _compress_context(
+    *,
+    blocks: list[str],
+    condition: str,
+    compressor: Any,
+    compressor_model: str,
+    task_instruction: str,
+) -> tuple[str, dict[str, Any]]:
+    rate = SUPPORTED_CONDITIONS[condition]
+    if condition == "no_compression":
+        return "\n\n".join(blocks), {
+            "method": "none",
+            "target_rate": 1.0,
+            "origin_tokens": None,
+            "compressed_tokens": None,
+            "reported_ratio": "1.0x",
+        }
+    result = compressor.compress_prompt(
+        blocks,
+        question=task_instruction,
+        rate=rate,
+        condition_in_question="after_condition",
+        reorder_context="sort",
+        dynamic_context_compression_ratio=0.3,
+        condition_compare=True,
+        context_budget="+100",
+        rank_method="longllmlingua",
+        concate_question=False,
+    )
+    return str(result["compressed_prompt"]), {
+        "method": "LongLLMLingua",
+        "compressor_model": compressor_model,
+        "target_rate": rate,
+        "origin_tokens": result.get("origin_tokens"),
+        "compressed_tokens": result.get("compressed_tokens"),
+        "reported_ratio": result.get("ratio"),
+        "reported_rate": result.get("rate"),
+    }
+
+
 def _load_compressor(model_name: str, device_map: str):
     try:
         from llmlingua import PromptCompressor
@@ -102,51 +173,23 @@ def prepare_manifest(
     prepared_at = utc_now()
     for selection_index, (conversation, qa) in selected:
         blocks = _context_blocks(conversation)
-        uncompressed_context = "\n\n".join(blocks)
         sample_id = f"{conversation.conversation_id}::{qa.question_id}"
 
         for condition in conditions:
-            rate = SUPPORTED_CONDITIONS[condition]
             compression_started = time.perf_counter()
-            compression_metadata: dict[str, Any]
-            if condition == "no_compression":
-                context = uncompressed_context
-                compression_metadata = {
-                    "method": "none",
-                    "target_rate": 1.0,
-                    "origin_tokens": None,
-                    "compressed_tokens": None,
-                    "reported_ratio": "1.0x",
-                }
-            else:
-                assert compressor is not None
-                result = compressor.compress_prompt(
-                    blocks,
-                    question=qa.question,
-                    rate=rate,
-                    condition_in_question="after_condition",
-                    reorder_context="sort",
-                    dynamic_context_compression_ratio=0.3,
-                    condition_compare=True,
-                    context_budget="+100",
-                    rank_method="longllmlingua",
-                    concate_question=False,
-                )
-                context = str(result["compressed_prompt"])
-                compression_metadata = {
-                    "method": "LongLLMLingua",
-                    "compressor_model": compressor_model,
-                    "target_rate": rate,
-                    "origin_tokens": result.get("origin_tokens"),
-                    "compressed_tokens": result.get("compressed_tokens"),
-                    "reported_ratio": result.get("ratio"),
-                    "reported_rate": result.get("rate"),
-                }
+            context, compression_metadata = _compress_context(
+                blocks=blocks,
+                condition=condition,
+                compressor=compressor,
+                compressor_model=compressor_model,
+                task_instruction=qa.question,
+            )
 
             messages = _build_messages(system_prompt, context, qa.question)
             compression_metadata["elapsed_seconds"] = round(time.perf_counter() - compression_started, 6)
             row = {
                 "manifest_version": 1,
+                "task_type": "qa",
                 "request_id": f"{sample_id}::{condition}",
                 "sample_id": sample_id,
                 "conversation_id": conversation.conversation_id,
@@ -169,6 +212,86 @@ def prepare_manifest(
             }
             rows.append(row)
 
+    write_jsonl(output_path, rows)
+    return rows
+
+
+def prepare_summary_manifest(
+    data_dir: Path,
+    output_path: Path,
+    conversation_count: int,
+    seed: int,
+    conditions: list[str],
+    compressor_model: str,
+    compressor_device: str,
+    system_prompt: str = SUMMARY_SYSTEM_PROMPT,
+) -> list[dict[str, Any]]:
+    unknown = sorted(set(conditions) - set(SUPPORTED_CONDITIONS))
+    if unknown:
+        raise ValueError(f"unsupported condition(s): {', '.join(unknown)}")
+    conversations = load_conversations(data_dir)
+    eligible = [
+        conversation
+        for conversation in conversations
+        if any(session.event_summary for session in conversation.sessions)
+    ]
+    if conversation_count <= 0:
+        raise ValueError("conversation count must be positive")
+    if len(eligible) < conversation_count:
+        raise ValueError(
+            f"requested {conversation_count} conversations, but only {len(eligible)} have event summaries"
+        )
+    selected = random.Random(seed).sample(eligible, conversation_count)
+    selected.sort(key=lambda conversation: conversation.conversation_id)
+    compressor = (
+        _load_compressor(compressor_model, compressor_device)
+        if any(name != "no_compression" for name in conditions)
+        else None
+    )
+
+    rows: list[dict[str, Any]] = []
+    prepared_at = utc_now()
+    for selection_index, conversation in enumerate(selected):
+        blocks = _context_blocks(conversation)
+        for speaker in (conversation.speaker_a, conversation.speaker_b):
+            reference = _event_reference(conversation, speaker)
+            if not reference:
+                continue
+            instruction = f"Summarize significant events for {speaker} chronologically."
+            sample_id = f"{conversation.conversation_id}::event_summary::{speaker}"
+            for condition in conditions:
+                started = time.perf_counter()
+                context, compression = _compress_context(
+                    blocks=blocks,
+                    condition=condition,
+                    compressor=compressor,
+                    compressor_model=compressor_model,
+                    task_instruction=instruction,
+                )
+                messages = _build_messages(system_prompt, context, instruction)
+                compression["elapsed_seconds"] = round(time.perf_counter() - started, 6)
+                rows.append(
+                    {
+                        "manifest_version": 1,
+                        "task_type": "event_summary",
+                        "request_id": f"{sample_id}::{condition}",
+                        "sample_id": sample_id,
+                        "conversation_id": conversation.conversation_id,
+                        "question_id": None,
+                        "target_speaker": speaker,
+                        "condition": condition,
+                        "question": instruction,
+                        "reference_answer": reference,
+                        "messages": messages,
+                        "messages_sha256": sha256_json(messages),
+                        "compression": compression,
+                        "prepared_at_utc": prepared_at,
+                        "selection_seed": seed,
+                        "selection_index": selection_index,
+                    }
+                )
+    if not rows:
+        raise ValueError("event-summary annotations were present but no speaker references could be derived")
     write_jsonl(output_path, rows)
     return rows
 

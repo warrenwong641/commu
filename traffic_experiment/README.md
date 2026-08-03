@@ -7,9 +7,9 @@ the same LoCoMo prompts under three inference backends:
 2. Qwen3-8B through OpenRouter;
 3. a direct external API, initially Gemini 3.5 Flash-Lite.
 
-It does not modify the existing `locomo_eval` implementation. The executable path
-currently targets local vLLM; the frozen request manifest is backend-neutral so the
-external API adapters can reuse it later.
+The runner supports local vLLM, a provider-pinned OpenRouter route, and Gemini's
+streaming API. Frozen manifests are backend-neutral. Local traffic can be measured
+as cleartext HTTP/1.1 over TCP, TLS 1.3/HTTP/1.1 over TCP, or HTTP/3 over QUIC.
 
 ## Recommended execution order
 
@@ -19,6 +19,10 @@ external API adapters can reuse it later.
 3. Validate capture completeness, token accounting, and timestamps.
 4. Run the same pilot through one pinned OpenRouter provider and the direct Gemini API.
 5. Only then run the 32-sample main experiment.
+
+The event-summary workload uses LoCoMo's annotated event summaries as references
+and creates up to two speaker-specific units per conversation. Keep its results
+separate from short-answer QA because output length and quality metrics differ.
 
 Local vLLM should be the primary controlled experiment. External APIs should be
 reported as validation environments because provider infrastructure, routing,
@@ -60,6 +64,9 @@ the weighted average is 5,250 input tokens per call.
   captures so concurrent traffic remains attributable.
 - Keep compression outside the measurement window and reuse the same compressed
   prompt for repetitions.
+- Verify the recorded negotiated HTTP version: `1.1` for the TLS/TCP profile and
+  `3` for the QUIC profile. The QUIC client is implemented with aioquic, so it
+  cannot silently fall back to TCP.
 - Record application timestamps and packet timestamps in UTC.
 - Store packet captures outside version control.
 - Recheck provider prices and rate limits immediately before the final run.

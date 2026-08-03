@@ -15,9 +15,10 @@ Run the client and vLLM server in separate containers or network namespaces.
 Capture on their dedicated bridge or veth interface. This prevents unrelated lab
 traffic from entering the measurement and makes client-to-server direction explicit.
 
-vLLM exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Streaming uses
-server-sent events (SSE) over HTTP, normally carried by TCP. This lets the same
-logical request interface drive the local and OpenRouter backends.
+vLLM exposes an OpenAI-compatible `/v1/chat/completions` endpoint. For secure
+transport profiles, Caddy terminates TLS 1.3 and forwards the unchanged request to
+vLLM. Port 8443 accepts HTTP/1.1 over TLS/TCP; port 8444 accepts HTTP/3 over QUIC/UDP.
+The cleartext control remains on port 8000.
 
 For the two-GPU local profile, two independent vLLM processes listen on ports
 8000 and 8001. Each runner receives a disjoint deterministic set of complete
@@ -57,6 +58,8 @@ per call. It is responsible for:
 - recording first-byte, first-token, final-token, and completion timestamps;
 - recording backend token usage where available;
 - saving the response and error metadata outside the packet capture.
+- recording workload, backend, transport, connection mode, negotiated HTTP version,
+  provider/model response identifiers, and returned usage metadata.
 
 ### Capture controller
 
@@ -68,6 +71,8 @@ capture privileges. Use `tshark` afterward to calculate:
 - TCP payload bytes;
 - duration, time to first byte, burst/gap statistics;
 - retransmissions and connection setup overhead.
+- UDP payload, QUIC packet counts, observed TLS record versions, and ALPN values
+  where tshark can decode them without session secrets.
 
 The capture process should start before the request and stop after the fixed
 30-second observation window. Save the capture command, interface name, filter,
@@ -75,9 +80,11 @@ tool version, and SHA-256 hash in the run metadata.
 
 ## Warm and cold connections
 
-Use warm connections as the primary condition because they reduce DNS, TCP, and TLS
-setup noise. Run cold connections as a smaller secondary analysis when connection
-setup overhead itself is relevant. Never combine warm and cold results in one mean.
+The current HTTPX cleartext/API path can reuse a warm connection. The strict
+TLS 1.3 and HTTP/3 profiles use an external curl process and are therefore labeled
+`cold`; the runner rejects a `warm` label for those profiles. Never combine warm
+and cold results in one mean. A future warm-QUIC extension must use a persistent
+HTTP/3 client and demonstrate connection reuse in the capture.
 
 ## Traffic isolation
 

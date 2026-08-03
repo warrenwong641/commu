@@ -1,6 +1,7 @@
 .env
 server.env
 .venv-runner/
+.tools/
 captures/
 runs/
 artifacts/

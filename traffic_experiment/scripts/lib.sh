@@ -21,6 +21,9 @@ if [[ -n "${VLLM_BIN:-}" ]]; then
   export PATH="${VLLM_BIN_DIR}:${PATH}"
 fi
 export PYTHONPATH="${REPOSITORY_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+if [[ -x "${EXPERIMENT_ROOT}/.tools/caddy" ]]; then
+  export PATH="${EXPERIMENT_ROOT}/.tools:${PATH}"
+fi
 export LOCAL_VLLM_API_KEY
 export CUDA_VISIBLE_DEVICES
 if [[ -n "${HF_TOKEN:-}" ]]; then
