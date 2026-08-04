@@ -20,11 +20,13 @@ from traffic_experiment.traffic_measure.prepare import (
 from traffic_experiment.traffic_measure.runner import (
     RunSettings,
     _job_id,
+    _request_once_http3,
     _trial_rows,
     _warm_http3_client,
     parse_sse_lines,
     run_experiment,
 )
+from traffic_experiment.traffic_measure.http3_client import Http3Response
 
 
 def _write_minimal_locomo(path: Path, count: int = 1) -> None:
@@ -389,6 +391,53 @@ def test_runner_against_mock_streaming_server(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_http3_request_records_symmetric_stream_metrics():
+    backend_request = build_backend_request(
+        backend="local_vllm",
+        base_url="https://example.test/v1",
+        model="test-model",
+        api_key="test-key",
+        messages=[{"role": "user", "content": "Where?"}],
+        generation={"temperature": 0, "max_tokens": 16, "stream": True},
+    )
+
+    class FakeClient:
+        def post(self, endpoint, headers, payload, timeout_seconds):
+            assert endpoint == backend_request.endpoint
+            assert payload == backend_request.payload
+            return Http3Response(
+                status=200,
+                headers={"content-type": "text/event-stream"},
+                body="\n\n".join(
+                    [
+                        'data: {"choices":[{"delta":{"content":"Taipei"}}]}',
+                        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+                        'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":2}}',
+                        "data: [DONE]",
+                        "",
+                    ]
+                ),
+                time_to_first_byte_seconds=0.1,
+                response_body_bytes=240,
+                sse_event_count=4,
+                content_event_offsets_seconds=(0.2,),
+            )
+
+    result = _request_once_http3(
+        backend_request,
+        "local_vllm",
+        5,
+        None,
+        client=FakeClient(),
+    )
+    assert result["request_json_bytes"] > 0
+    assert result["response_sse_bytes"] == 240
+    assert result["sse_event_count"] == 4
+    assert result["content_event_count"] == 1
+    assert result["time_to_first_content_seconds"] == 0.2
+    assert result["finish_reason"] == "stop"
 
 
 def test_runner_filters_to_one_compression_condition(tmp_path):

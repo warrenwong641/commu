@@ -18,6 +18,9 @@ class Http3Response:
     headers: dict[str, str]
     body: str
     time_to_first_byte_seconds: float | None
+    response_body_bytes: int
+    sse_event_count: int
+    content_event_offsets_seconds: tuple[float, ...]
 
 
 def _runtime():
@@ -40,6 +43,47 @@ def _runtime():
             self.response_bodies: dict[int, bytearray] = {}
             self.started: dict[int, float] = {}
             self.first_byte: dict[int, float] = {}
+            self.sse_buffers: dict[int, bytearray] = {}
+            self.sse_event_counts: dict[int, int] = {}
+            self.content_event_offsets: dict[int, list[float]] = {}
+
+        def _consume_sse(self, stream_id: int, *, flush: bool = False) -> None:
+            pending = bytes(self.sse_buffers[stream_id])
+            events: list[bytes] = []
+            while pending:
+                separators = [
+                    (index, separator)
+                    for separator in (b"\n\n", b"\r\n\r\n")
+                    if (index := pending.find(separator)) >= 0
+                ]
+                if not separators:
+                    if flush:
+                        events.append(pending)
+                        pending = b""
+                    break
+                index, separator = min(separators, key=lambda item: item[0])
+                events.append(pending[:index])
+                pending = pending[index + len(separator) :]
+            self.sse_buffers[stream_id] = bytearray(pending)
+            for event in events:
+                for line in event.splitlines():
+                    if not line.startswith(b"data:"):
+                        continue
+                    self.sse_event_counts[stream_id] += 1
+                    payload = line[5:].strip()
+                    if payload == b"[DONE]":
+                        continue
+                    try:
+                        decoded = json.loads(payload)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if any(
+                        (choice.get("delta") or {}).get("content")
+                        for choice in decoded.get("choices", [])
+                    ):
+                        self.content_event_offsets[stream_id].append(
+                            time.perf_counter() - self.started[stream_id]
+                        )
 
         def quic_event_received(self, event) -> None:
             for http_event in self.http.handle_event(event):
@@ -52,7 +96,10 @@ def _runtime():
                     self.response_headers[stream_id].extend(http_event.headers)
                 elif isinstance(http_event, DataReceived):
                     self.response_bodies[stream_id].extend(http_event.data)
+                    self.sse_buffers[stream_id].extend(http_event.data)
+                    self._consume_sse(stream_id)
                 if getattr(http_event, "stream_ended", False):
+                    self._consume_sse(stream_id, flush=True)
                     raw_headers = self.response_headers.pop(stream_id)
                     decoded = {
                         key.decode("ascii"): value.decode("utf-8", errors="replace")
@@ -60,18 +107,27 @@ def _runtime():
                     }
                     status = int(decoded.pop(":status"))
                     first_byte = self.first_byte.pop(stream_id, None)
+                    started = self.started.pop(stream_id)
+                    raw_body = self.response_bodies.pop(stream_id)
+                    sse_event_count = self.sse_event_counts.pop(stream_id)
+                    content_event_offsets = tuple(
+                        self.content_event_offsets.pop(stream_id)
+                    )
                     self.waiters.pop(stream_id).set_result(
                         Http3Response(
                             status=status,
                             headers=decoded,
-                            body=self.response_bodies.pop(stream_id).decode(
+                            body=raw_body.decode(
                                 "utf-8", errors="replace"
                             ),
                             time_to_first_byte_seconds=(
-                                first_byte - self.started.pop(stream_id)
+                                first_byte - started
                                 if first_byte is not None
                                 else None
                             ),
+                            response_body_bytes=len(raw_body),
+                            sse_event_count=sse_event_count,
+                            content_event_offsets_seconds=content_event_offsets,
                         )
                     )
 
@@ -91,6 +147,9 @@ def _runtime():
             self.response_headers[stream_id] = []
             self.response_bodies[stream_id] = bytearray()
             self.started[stream_id] = time.perf_counter()
+            self.sse_buffers[stream_id] = bytearray()
+            self.sse_event_counts[stream_id] = 0
+            self.content_event_offsets[stream_id] = []
             authority = parsed.hostname or ""
             if parsed.port and parsed.port != 443:
                 authority = f"{authority}:{parsed.port}"
@@ -114,7 +173,11 @@ def _runtime():
                 end_stream=payload is None,
             )
             if payload is not None:
-                body = json.dumps(payload, ensure_ascii=False).encode()
+                body = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
                 self.http.send_data(stream_id, body, end_stream=True)
             self.transmit()
             try:
@@ -125,6 +188,9 @@ def _runtime():
                 self.response_bodies.pop(stream_id, None)
                 self.started.pop(stream_id, None)
                 self.first_byte.pop(stream_id, None)
+                self.sse_buffers.pop(stream_id, None)
+                self.sse_event_counts.pop(stream_id, None)
+                self.content_event_offsets.pop(stream_id, None)
 
         async def post(
             self,

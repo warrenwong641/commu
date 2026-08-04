@@ -318,6 +318,13 @@ def _request_once_http3(
 ) -> dict[str, Any]:
     request_started = utc_now()
     start = time.perf_counter()
+    request_json_bytes = len(
+        json.dumps(
+            request.payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
     if client is None:
         response = post_http3(
             request.endpoint,
@@ -336,6 +343,14 @@ def _request_once_http3(
     if response.status >= 400:
         raise RuntimeError(f"HTTP {response.status}: {response.body[-1000:]}")
     parsed = parse_backend_response(backend, response.body.splitlines())
+    content_event_offsets = list(response.content_event_offsets_seconds)
+    inter_content_event_seconds = [
+        current - previous
+        for previous, current in zip(
+            content_event_offsets,
+            content_event_offsets[1:],
+        )
+    ]
     return {
         "started_at_utc": request_started,
         "first_byte_at_utc": None,
@@ -343,6 +358,34 @@ def _request_once_http3(
         "finished_at_utc": utc_now(),
         "elapsed_seconds": round(time.perf_counter() - start, 6),
         "time_to_first_byte_seconds": response.time_to_first_byte_seconds,
+        "time_to_response_headers_seconds": response.time_to_first_byte_seconds,
+        "time_to_first_content_seconds": (
+            round(content_event_offsets[0], 6) if content_event_offsets else None
+        ),
+        "content_stream_seconds": (
+            round(content_event_offsets[-1] - content_event_offsets[0], 6)
+            if len(content_event_offsets) > 1
+            else 0.0 if content_event_offsets else None
+        ),
+        "inter_content_event_p50_seconds": (
+            round(statistics.median(inter_content_event_seconds), 6)
+            if inter_content_event_seconds
+            else None
+        ),
+        "inter_content_event_p95_seconds": (
+            round(
+                sorted(inter_content_event_seconds)[
+                    max(0, int(0.95 * len(inter_content_event_seconds)) - 1)
+                ],
+                6,
+            )
+            if inter_content_event_seconds
+            else None
+        ),
+        "request_json_bytes": request_json_bytes,
+        "response_sse_bytes": response.response_body_bytes,
+        "sse_event_count": response.sse_event_count,
+        "content_event_count": len(content_event_offsets),
         "http_status": response.status,
         "response_headers": response.headers,
         "provider_response_id": parsed.response_id,
