@@ -9,8 +9,8 @@ PRELIM_ROOT="${PRELIM_RUNS_ROOT:-runs/preliminary}"
 PROXY_HOST="${PRELIM_PROXY_HOST:-10.200.0.1}"
 NETNS="${CLIENT_NETNS:-llm-client}"
 HOST_IF="${HOST_VETH:-llmhost0}"
-QA_MANIFEST="${MANIFEST_PATH}"
-SUMMARY_MANIFEST="${SUMMARY_MANIFEST_PATH}"
+QA_MANIFEST="${MANIFEST_PATH:-artifacts/requests_32.jsonl}"
+SUMMARY_MANIFEST="${SUMMARY_MANIFEST_PATH:-artifacts/event_summaries_10.jsonl}"
 
 if [[ "${PARALLEL_WORKERS:-2}" -ne 2 ]]; then
   echo "The preliminary profile requires the two configured GPU workers." >&2
