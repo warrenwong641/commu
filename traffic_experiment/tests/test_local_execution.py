@@ -19,6 +19,7 @@ from traffic_experiment.traffic_measure.prepare import (
 )
 from traffic_experiment.traffic_measure.runner import (
     RunSettings,
+    _job_id,
     _trial_rows,
     parse_sse_lines,
     run_experiment,
@@ -239,6 +240,15 @@ def test_trial_workers_are_disjoint_balanced_and_keep_sample_conditions_together
     assert keys[0].isdisjoint(keys[1])
     assert sample_sets[0].isdisjoint(sample_sets[1])
     assert len(sample_sets[0] | sample_sets[1]) == 8
+
+
+def test_job_id_is_deterministic_and_repetition_specific():
+    assert _job_id("sample::no_compression", 1) == _job_id(
+        "sample::no_compression", 1
+    )
+    assert _job_id("sample::no_compression", 1) != _job_id(
+        "sample::no_compression", 2
+    )
 
 
 class _VllmLikeHandler(BaseHTTPRequestHandler):

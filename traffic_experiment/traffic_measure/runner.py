@@ -115,6 +115,15 @@ def _completed_keys(results_path: Path) -> set[tuple[str, int]]:
     }
 
 
+def _job_id(request_id: str, repetition: int) -> str:
+    return sha256_json(
+        {
+            "request_id": request_id,
+            "repetition": repetition,
+        }
+    )[:24]
+
+
 def _request_once(
     client: httpx.Client,
     request: BackendRequest,
@@ -354,8 +363,10 @@ def run_experiment(settings: RunSettings) -> Path:
                 continue
 
             run_uuid = uuid.uuid4().hex
-            safe_request_id = sha256_json(request["request_id"])[:16]
-            capture_path = captures_dir / f"{safe_request_id}_r{repetition}_{run_uuid[:8]}.pcapng"
+            job_id = _job_id(key[0], repetition)
+            capture_path = captures_dir / f"{job_id}.pcapng"
+            partial_capture_path = captures_dir / f"{job_id}.partial.pcapng"
+            partial_capture_path.unlink(missing_ok=True)
             generation = {
                 "temperature": settings.temperature,
                 "max_tokens": settings.max_output_tokens,
@@ -383,7 +394,7 @@ def run_experiment(settings: RunSettings) -> Path:
             try:
                 if not settings.no_capture:
                     capture = DumpcapCapture(
-                        output_path=capture_path,
+                        output_path=partial_capture_path,
                         interface=settings.capture_interface,
                         capture_filter=settings.capture_filter,
                         duration_seconds=settings.observation_seconds,
@@ -438,13 +449,20 @@ def run_experiment(settings: RunSettings) -> Path:
                     time.sleep(settings.observation_seconds)
 
             capture_sha = (
-                sha256_file(capture_result.path)
-                if capture_result.path is not None and capture_result.path.exists()
-                else None
+                None
             )
             completed_ok = error is None and bool(response_data.get("response_text"))
+            if (
+                completed_ok
+                and capture_result.path is not None
+                and capture_result.path.exists()
+            ):
+                capture_result.path.replace(capture_path)
+                capture_result.path = capture_path
+                capture_sha = sha256_file(capture_path)
             result = {
                 "run_id": run_uuid,
+                "job_id": job_id,
                 "request_id": request["request_id"],
                 "sample_id": request["sample_id"],
                 "conversation_id": request["conversation_id"],

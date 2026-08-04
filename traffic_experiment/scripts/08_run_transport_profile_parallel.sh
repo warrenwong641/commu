@@ -112,8 +112,7 @@ from pathlib import Path
 
 run_dir = Path(sys.argv[1])
 output = Path(sys.argv[2])
-rows = []
-seen = set()
+latest = {}
 for worker in range(2):
     path = run_dir / f"worker-{worker}" / "results.jsonl"
     if not path.exists():
@@ -123,10 +122,12 @@ for worker in range(2):
             continue
         row = json.loads(line)
         key = (row["request_id"], int(row["repetition"]))
-        if key in seen:
-            raise SystemExit(f"duplicate trial across workers: {key}")
-        seen.add(key)
-        rows.append(row)
+        previous = latest.get(key)
+        if previous is not None and previous.get("worker_index") != row.get("worker_index"):
+            raise SystemExit(f"trial assigned to multiple workers: {key}")
+        if row.get("completed") or previous is None:
+            latest[key] = row
+rows = list(latest.values())
 rows.sort(key=lambda row: (
     str(row["sample_id"]),
     str(row["condition"]),
