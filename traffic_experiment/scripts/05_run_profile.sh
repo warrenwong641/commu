@@ -12,7 +12,7 @@ case "${PROFILE}" in
     ;;
   main)
     SAMPLES=32
-    REPETITIONS=5
+    REPETITIONS="${MAIN_REPETITIONS:-3}"
     ;;
   robustness)
     SAMPLES=32
@@ -23,6 +23,8 @@ case "${PROFILE}" in
     exit 2
     ;;
 esac
+SAMPLES="${SAMPLES_OVERRIDE:-${SAMPLES}}"
+REPETITIONS="${REPETITIONS_OVERRIDE:-${REPETITIONS}}"
 
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH}")"
 RUNS_ABS="$(absolute_from_experiment "${RUNS_ROOT}")"

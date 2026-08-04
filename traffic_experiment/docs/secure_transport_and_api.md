@@ -5,8 +5,9 @@
 Run `scripts/02_prepare_summary_manifest.sh`. It selects conversations with
 annotated event summaries, creates a speaker-specific chronological-summary prompt,
 and precomputes the same three compression conditions used by QA. Point
-`MANIFEST_PATH` at the resulting file and set `MAX_OUTPUT_TOKENS=512` when measuring
-this workload.
+`MANIFEST_PATH` at the resulting file and use the checked-in 1024-token output
+ceiling when measuring this workload. Summary preparation defaults to no
+compression, LongLLMLingua 2x, and LongLLMLingua 4x.
 
 ## Start the local secure proxy
 

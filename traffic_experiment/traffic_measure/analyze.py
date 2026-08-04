@@ -178,6 +178,7 @@ def analyze_results(results_path: Path, output_csv: Path, tshark: str = "tshark"
                 "negotiated_http_version",
                 "completed",
                 "http_status",
+                "finish_reason",
                 "elapsed_seconds",
                 "input_tokens",
                 "output_tokens",

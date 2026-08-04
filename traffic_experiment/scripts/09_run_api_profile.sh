@@ -29,10 +29,12 @@ esac
 
 case "${PROFILE}" in
   pilot) SAMPLES=8; REPETITIONS=3 ;;
-  main) SAMPLES=32; REPETITIONS=5 ;;
+  main) SAMPLES=32; REPETITIONS="${MAIN_REPETITIONS:-3}" ;;
   robustness) SAMPLES=32; REPETITIONS=10 ;;
   *) echo "PROFILE must be pilot, main, or robustness." >&2; exit 2 ;;
 esac
+SAMPLES="${SAMPLES_OVERRIDE:-${SAMPLES}}"
+REPETITIONS="${REPETITIONS_OVERRIDE:-${REPETITIONS}}"
 
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH}")"
 RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/${BACKEND}_${PROFILE}"

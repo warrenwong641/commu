@@ -26,10 +26,12 @@ esac
 
 case "${PROFILE}" in
   pilot) SAMPLES=8; REPETITIONS=3 ;;
-  main) SAMPLES=32; REPETITIONS=5 ;;
+  main) SAMPLES=32; REPETITIONS="${MAIN_REPETITIONS:-3}" ;;
   robustness) SAMPLES=32; REPETITIONS=10 ;;
   *) echo "PROFILE must be pilot, main, or robustness." >&2; exit 2 ;;
 esac
+SAMPLES="${SAMPLES_OVERRIDE:-${SAMPLES}}"
+REPETITIONS="${REPETITIONS_OVERRIDE:-${REPETITIONS}}"
 
 CADDY_RUN_DIR="$(absolute_from_experiment "${CADDY_RUN_DIR:-runs/caddy}")"
 CA_FILE="${CADDY_RUN_DIR}/data/caddy/pki/authorities/local/root.crt"
@@ -38,8 +40,12 @@ if [[ ! -f "${CA_FILE}" ]]; then
   exit 2
 fi
 
-MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH}")"
-RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/local_vllm_${TRANSPORT}_${PROFILE}"
+MANIFEST_PATH_EFFECTIVE="${MANIFEST_PATH_OVERRIDE:-${MANIFEST_PATH}}"
+RUNS_ROOT_EFFECTIVE="${RUNS_ROOT_OVERRIDE:-${RUNS_ROOT}}"
+MAX_OUTPUT_TOKENS_EFFECTIVE="${MAX_OUTPUT_TOKENS_OVERRIDE:-${MAX_OUTPUT_TOKENS}}"
+OBSERVATION_SECONDS_EFFECTIVE="${OBSERVATION_SECONDS_OVERRIDE:-${OBSERVATION_SECONDS}}"
+MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH_EFFECTIVE}")"
+RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")/local_vllm_${TRANSPORT}_${PROFILE}"
 mkdir -p "${RUN_DIR}"
 
 "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli run \
@@ -51,9 +57,9 @@ mkdir -p "${RUN_DIR}"
   --samples "${SAMPLES}" \
   --repetitions "${REPETITIONS}" \
   --seed "${RANDOM_SEED}" \
-  --max-output-tokens "${MAX_OUTPUT_TOKENS}" \
+  --max-output-tokens "${MAX_OUTPUT_TOKENS_EFFECTIVE}" \
   --request-timeout-seconds "${REQUEST_TIMEOUT_SECONDS}" \
-  --observation-seconds "${OBSERVATION_SECONDS}" \
+  --observation-seconds "${OBSERVATION_SECONDS_EFFECTIVE}" \
   --capture-interface "${CAPTURE_INTERFACE}" \
   --capture-filter "$(if [[ "${TRANSPORT}" == http3 ]]; then echo "udp port ${PORT}"; else echo "tcp port ${PORT}"; fi)" \
   --transport "${TRANSPORT}" \

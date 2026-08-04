@@ -11,8 +11,8 @@
 5. Manually inspect at least five samples for answer-bearing information lost during
    compression.
 6. Separately freeze the event-summary manifest: select 10 annotated LoCoMo
-   conversations, create one unit per speaker with an available reference, and use
-   a 512-token output cap.
+   conversations, create one unit per speaker with an available reference, prepare
+   all three compression conditions, and use a 1024-token output ceiling.
 
 Compression is performed once per sample and ratio, before packet capture. Repeated
 network trials reuse the exact artifact.
@@ -57,9 +57,12 @@ Pilot exit criteria:
 
 ## Phase 3: main experiment
 
-Run 32 samples x 3 conditions x 5 repetitions = 480 calls per backend.
-Use 10 repetitions (960 calls/backend) only when the pilot variance or planned
-statistical analysis justifies it.
+Run 32 samples x 3 conditions x 3 technical repetitions = 288 calls per backend.
+The sample, not each repeated capture, is the independent unit. The pilot found
+identical repeated responses, median byte CV no greater than 0.26%, and median
+latency CV below 0.7%, so three repetitions are sufficient for the primary run.
+Use `MAIN_REPETITIONS` or `REPETITIONS_OVERRIDE` only when a documented power or
+variance analysis justifies a different count.
 
 Recommended backend order:
 
@@ -79,6 +82,7 @@ compression condition and report:
 - packets in each direction;
 - TCP payload and protocol overhead;
 - completion latency and time to first token;
+- model/provider finish reason, including the rate of length-capped generations;
 - request and output token counts;
 - workload quality (token F1 for QA and ROUGE-L plus token F1 for summaries);
 - bytes per input token and bytes per output token;

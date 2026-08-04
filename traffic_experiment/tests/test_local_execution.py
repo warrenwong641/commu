@@ -9,6 +9,7 @@ from traffic_experiment.traffic_measure.backends import (
     build_backend_request,
     normalized_usage,
     parse_gemini_sse,
+    parse_openai_sse,
 )
 from traffic_experiment.traffic_measure.common import read_jsonl, write_jsonl
 from traffic_experiment.traffic_measure.prepare import (
@@ -148,17 +149,18 @@ def test_prepare_event_summary_manifest(tmp_path):
 
 
 def test_parse_streaming_response():
-    text, usage, response_id = parse_sse_lines(
-        [
-            'data: {"id":"abc","choices":[{"delta":{"content":"Tai"}}]}',
-            'data: {"id":"abc","choices":[{"delta":{"content":"pei"}}]}',
-            'data: {"id":"abc","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}',
-            "data: [DONE]",
-        ]
-    )
+    lines = [
+        'data: {"id":"abc","choices":[{"delta":{"content":"Tai"}}]}',
+        'data: {"id":"abc","choices":[{"delta":{"content":"pei"}}]}',
+        'data: {"id":"abc","choices":[{"delta":{},"finish_reason":"stop"}]}',
+        'data: {"id":"abc","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}',
+        "data: [DONE]",
+    ]
+    text, usage, response_id = parse_sse_lines(lines)
     assert text == "Taipei"
     assert usage == {"prompt_tokens": 10, "completion_tokens": 2}
     assert response_id == "abc"
+    assert parse_openai_sse(lines).finish_reason == "stop"
 
 
 def test_gemini_request_and_stream_parsing():
@@ -179,10 +181,11 @@ def test_gemini_request_and_stream_parsing():
     parsed = parse_gemini_sse(
         [
             'data: {"responseId":"g1","modelVersion":"v1","candidates":[{"content":{"parts":[{"text":"Tai"}]}}]}',
-            'data: {"candidates":[{"content":{"parts":[{"text":"pei"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}',
+            'data: {"candidates":[{"content":{"parts":[{"text":"pei"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}',
         ]
     )
     assert parsed.text == "Taipei"
+    assert parsed.finish_reason == "STOP"
     assert normalized_usage("gemini", parsed.usage) == (10, 2)
 
 
@@ -246,6 +249,7 @@ class _VllmLikeHandler(BaseHTTPRequestHandler):
         body = "\n\n".join(
             [
                 'data: {"id":"response-1","choices":[{"delta":{"content":"Taipei"}}]}',
+                'data: {"id":"response-1","choices":[{"delta":{},"finish_reason":"stop"}]}',
                 'data: {"id":"response-1","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":2}}',
                 "data: [DONE]",
                 "",
@@ -307,6 +311,7 @@ def test_runner_against_mock_streaming_server(tmp_path):
         result = read_jsonl(results_path)[0]
         assert result["completed"] is True
         assert result["response_text"] == "Taipei"
+        assert result["finish_reason"] == "stop"
         assert result["input_tokens"] == 12
         assert result["output_tokens"] == 2
     finally:

@@ -21,6 +21,7 @@ class ParsedResponse:
     response_id: str | None
     provider: str | None = None
     model_version: str | None = None
+    finish_reason: str | None = None
 
 
 def _sse_payloads(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
@@ -40,6 +41,7 @@ def parse_openai_sse(lines: Iterable[str]) -> ParsedResponse:
     response_id: str | None = None
     provider: str | None = None
     model_version: str | None = None
+    finish_reason: str | None = None
     for event in _sse_payloads(lines):
         response_id = response_id or event.get("id")
         provider = provider or event.get("provider")
@@ -51,7 +53,16 @@ def parse_openai_sse(lines: Iterable[str]) -> ParsedResponse:
             content = delta.get("content")
             if content:
                 pieces.append(str(content))
-    return ParsedResponse("".join(pieces), usage, response_id, provider, model_version)
+            if choice.get("finish_reason") is not None:
+                finish_reason = str(choice["finish_reason"])
+    return ParsedResponse(
+        "".join(pieces),
+        usage,
+        response_id,
+        provider,
+        model_version,
+        finish_reason,
+    )
 
 
 def parse_gemini_sse(lines: Iterable[str]) -> ParsedResponse:
@@ -59,17 +70,27 @@ def parse_gemini_sse(lines: Iterable[str]) -> ParsedResponse:
     usage: dict[str, Any] | None = None
     response_id: str | None = None
     model_version: str | None = None
+    finish_reason: str | None = None
     for event in _sse_payloads(lines):
         response_id = response_id or event.get("responseId")
         model_version = model_version or event.get("modelVersion")
         if event.get("usageMetadata"):
             usage = event["usageMetadata"]
         for candidate in event.get("candidates", []):
+            if candidate.get("finishReason") is not None:
+                finish_reason = str(candidate["finishReason"])
             content = candidate.get("content") or {}
             for part in content.get("parts", []):
                 if "text" in part:
                     pieces.append(str(part["text"]))
-    return ParsedResponse("".join(pieces), usage, response_id, "google", model_version)
+    return ParsedResponse(
+        "".join(pieces),
+        usage,
+        response_id,
+        "google",
+        model_version,
+        finish_reason,
+    )
 
 
 def build_backend_request(

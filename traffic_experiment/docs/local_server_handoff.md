@@ -112,7 +112,9 @@ PROFILE=main ./scripts/run_local_experiment.sh
 Use `PROFILE=main ./scripts/run_local_experiment_parallel.sh` for the two-GPU
 isolated profile.
 
-This performs 32 samples x 3 conditions x 5 repetitions = 480 measured requests.
+By default this performs 32 samples x 3 conditions x 3 technical repetitions =
+288 measured requests. Set `MAIN_REPETITIONS` only when the pilot variance or a
+power analysis justifies a different count.
 The runner is resumable: restarting the same profile skips successful
 request/repetition pairs already present in `results.jsonl`. Failed trials remain
 in the log and are attempted again.

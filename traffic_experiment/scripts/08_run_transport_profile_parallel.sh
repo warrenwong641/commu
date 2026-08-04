@@ -35,10 +35,12 @@ esac
 
 case "${PROFILE}" in
   pilot) SAMPLES=8; REPETITIONS=3 ;;
-  main) SAMPLES=32; REPETITIONS=5 ;;
+  main) SAMPLES=32; REPETITIONS="${MAIN_REPETITIONS:-3}" ;;
   robustness) SAMPLES=32; REPETITIONS=10 ;;
   *) echo "PROFILE must be pilot, main, or robustness." >&2; exit 2 ;;
 esac
+SAMPLES="${SAMPLES_OVERRIDE:-${SAMPLES}}"
+REPETITIONS="${REPETITIONS_OVERRIDE:-${REPETITIONS}}"
 
 CADDY_RUN_DIR="$(absolute_from_experiment "${CADDY_RUN_DIR:-runs/caddy}")"
 CA_FILE="${CADDY_RUN_DIR}/data/caddy/pki/authorities/local/root.crt"
