@@ -58,6 +58,7 @@ class RunSettings:
     curl_executable: str = "curl"
     session_id: str | None = None
     inter_request_delay_seconds: float = 0.0
+    request_start_interval_seconds: float = 0.0
 
 
 def parse_sse_lines(lines: Iterable[str]) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -404,6 +405,15 @@ def run_experiment(settings: RunSettings) -> Path:
         raise ValueError("connection mode must be warm or cold")
     if settings.inter_request_delay_seconds < 0:
         raise ValueError("inter-request delay must be non-negative")
+    if settings.request_start_interval_seconds < 0:
+        raise ValueError("request-start interval must be non-negative")
+    if (
+        settings.inter_request_delay_seconds > 0
+        and settings.request_start_interval_seconds > 0
+    ):
+        raise ValueError(
+            "use either inter-request delay or request-start interval, not both"
+        )
 
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     verify: ssl.SSLContext | str | bool
@@ -441,6 +451,7 @@ def run_experiment(settings: RunSettings) -> Path:
             )
 
         for index, (request, repetition) in enumerate(trials, start=1):
+            trial_started_monotonic = time.perf_counter()
             key = (str(request["request_id"]), repetition)
             if key in completed:
                 print(f"[{index}/{len(trials)}] skip completed {key[0]} repetition={repetition}", flush=True)
@@ -573,6 +584,9 @@ def run_experiment(settings: RunSettings) -> Path:
                 "connection_mode": settings.connection_mode,
                 "session_id": settings.session_id,
                 "inter_request_delay_seconds": settings.inter_request_delay_seconds,
+                "request_start_interval_seconds": (
+                    settings.request_start_interval_seconds
+                ),
                 "request_sha256": request_sha,
                 "messages_sha256": request["messages_sha256"],
                 "capture_file": str(capture_result.path) if capture_result.path else None,
@@ -613,6 +627,18 @@ def run_experiment(settings: RunSettings) -> Path:
             if completed_ok:
                 completed.add(key)
             if (
+                index < len(trials)
+                and settings.request_start_interval_seconds > 0
+            ):
+                elapsed_since_start = time.perf_counter() - trial_started_monotonic
+                time.sleep(
+                    max(
+                        0.0,
+                        settings.request_start_interval_seconds
+                        - elapsed_since_start,
+                    )
+                )
+            elif (
                 index < len(trials)
                 and settings.inter_request_delay_seconds > 0
             ):

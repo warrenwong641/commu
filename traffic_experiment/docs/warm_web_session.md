@@ -21,14 +21,21 @@ SSE response, with one persistent client and sequential POST requests.
 
 Use a closed-loop schedule:
 
-1. submit one frozen question;
+1. submit one frozen question on a fixed 60-second start schedule;
 2. read the streamed response to completion;
-3. wait one deterministic second;
-4. submit the next question on the reused connection.
+3. remain silent for the rest of that minute;
+4. submit the next question on the reused connection;
+5. if a response exceeds 60 seconds, wait for completion rather than overlap it
+   with the next request.
 
-The one-second gap represents a reproducible active-user profile, not a claim
-about natural human typing behavior. Add a zero-second back-to-back stress
-profile and a longer human-paced profile only as sensitivity analyses.
+This follows Montieri et al.'s controlled workload: ten minutes, ten prompts,
+one prompt per minute, and completion before the next prompt. It is a controlled
+cadence rather than an empirical distribution of natural typing behavior.
+
+A 30-second request-start interval may be reported as a higher-activity
+sensitivity profile, but it is not the paper-matched condition. If a 30-minute
+session is required, use 30 turns at the 60-second interval; do not describe that
+longer session as a direct reproduction of Montieri et al.'s 10-minute session.
 
 Capture the whole session in one pcap. Per-request 30-second captures would
 insert artificial idle time between turns. Continue recording per-turn
@@ -37,7 +44,7 @@ application timestamps so each request can still be analyzed separately.
 Run:
 
 ```bash
-TRANSPORT=tls13 SESSION_TURNS=8 SESSION_THINK_SECONDS=1 \
+TRANSPORT=tls13 SESSION_TURNS=10 SESSION_START_INTERVAL_SECONDS=60 \
   scripts/14_run_warm_session.sh
 ```
 
@@ -94,9 +101,9 @@ For each transport and compression condition:
 
 - one baseline session;
 - three technical repetitions under the realistic profile;
-- eight sequential turns per session;
+- ten sequential turns per session;
 - identical frozen prompt order;
-- one-second inter-turn gap;
+- one-minute request-start interval;
 - one persistent connection;
 - one continuous packet capture and paired vLLM snapshots.
 

@@ -7,7 +7,7 @@ require_command dumpcap
 
 TRANSPORT="${TRANSPORT:-tls13}"
 SESSION_TURNS="${SESSION_TURNS:-8}"
-SESSION_THINK_SECONDS="${SESSION_THINK_SECONDS:-1}"
+SESSION_START_INTERVAL_SECONDS="${SESSION_START_INTERVAL_SECONDS:-60}"
 SESSION_ID="${SESSION_ID:-warm-$(date -u +%Y%m%dT%H%M%SZ)}"
 CAPTURE_INTERFACE_EFFECTIVE="${CAPTURE_INTERFACE_OVERRIDE:-${CAPTURE_INTERFACE}}"
 RUN_PREFIX=()
@@ -79,7 +79,7 @@ sleep "${CAPTURE_STARTUP_DELAY_SECONDS:-1}"
   --transport "${TRANSPORT}" \
   --connection-mode warm \
   --session-id "${SESSION_ID}" \
-  --inter-request-delay-seconds "${SESSION_THINK_SECONDS}" \
+  --request-start-interval-seconds "${SESSION_START_INTERVAL_SECONDS}" \
   --no-capture \
   --no-wait-after-request \
   "${TLS_ARGS[@]}"

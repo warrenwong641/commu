@@ -107,6 +107,15 @@ def _parser() -> argparse.ArgumentParser:
         default=0,
         help="closed-loop pause after a completed response before the next request",
     )
+    run.add_argument(
+        "--request-start-interval-seconds",
+        type=float,
+        default=0,
+        help=(
+            "target interval between consecutive request starts; if a response "
+            "runs longer, the next request starts only after it completes"
+        ),
+    )
 
     analyze = subparsers.add_parser("analyze", help="extract traffic metrics with tshark")
     analyze.add_argument("--results", type=Path, required=True)
@@ -219,6 +228,7 @@ def main() -> int:
                 curl_executable=args.curl_executable,
                 session_id=args.session_id,
                 inter_request_delay_seconds=args.inter_request_delay_seconds,
+                request_start_interval_seconds=args.request_start_interval_seconds,
             )
         )
         print(f"Results: {results}")
