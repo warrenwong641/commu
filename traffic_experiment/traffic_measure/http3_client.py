@@ -75,12 +75,13 @@ def _runtime():
                         )
                     )
 
-        async def post(
+        async def request(
             self,
+            method: str,
             url: str,
             headers: dict[str, str],
-            payload: dict[str, Any],
             timeout_seconds: float,
+            payload: dict[str, Any] | None = None,
         ) -> Http3Response:
             parsed = urlparse(url)
             stream_id = self._quic.get_next_available_stream_id()
@@ -97,20 +98,56 @@ def _runtime():
             if parsed.query:
                 path += f"?{parsed.query}"
             request_headers = [
-                (b":method", b"POST"),
+                (b":method", method.upper().encode()),
                 (b":scheme", b"https"),
                 (b":authority", authority.encode()),
                 (b":path", path.encode()),
-                (b"content-type", b"application/json"),
             ]
+            if payload is not None:
+                request_headers.append((b"content-type", b"application/json"))
             request_headers.extend(
                 (name.lower().encode(), value.encode()) for name, value in headers.items()
             )
-            body = json.dumps(payload, ensure_ascii=False).encode()
-            self.http.send_headers(stream_id, request_headers)
-            self.http.send_data(stream_id, body, end_stream=True)
+            self.http.send_headers(
+                stream_id,
+                request_headers,
+                end_stream=payload is None,
+            )
+            if payload is not None:
+                body = json.dumps(payload, ensure_ascii=False).encode()
+                self.http.send_data(stream_id, body, end_stream=True)
             self.transmit()
-            return await asyncio.wait_for(waiter, timeout=timeout_seconds)
+            try:
+                return await asyncio.wait_for(waiter, timeout=timeout_seconds)
+            finally:
+                self.waiters.pop(stream_id, None)
+                self.response_headers.pop(stream_id, None)
+                self.response_bodies.pop(stream_id, None)
+                self.started.pop(stream_id, None)
+                self.first_byte.pop(stream_id, None)
+
+        async def post(
+            self,
+            url: str,
+            headers: dict[str, str],
+            payload: dict[str, Any],
+            timeout_seconds: float,
+        ) -> Http3Response:
+            return await self.request(
+                "POST",
+                url,
+                headers,
+                timeout_seconds,
+                payload,
+            )
+
+        async def get(
+            self,
+            url: str,
+            headers: dict[str, str],
+            timeout_seconds: float,
+        ) -> Http3Response:
+            return await self.request("GET", url, headers, timeout_seconds)
 
     return connect, H3_ALPN, QuicConfiguration, Protocol
 
@@ -199,6 +236,18 @@ class PersistentHttp3Client:
     ) -> Http3Response:
         future = asyncio.run_coroutine_threadsafe(
             self.protocol.post(url, headers, payload, timeout_seconds),
+            self.loop,
+        )
+        return future.result(timeout=timeout_seconds + 5)
+
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout_seconds: float,
+    ) -> Http3Response:
+        future = asyncio.run_coroutine_threadsafe(
+            self.protocol.get(url, headers, timeout_seconds),
             self.loop,
         )
         return future.result(timeout=timeout_seconds + 5)

@@ -302,6 +302,30 @@ def health_check(base_url: str, api_key: str, timeout_seconds: float = 10) -> di
         return response.json()
 
 
+def _warm_http3_client(
+    client: PersistentHttp3Client | None,
+    base_url: str,
+    api_key: str,
+    ca_file: Path | None,
+    timeout_seconds: float = 5,
+) -> PersistentHttp3Client:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    models_url = base_url.rstrip("/") + "/models"
+    if client is not None:
+        try:
+            response = client.get(models_url, headers, timeout_seconds)
+            if response.status < 400:
+                return client
+        except Exception:
+            client.close()
+    replacement = PersistentHttp3Client(base_url, ca_file)
+    response = replacement.get(models_url, headers, timeout_seconds)
+    if response.status >= 400:
+        replacement.close()
+        raise RuntimeError(f"HTTP/3 warm-up failed with HTTP {response.status}")
+    return replacement
+
+
 def run_experiment(settings: RunSettings) -> Path:
     manifest = read_jsonl(settings.manifest_path)
     trials = _trial_rows(
@@ -392,6 +416,13 @@ def run_experiment(settings: RunSettings) -> Path:
 
             print(f"[{index}/{len(trials)}] run {key[0]} repetition={repetition}", flush=True)
             try:
+                if settings.transport == "http3" and settings.connection_mode == "warm":
+                    shared_http3 = _warm_http3_client(
+                        shared_http3,
+                        settings.base_url,
+                        settings.api_key,
+                        settings.tls_ca_file,
+                    )
                 if not settings.no_capture:
                     capture = DumpcapCapture(
                         output_path=partial_capture_path,

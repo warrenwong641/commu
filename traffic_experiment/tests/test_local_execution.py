@@ -21,6 +21,7 @@ from traffic_experiment.traffic_measure.runner import (
     RunSettings,
     _job_id,
     _trial_rows,
+    _warm_http3_client,
     parse_sse_lines,
     run_experiment,
 )
@@ -246,6 +247,60 @@ def test_job_id_is_deterministic_and_repetition_specific():
     assert _job_id("sample::no_compression", 1) == _job_id(
         "sample::no_compression", 1
     )
+
+
+def test_http3_warmup_reuses_healthy_client():
+    class Client:
+        closed = False
+
+        def get(self, url, headers, timeout_seconds):
+            assert url.endswith("/models")
+            assert headers == {"Authorization": "Bearer key"}
+            assert timeout_seconds == 5
+            return type("Response", (), {"status": 200})()
+
+        def close(self):
+            self.closed = True
+
+    client = Client()
+    assert _warm_http3_client(client, "https://example.test/v1", "key", None) is client
+    assert client.closed is False
+
+
+def test_http3_warmup_replaces_dead_client(monkeypatch):
+    class DeadClient:
+        closed = False
+
+        def get(self, url, headers, timeout_seconds):
+            raise TimeoutError("closed QUIC connection")
+
+        def close(self):
+            self.closed = True
+
+    class Replacement:
+        def __init__(self, base_url, ca_file):
+            self.base_url = base_url
+            self.ca_file = ca_file
+
+        def get(self, url, headers, timeout_seconds):
+            return type("Response", (), {"status": 200})()
+
+        def close(self):
+            raise AssertionError("healthy replacement should remain open")
+
+    dead = DeadClient()
+    monkeypatch.setattr(
+        "traffic_experiment.traffic_measure.runner.PersistentHttp3Client",
+        Replacement,
+    )
+    replacement = _warm_http3_client(
+        dead,
+        "https://example.test/v1",
+        "key",
+        Path("ca.pem"),
+    )
+    assert dead.closed is True
+    assert isinstance(replacement, Replacement)
     assert _job_id("sample::no_compression", 1) != _job_id(
         "sample::no_compression", 2
     )
