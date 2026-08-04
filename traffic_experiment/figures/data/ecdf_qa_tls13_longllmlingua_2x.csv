@@ -1,0 +1,17 @@
+workload,transport,condition,ratio,ecdf
+qa,tls13,longllmlingua_2x,0.36479443468833467,0.0625
+qa,tls13,longllmlingua_2x,0.37930347391296226,0.125
+qa,tls13,longllmlingua_2x,0.3937034062099952,0.1875
+qa,tls13,longllmlingua_2x,0.4568819839507374,0.25
+qa,tls13,longllmlingua_2x,0.46830205526412294,0.3125
+qa,tls13,longllmlingua_2x,0.47301441938019995,0.375
+qa,tls13,longllmlingua_2x,0.47987189328842994,0.4375
+qa,tls13,longllmlingua_2x,0.48393035715468313,0.5
+qa,tls13,longllmlingua_2x,0.4867618328479139,0.5625
+qa,tls13,longllmlingua_2x,0.4922075697893475,0.625
+qa,tls13,longllmlingua_2x,0.506766497178298,0.6875
+qa,tls13,longllmlingua_2x,0.5081891505138546,0.75
+qa,tls13,longllmlingua_2x,0.5107395982051806,0.8125
+qa,tls13,longllmlingua_2x,0.5152017689331122,0.875
+qa,tls13,longllmlingua_2x,0.5250667785160821,0.9375
+qa,tls13,longllmlingua_2x,0.549280649260155,1.0

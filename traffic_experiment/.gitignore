@@ -11,3 +11,14 @@ __pycache__/
 *.pcapng
 *.key
 *.log
+
+# LaTeX build intermediates and rendered QA previews
+*.aux
+*.fdb_latexmk
+*.fls
+*.nav
+*.out
+*.snm
+*.toc
+rendered_figure_catalog/
+rendered_report/

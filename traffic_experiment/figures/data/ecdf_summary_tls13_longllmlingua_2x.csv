@@ -1,0 +1,9 @@
+workload,transport,condition,ratio,ecdf
+summary,tls13,longllmlingua_2x,0.8170667083957195,0.125
+summary,tls13,longllmlingua_2x,0.8485655290996867,0.25
+summary,tls13,longllmlingua_2x,0.9033760654537556,0.375
+summary,tls13,longllmlingua_2x,0.9313033511716691,0.5
+summary,tls13,longllmlingua_2x,0.9445654634791069,0.625
+summary,tls13,longllmlingua_2x,0.9702120222399423,0.75
+summary,tls13,longllmlingua_2x,1.0457846966780928,0.875
+summary,tls13,longllmlingua_2x,1.1104872378190545,1.0
