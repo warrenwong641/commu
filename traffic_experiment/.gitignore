@@ -1,6 +1,7 @@
 .env
 server.env
 .venv-runner/
+.venv-jupyter/
 .tools/
 captures/
 runs/

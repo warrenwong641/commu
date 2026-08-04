@@ -15,6 +15,7 @@ from .prepare import (
     prepare_summary_manifest,
 )
 from .runner import RunSettings, health_check, run_experiment
+from .session_timeline import analyze_session_timeline
 from .vllm_metrics import (
     diff_vllm_snapshots,
     fetch_vllm_snapshot,
@@ -96,6 +97,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--capture-interface", default="")
     run.add_argument("--capture-filter", default="tcp port 8000")
     run.add_argument("--capture-startup-delay-seconds", type=float, default=0.5)
+    run.add_argument(
+        "--capture-stop-on-response",
+        action="store_true",
+        help=(
+            "stop and flush capture when the response completes; observation-seconds "
+            "then acts as a safety ceiling"
+        ),
+    )
     run.add_argument("--worker-count", type=int, default=1)
     run.add_argument("--worker-index", type=int, default=0)
     run.add_argument("--no-capture", action="store_true")
@@ -135,6 +144,18 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--results", type=Path, required=True)
     analyze.add_argument("--output", type=Path, required=True)
     analyze.add_argument("--tshark", default="tshark")
+
+    timeline = subparsers.add_parser(
+        "session-timeline",
+        help="index a complete warm session into fixed time segments and prompt events",
+    )
+    timeline.add_argument("--results", type=Path, required=True)
+    timeline.add_argument("--capture", type=Path, required=True)
+    timeline.add_argument("--output-dir", type=Path, required=True)
+    timeline.add_argument("--server-port", type=int, required=True)
+    timeline.add_argument("--transport", choices=["tls13", "http3"], required=True)
+    timeline.add_argument("--segment-seconds", type=float, default=30)
+    timeline.add_argument("--tshark", default="tshark")
 
     snapshot = subparsers.add_parser(
         "server-snapshot",
@@ -230,6 +251,7 @@ def main() -> int:
                 capture_interface=args.capture_interface,
                 capture_filter=args.capture_filter,
                 capture_startup_delay_seconds=args.capture_startup_delay_seconds,
+                capture_stop_on_response=args.capture_stop_on_response,
                 worker_count=args.worker_count,
                 worker_index=args.worker_index,
                 no_capture=args.no_capture,
@@ -253,6 +275,19 @@ def main() -> int:
     if args.command == "analyze":
         output = analyze_results(args.results, args.output, tshark=args.tshark)
         print(f"Analysis: {output}")
+        return 0
+    if args.command == "session-timeline":
+        segments, prompts = analyze_session_timeline(
+            results_path=args.results,
+            capture_path=args.capture,
+            output_dir=args.output_dir,
+            server_port=args.server_port,
+            transport=args.transport,
+            segment_seconds=args.segment_seconds,
+            tshark=args.tshark,
+        )
+        print(f"Session segments: {segments}")
+        print(f"Prompt upload events: {prompts}")
         return 0
     if args.command == "server-snapshot":
         snapshot = fetch_vllm_snapshot(

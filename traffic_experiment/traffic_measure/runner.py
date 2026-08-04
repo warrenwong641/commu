@@ -46,6 +46,7 @@ class RunSettings:
     capture_interface: str
     capture_filter: str
     capture_startup_delay_seconds: float
+    capture_stop_on_response: bool = False
     worker_count: int = 1
     worker_index: int = 0
     no_capture: bool = False
@@ -574,6 +575,7 @@ def run_experiment(settings: RunSettings) -> Path:
                         capture_filter=settings.capture_filter,
                         duration_seconds=settings.observation_seconds,
                         startup_delay_seconds=settings.capture_startup_delay_seconds,
+                        stop_on_finish=settings.capture_stop_on_response,
                     )
                     capture.start()
                 if settings.transport == "http1":
@@ -674,8 +676,11 @@ def run_experiment(settings: RunSettings) -> Path:
                 "capture_return_code": capture_result.return_code,
                 "capture_stderr": capture_result.stderr or None,
                 "capture_observation_seconds": settings.observation_seconds,
+                "capture_stop_on_response": settings.capture_stop_on_response,
                 "capture_may_be_truncated": (
-                    response_data.get("elapsed_seconds", 0) > settings.observation_seconds
+                    not settings.capture_stop_on_response
+                    and response_data.get("elapsed_seconds", 0)
+                    > settings.observation_seconds
                 ),
                 "generation": generation,
                 "completed": completed_ok,

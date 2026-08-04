@@ -30,8 +30,8 @@ compression:
 
 generation:
   temperature: 0
-  max_output_tokens: 256
-  expected_output_tokens_for_budgeting: 128
+  max_output_tokens: 4096
+  expected_output_tokens_for_budgeting: 1024
   stream: true
   seed: 42  # Use only when the selected backend supports it.
 
@@ -40,7 +40,10 @@ measurement:
   parallel_workers: 2
   isolation: one_gpu_and_tcp_port_per_worker
   assignment: deterministic_disjoint_sample_blocks
-  observation_seconds: 30
+  capture_safety_seconds: 900
+  capture_stop_on_response: true
+  session_admission_seconds: 30
+  active_rate_bin_seconds: 1
   setup_and_teardown_seconds_per_call: 5
   primary_connection_mode: warm
   secondary_connection_mode: cold
@@ -69,11 +72,11 @@ measurement:
 workloads:
   qa:
     samples: 32
-    max_output_tokens: 256
+    max_output_tokens: 4096
   locomo_event_summary:
     conversations: 10
     maximum_speaker_units: 20
-    max_output_tokens: 512
+    max_output_tokens: 4096
     reference_source: annotated_event_summary
 
 backends:

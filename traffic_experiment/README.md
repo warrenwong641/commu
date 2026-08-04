@@ -36,6 +36,10 @@ TLS records, and server-side behavior are not controlled by the researcher.
 - `docs/run_protocol.md`: reproducible pilot and main-run procedure.
 - `docs/cost_time_estimates.md`: formulas and numerical estimates.
 - `docs/local_server_handoff.md`: copy-to-server installation and run commands.
+- `docs/lab_server_migration.md`: final lab deployment, network controls, and
+  resumable 4096-token workflows.
+- `docs/jupyter_web_access.md`: secure AutoDL-like browser access without
+  exposing Jupyter directly.
 - `schemas/run_manifest.schema.json`: minimum metadata for every measured request.
 - `traffic_measure/`: manifest preparation, vLLM runner, capture, and analysis code.
 - `scripts/`: Linux batch-equivalent setup and execution commands.
@@ -46,11 +50,12 @@ TLS records, and server-side behavior are not controlled by the researcher.
 | Profile | Samples | Conditions | Repetitions | Calls/backend |
 |---|---:|---:|---:|---:|
 | Pilot | 8 | 3 | 3 | 72 |
-| Main | 32 | 3 | 5 | 480 |
+| Main | 32 | 3 | 3 | 288 |
 | Robustness | 32 | 3 | 10 | 960 |
 
 The estimates assume an average of 9,000 input tokens before compression and
-128 output tokens. With equally represented no-compression, 2x, and 4x conditions,
+an observed output distribution capped at 4,096 tokens. With equally represented
+no-compression, 2x, and 4x conditions,
 the weighted average is 5,250 input tokens per call.
 
 ## Reproducibility rules
@@ -70,6 +75,18 @@ the weighted average is 5,250 input tokens per call.
 - Record application timestamps and packet timestamps in UTC.
 - Store packet captures outside version control.
 - Recheck provider prices and rate limits immediately before the final run.
+
+## Final lab-server entry points
+
+- `server.lab.env.example`: lab defaults with direct TCP/UDP, MTU 1500,
+  controlled RTT/capacity, three repetitions, and a 4,096-token output ceiling.
+- `scripts/16_create_lab_bundle.sh`: credential-free transfer archive.
+- `scripts/17_lab_preflight.sh`: machine and reproducibility audit.
+- `scripts/18_run_lab_matrix.sh`: resumable TLS/QUIC × network × workload matrix.
+- `scripts/19_run_lab_sessions.sh`: 30-second closed-loop and separate
+  Montieri-compatible ten-minute warm sessions.
+- `scripts/20_setup_jupyter_web.sh`: localhost-only JupyterLab user service.
+- `scripts/21_check_jupyter_web.sh`: listener and health verification.
 
 Pricing in this plan was checked on 2026-08-03 and is deliberately stored as
 configuration rather than embedded in experiment code.

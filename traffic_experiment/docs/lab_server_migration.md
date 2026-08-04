@@ -1,0 +1,201 @@
+# Lab-server migration and execution
+
+This is the final controlled deployment. It removes AutoDL's SSH encapsulation
+and gives the experiment direct control over TCP, UDP/QUIC, MTU, RTT, capacity,
+and NIC offloads.
+
+## What is transferred
+
+Transfer the source tree plus the two frozen manifests:
+
+- `artifacts/requests_32.jsonl`
+- `artifacts/event_summaries_10.jsonl`
+
+Do not transfer `server.env`, private keys, virtual environments, model caches,
+or preliminary packet captures as executable inputs. Retain the AutoDL `runs/`
+directory separately as an immutable pilot archive.
+
+If Git is available, push/clone the exact experiment commit and copy the ignored
+manifests separately. If it is not, create a credential-free archive:
+
+```bash
+bash traffic_experiment/scripts/16_create_lab_bundle.sh
+sha256sum -c commu-lab-transfer.tar.gz.sha256
+```
+
+The bundler intentionally refuses to run until both frozen manifests have been
+copied from AutoDL. This prevents accidentally changing sample selection or
+compression when moving machines.
+
+On the lab server:
+
+```bash
+sudo mkdir -p /srv/commu
+sudo tar -xzf commu-lab-transfer.tar.gz -C /srv/commu
+cd /srv/commu/traffic_experiment
+cp server.lab.env.example server.env
+```
+
+Fill `LOCOMO_DATA_DIR`, `VLLM_BIN`, `VLLM_MODEL_REVISION`, GPU IDs, and the local
+API key in `server.env`.
+
+## System preparation
+
+The tested design assumes Ubuntu/Debian, two NVIDIA GPUs, root access, and enough
+storage for the Qwen model, vLLM cache, manifests, and captures.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  git curl ca-certificates python3 python3-venv \
+  iproute2 ethtool iperf3 tshark
+
+bash scripts/00_install_caddy.sh
+bash scripts/01_setup_runner.sh
+```
+
+Install vLLM in a separate CUDA environment following the version compatible
+with the lab driver's CUDA runtime, then point `VLLM_BIN` at that environment.
+Do not blindly copy the AutoDL vLLM environment: CUDA, PyTorch, flash-attention,
+and driver combinations are machine-specific.
+
+During `tshark` installation, either permit non-root capture and configure the
+`dumpcap` group, or run the controlled scripts with `sudo`. The supplied lab
+orchestrators require root because they create namespaces and qdiscs.
+
+## Model and environment validation
+
+Start the two independent inference workers in a persistent terminal:
+
+```bash
+cd /srv/commu/traffic_experiment
+sudo -E bash scripts/03_start_vllm_dual.sh
+```
+
+Use another terminal for the audit:
+
+```bash
+cd /srv/commu/traffic_experiment
+sudo -E bash scripts/17_lab_preflight.sh
+```
+
+The audit records the OS, kernel, GPU UUIDs, driver, Caddy version, routes,
+capture interfaces, network parameters, model ID, model revision, and the
+4096-token limit under `runs/lab/machine_audit/`.
+
+Before the final run, verify:
+
+1. Both `/v1/models` endpoints respond on ports 8000 and 8001.
+2. The model revision is a commit SHA rather than a moving branch.
+3. `nvidia-smi` shows one vLLM worker per intended GPU.
+4. Both manifests exist and their SHA-256 values are archived.
+5. At least 100 GB remains for model files and packet captures.
+
+## Controlled network topology
+
+The client and secure proxy run in different Linux network namespaces joined by
+a veth pair:
+
+```text
+llm-client (10.200.0.2)
+          |
+   MTU/rate/delay qdisc
+          |
+llmhost0 (10.200.0.1) -> Caddy TLS 1.3 or HTTP/3 -> vLLM
+```
+
+No SSH tunnel is involved. Caddy terminates direct TLS 1.3 on TCP and HTTP/3 on
+UDP. Packet capture occurs on `llmhost0`, before vLLM's loopback HTTP connection.
+
+`scripts/11_network_condition.sh` provides three conditions:
+
+- `baseline`: MTU 1500, offloads disabled, no artificial delay or capacity cap.
+- `rtt`: MTU 1500 plus the configured round-trip delay.
+- `realistic`: the same RTT plus asymmetric uplink/downlink limits.
+
+The script disables TSO, GSO, GRO, and LRO on both veth endpoints. The physical
+NIC is not part of this internal path, so its offload state does not contaminate
+the captured experiment packets.
+
+`scripts/15_calibrate_link.sh` runs uplink and downlink `iperf3` checks for every
+condition. Calibration files are stored separately by condition.
+
+## Output length and the 30-second rule
+
+Both QA and event summarization use `max_tokens=4096`. This is an upper bound,
+not a forced response length. `temperature=0` and the frozen prompt keep
+generation reproducible, while `finish_reason` records whether the model stopped
+naturally or reached the limit.
+
+A 4096-token response may take several minutes. Per-request packet capture now
+stops when the response completes; 900 seconds is only a safety ceiling. This
+prevents the old 30-second capture from truncating a long response.
+
+The 30-second rule is retained for the warm-session experiment: requests are
+admitted sequentially until 30 seconds have elapsed, and the final admitted
+response is allowed to finish. Analysis can later bin the complete capture into
+one-second windows and report the first 30 seconds separately.
+
+Every completed warm session also produces:
+
+- `timeline_30s_segments.csv`: one indexed row per 30-second segment, including
+  uplink/downlink packets, frame bytes, payload bytes, rates, prompts started,
+  and responses active during that segment.
+- `prompt_upload_events.csv`: exact application prompt-dispatch timestamp and
+  segment index, logical JSON upload size, first/last observed upstream packet
+  before the response, response timestamps, segments spanned, output tokens,
+  and finish reason.
+
+The application timestamp is the authoritative prompt-send marker. The
+packet-derived upload interval is labelled as an on-wire estimate because TLS
+and QUIC encryption prevents identifying individual prompt bytes directly;
+for QUIC it can also contain transport acknowledgements.
+
+## Resumable experiment commands
+
+Run the full per-request matrix:
+
+```bash
+sudo -E bash scripts/18_run_lab_matrix.sh
+```
+
+This executes baseline, RTT-only, and realistic-capacity conditions across TLS
+1.3, HTTP/3, QA, and summarization, with three repetitions. Completed
+`(request_id, repetition)` jobs are skipped when the command is rerun.
+
+Run the 30-second closed-loop sessions:
+
+```bash
+sudo -E SESSION_PROFILE=closed_loop_30s \
+  bash scripts/19_run_lab_sessions.sh
+```
+
+Run the separate Montieri-compatible timing profile:
+
+```bash
+sudo -E SESSION_PROFILE=antonio_10min \
+  LAB_SESSION_NETWORKS="baseline" \
+  bash scripts/19_run_lab_sessions.sh
+```
+
+The latter sends ten sequential prompts with a 60-second target start interval
+over one warm connection. It must be reported separately from the 30-second
+compression stress profile.
+
+Each successful warm session receives a `SESSION_COMPLETE` marker. If a process
+is interrupted, its partial PCAP and JSONL are preserved and the orchestrator
+uses a `_retryN` session ID. It never merges separate TCP/QUIC connections into
+one nominal warm session.
+
+## Operational lessons from AutoDL
+
+- Download the model before the measured run; do not mix model transfer traffic
+  with captures.
+- Use persistent terminals (`tmux` or a system service) for vLLM and the runner.
+- Preserve logs and results after every cell; the JSONL runner is append-only and
+  resumable.
+- Check the first completed TLS and QUIC captures before launching the full
+  matrix. Confirm TCP versus UDP, TLS 1.3 versus QUIC, MTU, direction, and a
+  non-truncated response.
+- Do not combine AutoDL loopback/SSH results with the lab matrix. Keep them as
+  pilot and route-calibration evidence.

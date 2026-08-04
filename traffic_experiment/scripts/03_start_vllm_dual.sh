@@ -6,6 +6,11 @@ require_command "${VLLM_BIN}"
 
 PARALLEL_WORKERS="${PARALLEL_WORKERS:-2}"
 VLLM_PORT_STEP="${VLLM_PORT_STEP:-1}"
+IFS=',' read -r -a GPU_IDS <<<"${CUDA_VISIBLE_DEVICES:-0,1}"
+if ((${#GPU_IDS[@]} < PARALLEL_WORKERS)); then
+  echo "CUDA_VISIBLE_DEVICES must list at least ${PARALLEL_WORKERS} GPU IDs." >&2
+  exit 2
+fi
 LOG_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/vllm"
 mkdir -p "${LOG_DIR}"
 
@@ -24,8 +29,9 @@ trap cleanup INT TERM EXIT
 for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
   port=$((VLLM_PORT + worker * VLLM_PORT_STEP))
   log="${LOG_DIR}/gpu-${worker}-port-${port}.log"
-  echo "Starting worker ${worker}: GPU ${worker}, port ${port}, log ${log}"
-  CUDA_VISIBLE_DEVICES="${worker}" "${VLLM_BIN}" serve "${VLLM_MODEL}" \
+  gpu_id="${GPU_IDS[$worker]}"
+  echo "Starting worker ${worker}: physical GPU ${gpu_id}, port ${port}, log ${log}"
+  CUDA_VISIBLE_DEVICES="${gpu_id}" "${VLLM_BIN}" serve "${VLLM_MODEL}" \
     --host "${VLLM_HOST}" \
     --port "${port}" \
     --served-model-name "${VLLM_SERVED_MODEL_NAME}" \

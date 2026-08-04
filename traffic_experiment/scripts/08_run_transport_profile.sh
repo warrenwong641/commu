@@ -52,6 +52,10 @@ MANIFEST_PATH_EFFECTIVE="${MANIFEST_PATH_OVERRIDE:-${MANIFEST_PATH}}"
 RUNS_ROOT_EFFECTIVE="${RUNS_ROOT_OVERRIDE:-${RUNS_ROOT}}"
 MAX_OUTPUT_TOKENS_EFFECTIVE="${MAX_OUTPUT_TOKENS_OVERRIDE:-${MAX_OUTPUT_TOKENS}}"
 OBSERVATION_SECONDS_EFFECTIVE="${OBSERVATION_SECONDS_OVERRIDE:-${OBSERVATION_SECONDS}}"
+CAPTURE_COMPLETION_ARGS=()
+if [[ "${CAPTURE_STOP_ON_RESPONSE:-false}" == "true" ]]; then
+  CAPTURE_COMPLETION_ARGS=(--capture-stop-on-response)
+fi
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH_EFFECTIVE}")"
 RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")/local_vllm_${TRANSPORT}_${PROFILE}"
 mkdir -p "${RUN_DIR}"
@@ -70,6 +74,7 @@ mkdir -p "${RUN_DIR}"
   --observation-seconds "${OBSERVATION_SECONDS_EFFECTIVE}" \
   --capture-interface "${CAPTURE_INTERFACE_EFFECTIVE}" \
   --capture-filter "$(if [[ "${TRANSPORT}" == http3 ]]; then echo "udp port ${PORT}"; else echo "tcp port ${PORT}"; fi)" \
+  "${CAPTURE_COMPLETION_ARGS[@]}" \
   --transport "${TRANSPORT}" \
   --connection-mode "${CONNECTION_MODE}" \
   --tls-ca-file "${CA_FILE}"

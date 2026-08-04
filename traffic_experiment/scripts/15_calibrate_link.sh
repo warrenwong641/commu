@@ -9,7 +9,8 @@ NETNS="${CLIENT_NETNS:-llm-client}"
 HOST_IP="${HOST_VETH_CIDR:-10.200.0.1/24}"
 HOST_IP="${HOST_IP%/*}"
 DURATION="${LINK_CALIBRATION_SECONDS:-10}"
-OUTPUT_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/link_calibration"
+CALIBRATION_LABEL="${LINK_CALIBRATION_LABEL:-unlabelled}"
+OUTPUT_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/link_calibration/${CALIBRATION_LABEL}"
 mkdir -p "${OUTPUT_DIR}"
 
 if ! ip netns list | awk '{print $1}' | grep -Fxq "${NETNS}"; then

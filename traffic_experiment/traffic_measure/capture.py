@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ class DumpcapCapture:
         capture_filter: str,
         duration_seconds: int,
         startup_delay_seconds: float = 0.5,
+        stop_on_finish: bool = False,
         executable: str = "dumpcap",
     ) -> None:
         if not interface:
@@ -35,6 +37,7 @@ class DumpcapCapture:
         self.capture_filter = capture_filter
         self.duration_seconds = duration_seconds
         self.startup_delay_seconds = startup_delay_seconds
+        self.stop_on_finish = stop_on_finish
         self.executable = executable
         self.process: subprocess.Popen[str] | None = None
 
@@ -66,6 +69,10 @@ class DumpcapCapture:
     def finish(self) -> CaptureResult:
         if self.process is None:
             raise RuntimeError("capture was not started")
+        if self.stop_on_finish and self.process.poll() is None:
+            # SIGINT asks dumpcap to flush and close the pcapng cleanly. The
+            # duration autostop remains a safety ceiling if the runner hangs.
+            self.process.send_signal(signal.SIGINT)
         try:
             _, stderr = self.process.communicate(timeout=self.duration_seconds + 10)
         except subprocess.TimeoutExpired:

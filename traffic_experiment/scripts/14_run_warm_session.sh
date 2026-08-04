@@ -21,6 +21,16 @@ if [[ -n "${CLIENT_NETNS:-}" ]]; then
 fi
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH}")"
 RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/sessions/${SESSION_ID}_${TRANSPORT}"
+COMPLETE_MARKER="${RUN_DIR}/SESSION_COMPLETE"
+if [[ -f "${COMPLETE_MARKER}" ]]; then
+  echo "Warm session already complete; skipping ${RUN_DIR}"
+  exit 0
+fi
+if [[ -d "${RUN_DIR}" ]] && find "${RUN_DIR}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  echo "Refusing to overwrite interrupted warm session: ${RUN_DIR}" >&2
+  echo "Preserve it and choose a new SESSION_ID." >&2
+  exit 2
+fi
 mkdir -p "${RUN_DIR}"
 CADDY_RUN_DIR_ABS="$(absolute_from_experiment "${CADDY_RUN_DIR}")"
 CA_FILE="${CADDY_RUN_DIR_ABS}/data/caddy/pki/authorities/local/root.crt"
@@ -32,11 +42,13 @@ fi
 case "${TRANSPORT}" in
   tls13)
     BASE_URL="https://${SECURE_PROXY_HOST}:8443/v1"
+    SERVER_PORT="8443"
     CAPTURE_FILTER_SESSION="tcp port 8443"
     TLS_ARGS=(--tls-ca-file "${CA_FILE}")
     ;;
   http3)
     BASE_URL="https://${SECURE_PROXY_HOST}:8444/v1"
+    SERVER_PORT="8444"
     CAPTURE_FILTER_SESSION="udp port 8444"
     TLS_ARGS=(--tls-ca-file "${CA_FILE}")
     ;;
@@ -100,5 +112,13 @@ trap - EXIT
   --before "${BEFORE}" \
   --after "${AFTER}" \
   --output "${DIFF}"
+"${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli session-timeline \
+  --results "${RUN_DIR}/results.jsonl" \
+  --capture "${PCAP}" \
+  --output-dir "${RUN_DIR}" \
+  --server-port "${SERVER_PORT}" \
+  --transport "${TRANSPORT}" \
+  --segment-seconds "${SESSION_SEGMENT_SECONDS:-30}"
 
+printf 'completed_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${COMPLETE_MARKER}"
 echo "Warm session results: ${RUN_DIR}"
