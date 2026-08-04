@@ -9,6 +9,9 @@ param(
     [double]$SessionBudgetSeconds = 30,
     [ValidateSet("no_compression", "longllmlingua_2x", "longllmlingua_4x")]
     [string]$Condition = "no_compression",
+    [ValidateSet("http1", "tls13")]
+    [string]$Transport = "http1",
+    [string]$TlsCaFile = "",
     [string]$ApiKey = "local-test-key"
 )
 
@@ -17,37 +20,58 @@ $experimentRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $experimentRoot
 $manifestPath = Join-Path $experimentRoot $Manifest
 $outputPath = Join-Path $experimentRoot $OutputDir
+$resolvedTlsCaFile = $null
+if ($TlsCaFile) {
+    $resolvedTlsCaFile = (Resolve-Path $TlsCaFile).Path
+}
+$previousSslCertFile = $env:SSL_CERT_FILE
 
 Push-Location $repositoryRoot
 try {
+    if ($resolvedTlsCaFile) {
+        $env:SSL_CERT_FILE = $resolvedTlsCaFile
+    }
     python -m traffic_experiment.traffic_measure.cli check `
         --base-url $BaseUrl `
         --api-key $ApiKey
+    if ($LASTEXITCODE -ne 0) {
+        throw "Endpoint check failed with exit code $LASTEXITCODE."
+    }
 
     for ($repetition = 1; $repetition -le $Repetitions; $repetition++) {
         $sessionId = "hk-" + (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssfffZ")
         $sessionOutput = Join-Path $outputPath ("session-{0:D2}" -f $repetition)
-        python -m traffic_experiment.traffic_measure.cli run `
-            --manifest $manifestPath `
-            --output-dir $sessionOutput `
-            --backend local_vllm `
-            --base-url $BaseUrl `
-            --model $Model `
-            --samples $Samples `
-            --repetitions 1 `
-            --seed 42 `
-            --temperature 0 `
-            --max-output-tokens $MaxOutputTokens `
-            --request-timeout-seconds 180 `
-            --observation-seconds 0 `
-            --transport http1 `
-            --connection-mode warm `
-            --session-id $sessionId `
-            --condition $Condition `
-            --session-budget-seconds $SessionBudgetSeconds `
-            --no-capture
+        $runArguments = @(
+            "-m", "traffic_experiment.traffic_measure.cli", "run",
+            "--manifest", $manifestPath,
+            "--output-dir", $sessionOutput,
+            "--backend", "local_vllm",
+            "--base-url", $BaseUrl,
+            "--model", $Model,
+            "--samples", $Samples,
+            "--repetitions", 1,
+            "--seed", 42,
+            "--temperature", 0,
+            "--max-output-tokens", $MaxOutputTokens,
+            "--request-timeout-seconds", 180,
+            "--observation-seconds", 0,
+            "--transport", $Transport,
+            "--connection-mode", "warm",
+            "--session-id", $sessionId,
+            "--condition", $Condition,
+            "--session-budget-seconds", $SessionBudgetSeconds,
+            "--no-capture"
+        )
+        if ($resolvedTlsCaFile) {
+            $runArguments += @("--tls-ca-file", $resolvedTlsCaFile)
+        }
+        python @runArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Experiment run failed with exit code $LASTEXITCODE."
+        }
     }
 }
 finally {
     Pop-Location
+    $env:SSL_CERT_FILE = $previousSslCertFile
 }
