@@ -102,6 +102,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--no-wait-after-request", action="store_true", help=argparse.SUPPRESS)
     run.add_argument("--session-id")
     run.add_argument(
+        "--condition",
+        choices=sorted(SUPPORTED_CONDITIONS),
+        help="run only one frozen compression condition",
+    )
+    run.add_argument(
         "--inter-request-delay-seconds",
         type=float,
         default=0,
@@ -239,6 +244,7 @@ def main() -> int:
                 inter_request_delay_seconds=args.inter_request_delay_seconds,
                 request_start_interval_seconds=args.request_start_interval_seconds,
                 session_budget_seconds=args.session_budget_seconds,
+                condition=args.condition,
             )
         )
         print(f"Results: {results}")

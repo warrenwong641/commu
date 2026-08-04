@@ -44,7 +44,8 @@ application timestamps so each request can still be analyzed separately.
 Run:
 
 ```bash
-TRANSPORT=tls13 SESSION_TURNS=2 SESSION_BUDGET_SECONDS=30 \
+TRANSPORT=tls13 SESSION_CONDITION=no_compression \
+  SESSION_TURNS=2 SESSION_BUDGET_SECONDS=30 \
   scripts/14_run_warm_session.sh
 ```
 
@@ -103,6 +104,7 @@ For each transport and compression condition:
 - three technical repetitions under the realistic profile;
 - at most two sequential turns per session;
 - identical frozen prompt order;
+- one compression condition per session so two samples mean exactly two prompts;
 - a 30-second soft admission window with no cancellation of in-flight answers;
 - one persistent connection;
 - one continuous packet capture and paired vLLM snapshots.

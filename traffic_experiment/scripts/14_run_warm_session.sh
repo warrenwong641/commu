@@ -9,7 +9,9 @@ TRANSPORT="${TRANSPORT:-tls13}"
 SESSION_TURNS="${SESSION_TURNS:-2}"
 SESSION_START_INTERVAL_SECONDS="${SESSION_START_INTERVAL_SECONDS:-0}"
 SESSION_BUDGET_SECONDS="${SESSION_BUDGET_SECONDS:-30}"
+SESSION_CONDITION="${SESSION_CONDITION:-no_compression}"
 SESSION_ID="${SESSION_ID:-warm-$(date -u +%Y%m%dT%H%M%SZ)}"
+SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-localhost}"
 CAPTURE_INTERFACE_EFFECTIVE="${CAPTURE_INTERFACE_OVERRIDE:-${CAPTURE_INTERFACE}}"
 RUN_PREFIX=()
 if [[ -n "${CLIENT_NETNS:-}" ]]; then
@@ -80,6 +82,7 @@ sleep "${CAPTURE_STARTUP_DELAY_SECONDS:-1}"
   --transport "${TRANSPORT}" \
   --connection-mode warm \
   --session-id "${SESSION_ID}" \
+  --condition "${SESSION_CONDITION}" \
   --request-start-interval-seconds "${SESSION_START_INTERVAL_SECONDS}" \
   --session-budget-seconds "${SESSION_BUDGET_SECONDS}" \
   --no-capture \

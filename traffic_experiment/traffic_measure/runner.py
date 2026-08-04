@@ -60,6 +60,7 @@ class RunSettings:
     inter_request_delay_seconds: float = 0.0
     request_start_interval_seconds: float = 0.0
     session_budget_seconds: float = 0.0
+    condition: str | None = None
 
 
 def parse_sse_lines(lines: Iterable[str]) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -388,6 +389,16 @@ def _warm_http3_client(
 
 def run_experiment(settings: RunSettings) -> Path:
     manifest = read_jsonl(settings.manifest_path)
+    if settings.condition is not None:
+        manifest = [
+            row
+            for row in manifest
+            if str(row.get("condition")) == settings.condition
+        ]
+        if not manifest:
+            raise ValueError(
+                f"manifest has no rows for condition {settings.condition!r}"
+            )
     trials = _trial_rows(
         manifest,
         settings.sample_limit,

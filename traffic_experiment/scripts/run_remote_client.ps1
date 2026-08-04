@@ -7,6 +7,8 @@ param(
     [int]$Repetitions = 3,
     [int]$MaxOutputTokens = 1024,
     [double]$SessionBudgetSeconds = 30,
+    [ValidateSet("no_compression", "longllmlingua_2x", "longllmlingua_4x")]
+    [string]$Condition = "no_compression",
     [string]$ApiKey = "local-test-key"
 )
 
@@ -41,6 +43,7 @@ try {
             --transport http1 `
             --connection-mode warm `
             --session-id $sessionId `
+            --condition $Condition `
             --session-budget-seconds $SessionBudgetSeconds `
             --no-capture
     }
