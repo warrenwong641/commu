@@ -9,6 +9,8 @@ PRELIM_ROOT="${PRELIM_RUNS_ROOT:-runs/preliminary}"
 PROXY_HOST="${PRELIM_PROXY_HOST:-10.200.0.1}"
 NETNS="${CLIENT_NETNS:-llm-client}"
 HOST_IF="${HOST_VETH:-llmhost0}"
+NETWORK_MODE="${PRELIM_NETWORK_MODE:-netns}"
+NETWORKS="${PRELIM_NETWORKS:-baseline rtt}"
 QA_MANIFEST="${MANIFEST_PATH:-artifacts/requests_32.jsonl}"
 SUMMARY_MANIFEST="${SUMMARY_MANIFEST_PATH:-artifacts/event_summaries_10.jsonl}"
 
@@ -57,10 +59,23 @@ run_cell() {
     "${SCRIPT_DIR}/08_run_transport_profile_parallel.sh"
 }
 
-for network in baseline rtt; do
-  "${SCRIPT_DIR}/11_network_condition.sh" reset >/dev/null 2>&1 || true
-  CLIENT_NETNS="${NETNS}" HOST_VETH="${HOST_IF}" \
-    "${SCRIPT_DIR}/11_network_condition.sh" apply "${network}"
+for network in ${NETWORKS}; do
+  if [[ "${NETWORK_MODE}" == "netns" ]]; then
+    "${SCRIPT_DIR}/11_network_condition.sh" reset >/dev/null 2>&1 || true
+    CLIENT_NETNS="${NETNS}" HOST_VETH="${HOST_IF}" \
+      "${SCRIPT_DIR}/11_network_condition.sh" apply "${network}"
+  elif [[ "${NETWORK_MODE}" == "loopback" ]]; then
+    if [[ "${network}" != "baseline" ]]; then
+      echo "Loopback mode only supports baseline on an unprivileged container." >&2
+      exit 2
+    fi
+    NETNS=""
+    HOST_IF="${CAPTURE_INTERFACE:-lo}"
+    PROXY_HOST="localhost"
+  else
+    echo "PRELIM_NETWORK_MODE must be netns or loopback." >&2
+    exit 2
+  fi
   stop_proxy
   SECURE_PROXY_HOST="${PROXY_HOST}" "${SCRIPT_DIR}/07_start_secure_proxy.sh"
 
