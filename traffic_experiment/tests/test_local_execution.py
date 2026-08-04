@@ -379,6 +379,13 @@ def test_runner_against_mock_streaming_server(tmp_path):
         assert result["finish_reason"] == "stop"
         assert result["input_tokens"] == 12
         assert result["output_tokens"] == 2
+        assert result["request_json_bytes"] > 0
+        assert result["response_sse_bytes"] > 0
+        assert result["sse_event_count"] == 4
+        assert result["content_event_count"] == 1
+        assert result["time_to_response_headers_seconds"] >= 0
+        assert result["time_to_first_content_seconds"] >= 0
+        assert result["post_first_content_tokens_per_second"] > 0
     finally:
         server.shutdown()
         server.server_close()

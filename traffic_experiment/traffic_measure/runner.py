@@ -4,6 +4,7 @@ import json
 import random
 import socket
 import ssl
+import statistics
 import subprocess
 import tempfile
 import time
@@ -131,9 +132,19 @@ def _request_once(
 ) -> dict[str, Any]:
     request_started = utc_now()
     start = time.perf_counter()
+    request_json_bytes = len(
+        json.dumps(
+            request.payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
     first_byte_at: str | None = None
     first_token_at: str | None = None
     event_lines: list[str] = []
+    content_event_offsets: list[float] = []
+    response_sse_bytes = 0
+    sse_event_count = 0
     status_code: int | None = None
     response_headers: dict[str, str] = {}
 
@@ -145,24 +156,69 @@ def _request_once(
             if key.lower() in {"content-type", "x-request-id", "server", "date"}
         }
         first_byte_at = utc_now()
+        response_headers_offset = time.perf_counter() - start
         response.raise_for_status()
         for line in response.iter_lines():
-            if first_token_at is None and line.startswith("data:") and '"content"' in line:
+            line_offset = time.perf_counter() - start
+            response_sse_bytes += len(line.encode("utf-8")) + 1
+            if line.startswith("data:"):
+                sse_event_count += 1
+            if line.startswith("data:") and '"content"' in line:
                 try:
                     event = json.loads(line[5:].strip())
-                    if any((choice.get("delta") or {}).get("content") for choice in event.get("choices", [])):
-                        first_token_at = utc_now()
+                    if any(
+                        (choice.get("delta") or {}).get("content")
+                        for choice in event.get("choices", [])
+                    ):
+                        content_event_offsets.append(line_offset)
+                        if first_token_at is None:
+                            first_token_at = utc_now()
                 except (json.JSONDecodeError, TypeError):
                     pass
             event_lines.append(line)
 
     parsed = parse_backend_response(backend, event_lines)
+    inter_content_event_seconds = [
+        current - previous
+        for previous, current in zip(
+            content_event_offsets,
+            content_event_offsets[1:],
+        )
+    ]
     return {
         "started_at_utc": request_started,
         "first_byte_at_utc": first_byte_at,
         "first_token_at_utc": first_token_at,
         "finished_at_utc": utc_now(),
         "elapsed_seconds": round(time.perf_counter() - start, 6),
+        "time_to_response_headers_seconds": round(response_headers_offset, 6),
+        "time_to_first_content_seconds": (
+            round(content_event_offsets[0], 6) if content_event_offsets else None
+        ),
+        "content_stream_seconds": (
+            round(content_event_offsets[-1] - content_event_offsets[0], 6)
+            if len(content_event_offsets) > 1
+            else 0.0 if content_event_offsets else None
+        ),
+        "inter_content_event_p50_seconds": (
+            round(statistics.median(inter_content_event_seconds), 6)
+            if inter_content_event_seconds
+            else None
+        ),
+        "inter_content_event_p95_seconds": (
+            round(
+                sorted(inter_content_event_seconds)[
+                    max(0, int(0.95 * len(inter_content_event_seconds)) - 1)
+                ],
+                6,
+            )
+            if inter_content_event_seconds
+            else None
+        ),
+        "request_json_bytes": request_json_bytes,
+        "response_sse_bytes": response_sse_bytes,
+        "sse_event_count": sse_event_count,
+        "content_event_count": len(content_event_offsets),
         "http_status": status_code,
         "response_headers": response_headers,
         "provider_response_id": parsed.response_id,
@@ -531,6 +587,22 @@ def run_experiment(settings: RunSettings) -> Path:
             result["input_tokens"], result["output_tokens"] = normalized_usage(
                 settings.backend, result.get("usage")
             )
+            first_content_seconds = result.get("time_to_first_content_seconds")
+            elapsed_seconds = result.get("elapsed_seconds")
+            output_tokens = result.get("output_tokens")
+            if (
+                isinstance(output_tokens, int)
+                and output_tokens > 0
+                and isinstance(first_content_seconds, (int, float))
+                and isinstance(elapsed_seconds, (int, float))
+                and elapsed_seconds > first_content_seconds
+            ):
+                result["post_first_content_tokens_per_second"] = round(
+                    output_tokens / (elapsed_seconds - first_content_seconds),
+                    6,
+                )
+            else:
+                result["post_first_content_tokens_per_second"] = None
             append_jsonl(results_path, result)
             if completed_ok:
                 completed.add(key)
