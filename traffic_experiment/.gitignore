@@ -1,5 +1,6 @@
 .env
 server.env
+server.lab.env
 .venv-runner/
 .venv-jupyter/
 .tools/
