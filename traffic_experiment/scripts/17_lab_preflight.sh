@@ -2,11 +2,6 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-if [[ "${EUID}" -ne 0 ]]; then
-  echo "Run lab preflight as root (or with sudo) so netns, tc, MTU, and offloads are controllable." >&2
-  exit 2
-fi
-
 required=(ip tc ethtool iperf3 dumpcap tshark curl nvidia-smi caddy)
 missing=()
 for command_name in "${required[@]}"; do

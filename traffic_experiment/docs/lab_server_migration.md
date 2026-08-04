@@ -60,8 +60,10 @@ Do not blindly copy the AutoDL vLLM environment: CUDA, PyTorch, flash-attention,
 and driver combinations are machine-specific.
 
 During `tshark` installation, either permit non-root capture and configure the
-`dumpcap` group, or run the controlled scripts with `sudo`. The supplied lab
-orchestrators require root because they create namespaces and qdiscs.
+`dumpcap` group, or let the privileged matrix orchestrator invoke capture. The
+matrix and session orchestrators require root because they create namespaces
+and qdiscs. vLLM, Jupyter, manifest handling, and the read-only preflight should
+run as the normal lab user.
 
 ## Model and environment validation
 
@@ -69,14 +71,14 @@ Start the two independent inference workers in a persistent terminal:
 
 ```bash
 cd /srv/commu/traffic_experiment
-sudo -E bash scripts/03_start_vllm_dual.sh
+EXPERIMENT_ENV_FILE="$PWD/server.lab.env" bash scripts/03_start_vllm_dual.sh
 ```
 
 Use another terminal for the audit:
 
 ```bash
 cd /srv/commu/traffic_experiment
-sudo -E bash scripts/17_lab_preflight.sh
+EXPERIMENT_ENV_FILE="$PWD/server.lab.env" bash scripts/17_lab_preflight.sh
 ```
 
 The audit records the OS, kernel, GPU UUIDs, driver, Caddy version, routes,
@@ -156,7 +158,9 @@ for QUIC it can also contain transport acknowledgements.
 Run the full per-request matrix:
 
 ```bash
-sudo -E bash scripts/18_run_lab_matrix.sh
+sudo --preserve-env=PATH \
+  EXPERIMENT_ENV_FILE="$PWD/server.lab.env" \
+  bash scripts/18_run_lab_matrix.sh
 ```
 
 This executes baseline, RTT-only, and realistic-capacity conditions across TLS
@@ -166,14 +170,18 @@ This executes baseline, RTT-only, and realistic-capacity conditions across TLS
 Run the 30-second closed-loop sessions:
 
 ```bash
-sudo -E SESSION_PROFILE=closed_loop_30s \
+sudo --preserve-env=PATH \
+  EXPERIMENT_ENV_FILE="$PWD/server.lab.env" \
+  SESSION_PROFILE=closed_loop_30s \
   bash scripts/19_run_lab_sessions.sh
 ```
 
 Run the separate Montieri-compatible timing profile:
 
 ```bash
-sudo -E SESSION_PROFILE=antonio_10min \
+sudo --preserve-env=PATH \
+  EXPERIMENT_ENV_FILE="$PWD/server.lab.env" \
+  SESSION_PROFILE=antonio_10min \
   LAB_SESSION_NETWORKS="baseline" \
   bash scripts/19_run_lab_sessions.sh
 ```
@@ -186,6 +194,12 @@ Each successful warm session receives a `SESSION_COMPLETE` marker. If a process
 is interrupted, its partial PCAP and JSONL are preserved and the orchestrator
 uses a `_retryN` session ID. It never merges separate TCP/QUIC connections into
 one nominal warm session.
+
+Never provide a sudo password to an AI agent or place it in an environment
+file. A researcher or administrator should run the package-install command and
+launch the privileged matrix/session command interactively from a trusted
+console. The agent can perform all unprivileged setup, validate inputs, and
+monitor the resulting logs.
 
 ## Operational lessons from AutoDL
 
