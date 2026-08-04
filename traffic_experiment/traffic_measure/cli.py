@@ -116,6 +116,15 @@ def _parser() -> argparse.ArgumentParser:
             "runs longer, the next request starts only after it completes"
         ),
     )
+    run.add_argument(
+        "--session-budget-seconds",
+        type=float,
+        default=0,
+        help=(
+            "soft admission window: finish an in-flight response, but do not "
+            "start another request after this many session seconds"
+        ),
+    )
 
     analyze = subparsers.add_parser("analyze", help="extract traffic metrics with tshark")
     analyze.add_argument("--results", type=Path, required=True)
@@ -229,6 +238,7 @@ def main() -> int:
                 session_id=args.session_id,
                 inter_request_delay_seconds=args.inter_request_delay_seconds,
                 request_start_interval_seconds=args.request_start_interval_seconds,
+                session_budget_seconds=args.session_budget_seconds,
             )
         )
         print(f"Results: {results}")

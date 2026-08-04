@@ -59,6 +59,7 @@ class RunSettings:
     session_id: str | None = None
     inter_request_delay_seconds: float = 0.0
     request_start_interval_seconds: float = 0.0
+    session_budget_seconds: float = 0.0
 
 
 def parse_sse_lines(lines: Iterable[str]) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -407,6 +408,8 @@ def run_experiment(settings: RunSettings) -> Path:
         raise ValueError("inter-request delay must be non-negative")
     if settings.request_start_interval_seconds < 0:
         raise ValueError("request-start interval must be non-negative")
+    if settings.session_budget_seconds < 0:
+        raise ValueError("session budget must be non-negative")
     if (
         settings.inter_request_delay_seconds > 0
         and settings.request_start_interval_seconds > 0
@@ -432,6 +435,7 @@ def run_experiment(settings: RunSettings) -> Path:
         http2=False,
     )
     shared_http3: PersistentHttp3Client | None = None
+    session_started_monotonic = time.perf_counter()
     try:
         if settings.transport == "tls13" and settings.connection_mode == "warm":
             warm_headers = (
@@ -451,6 +455,21 @@ def run_experiment(settings: RunSettings) -> Path:
             )
 
         for index, (request, repetition) in enumerate(trials, start=1):
+            session_elapsed_at_start = (
+                time.perf_counter() - session_started_monotonic
+            )
+            if (
+                index > 1
+                and settings.session_budget_seconds > 0
+                and session_elapsed_at_start >= settings.session_budget_seconds
+            ):
+                print(
+                    "stop session before next request: "
+                    f"{session_elapsed_at_start:.3f}s elapsed "
+                    f"(budget={settings.session_budget_seconds:.3f}s)",
+                    flush=True,
+                )
+                break
             trial_started_monotonic = time.perf_counter()
             key = (str(request["request_id"]), repetition)
             if key in completed:
@@ -587,6 +606,11 @@ def run_experiment(settings: RunSettings) -> Path:
                 "request_start_interval_seconds": (
                     settings.request_start_interval_seconds
                 ),
+                "session_budget_seconds": settings.session_budget_seconds,
+                "session_elapsed_at_request_start_seconds": round(
+                    session_elapsed_at_start,
+                    6,
+                ),
                 "request_sha256": request_sha,
                 "messages_sha256": request["messages_sha256"],
                 "capture_file": str(capture_result.path) if capture_result.path else None,
@@ -623,6 +647,15 @@ def run_experiment(settings: RunSettings) -> Path:
                 )
             else:
                 result["post_first_content_tokens_per_second"] = None
+            result["session_elapsed_at_completion_seconds"] = round(
+                time.perf_counter() - session_started_monotonic,
+                6,
+            )
+            result["session_budget_exceeded_on_completion"] = (
+                settings.session_budget_seconds > 0
+                and result["session_elapsed_at_completion_seconds"]
+                >= settings.session_budget_seconds
+            )
             append_jsonl(results_path, result)
             if completed_ok:
                 completed.add(key)

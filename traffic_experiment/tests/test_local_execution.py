@@ -389,3 +389,57 @@ def test_runner_against_mock_streaming_server(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_session_budget_finishes_first_response_but_admits_no_late_second(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _VllmLikeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        manifest = tmp_path / "manifest.jsonl"
+        rows = []
+        for index in range(2):
+            messages = [{"role": "user", "content": f"Question {index}?"}]
+            rows.append(
+                {
+                    "request_id": f"conversation-{index}::q1::no_compression",
+                    "sample_id": f"conversation-{index}::q1",
+                    "conversation_id": f"conversation-{index}",
+                    "question_id": "q1",
+                    "condition": "no_compression",
+                    "messages": messages,
+                    "messages_sha256": str(index) * 64,
+                }
+            )
+        write_jsonl(manifest, rows)
+        output_dir = tmp_path / "session"
+        results_path = run_experiment(
+            RunSettings(
+                manifest_path=manifest,
+                output_dir=output_dir,
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                model="test-model",
+                api_key="test-key",
+                sample_limit=2,
+                repetitions=1,
+                seed=42,
+                temperature=0,
+                max_output_tokens=16,
+                request_timeout_seconds=5,
+                observation_seconds=0,
+                capture_interface="",
+                capture_filter="",
+                capture_startup_delay_seconds=0,
+                no_capture=True,
+                no_wait_after_request=True,
+                session_id="budget-test",
+                session_budget_seconds=0.000001,
+            )
+        )
+        results = read_jsonl(results_path)
+        assert len(results) == 1
+        assert results[0]["completed"] is True
+        assert results[0]["session_budget_exceeded_on_completion"] is True
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -40,6 +40,10 @@ The tunnel measures the geographic Hong Kong-to-China path and model streaming,
 but it is TCP inside SSH. It therefore cannot be used as the final direct
 TLS-versus-QUIC comparison.
 
+The remote client uses the same soft 30-second session admission rule as the
+controlled testbed: it finishes an in-flight response, admits a second prompt
+only when the first finishes before 30 seconds, and then ends the warm session.
+
 ### Final public option
 
 AutoDL instances do not have an independent public IP. Their documented custom

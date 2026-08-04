@@ -19,23 +19,23 @@ SSE response, with one persistent client and sequential POST requests.
 
 ## Primary session schedule
 
-Use a closed-loop schedule:
+Use a closed-loop session with a soft 30-second admission window:
 
-1. submit one frozen question on a fixed 60-second start schedule;
-2. read the streamed response to completion;
-3. remain silent for the rest of that minute;
-4. submit the next question on the reused connection;
-5. if a response exceeds 60 seconds, wait for completion rather than overlap it
-   with the next request.
+1. start a warm connection and submit the first frozen question;
+2. read its streamed response to completion;
+3. if less than 30 seconds have elapsed, immediately submit one more question;
+4. read that response to completion and end the session;
+5. if the first response crosses 30 seconds, do not cancel it, but end the
+   session when it finishes without admitting a second question.
 
-This follows Montieri et al.'s controlled workload: ten minutes, ten prompts,
-one prompt per minute, and completion before the next prompt. It is a controlled
-cadence rather than an empirical distribution of natural typing behavior.
+Thus, the session contains at most two prompts. The 30-second value controls
+whether a new request may start; it is not a response timeout or truncation
+boundary.
 
-A 30-second request-start interval may be reported as a higher-activity
-sensitivity profile, but it is not the paper-matched condition. If a 30-minute
-session is required, use 30 turns at the 60-second interval; do not describe that
-longer session as a direct reproduction of Montieri et al.'s 10-minute session.
+Montieri et al.'s paper-matched sensitivity profile remains available separately:
+ten minutes, ten prompts, one prompt per minute, complete response before the
+next prompt. Their protocol is controlled cadence, not an empirical distribution
+of natural typing behavior.
 
 Capture the whole session in one pcap. Per-request 30-second captures would
 insert artificial idle time between turns. Continue recording per-turn
@@ -44,7 +44,7 @@ application timestamps so each request can still be analyzed separately.
 Run:
 
 ```bash
-TRANSPORT=tls13 SESSION_TURNS=10 SESSION_START_INTERVAL_SECONDS=60 \
+TRANSPORT=tls13 SESSION_TURNS=2 SESSION_BUDGET_SECONDS=30 \
   scripts/14_run_warm_session.sh
 ```
 
@@ -101,9 +101,9 @@ For each transport and compression condition:
 
 - one baseline session;
 - three technical repetitions under the realistic profile;
-- ten sequential turns per session;
+- at most two sequential turns per session;
 - identical frozen prompt order;
-- one-minute request-start interval;
+- a 30-second soft admission window with no cancellation of in-flight answers;
 - one persistent connection;
 - one continuous packet capture and paired vLLM snapshots.
 
