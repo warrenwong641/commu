@@ -15,6 +15,12 @@ from .prepare import (
     prepare_summary_manifest,
 )
 from .runner import RunSettings, health_check, run_experiment
+from .vllm_metrics import (
+    diff_vllm_snapshots,
+    fetch_vllm_snapshot,
+    read_json,
+    write_json,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -94,11 +100,34 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--worker-index", type=int, default=0)
     run.add_argument("--no-capture", action="store_true")
     run.add_argument("--no-wait-after-request", action="store_true", help=argparse.SUPPRESS)
+    run.add_argument("--session-id")
+    run.add_argument(
+        "--inter-request-delay-seconds",
+        type=float,
+        default=0,
+        help="closed-loop pause after a completed response before the next request",
+    )
 
     analyze = subparsers.add_parser("analyze", help="extract traffic metrics with tshark")
     analyze.add_argument("--results", type=Path, required=True)
     analyze.add_argument("--output", type=Path, required=True)
     analyze.add_argument("--tshark", default="tshark")
+
+    snapshot = subparsers.add_parser(
+        "server-snapshot",
+        help="capture token, request, queue, and latency counters from vLLM",
+    )
+    snapshot.add_argument("--metrics-url", default="http://127.0.0.1:8000/metrics")
+    snapshot.add_argument("--output", type=Path, required=True)
+    snapshot.add_argument("--timeout-seconds", type=float, default=10)
+
+    diff = subparsers.add_parser(
+        "server-diff",
+        help="calculate vLLM counter deltas and rates between two snapshots",
+    )
+    diff.add_argument("--before", type=Path, required=True)
+    diff.add_argument("--after", type=Path, required=True)
+    diff.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -188,6 +217,8 @@ def main() -> int:
                 openrouter_provider=args.openrouter_provider,
                 tls_ca_file=args.tls_ca_file,
                 curl_executable=args.curl_executable,
+                session_id=args.session_id,
+                inter_request_delay_seconds=args.inter_request_delay_seconds,
             )
         )
         print(f"Results: {results}")
@@ -196,6 +227,22 @@ def main() -> int:
     if args.command == "analyze":
         output = analyze_results(args.results, args.output, tshark=args.tshark)
         print(f"Analysis: {output}")
+        return 0
+    if args.command == "server-snapshot":
+        snapshot = fetch_vllm_snapshot(
+            args.metrics_url,
+            timeout_seconds=args.timeout_seconds,
+        )
+        write_json(args.output, snapshot)
+        print(f"Server metrics snapshot: {args.output}")
+        return 0
+    if args.command == "server-diff":
+        diff = diff_vllm_snapshots(
+            read_json(args.before),
+            read_json(args.after),
+        )
+        write_json(args.output, diff)
+        print(f"Server metrics difference: {args.output}")
         return 0
     return 2
 

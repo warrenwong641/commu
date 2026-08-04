@@ -27,11 +27,14 @@ Both conditions use:
 - capture on the client-side veth interface;
 - the same prompts, model, generation settings, and randomized trial order.
 
-The two conditions are:
+The three conditions are:
 
 1. `baseline`: no added delay.
 2. `rtt`: 20 ms one-way delay on each veth egress, producing approximately
    40 ms round-trip time.
+3. `realistic`: the same 40 ms RTT plus asymmetric rate limits, defaulting to
+   20 Mbit/s client uplink and 50 Mbit/s server downlink. These are declared
+   test values, not a universal Hong Kong-to-China measurement.
 
 Keeping loss at zero isolates the effect of propagation delay. Loss can be added
 later as a separately declared robustness experiment.
@@ -50,6 +53,14 @@ For the realistic-delay condition:
 ```bash
 scripts/11_network_condition.sh reset
 scripts/11_network_condition.sh apply rtt
+```
+
+For the rate-limited condition:
+
+```bash
+scripts/11_network_condition.sh reset
+NETWORK_UPLINK_MBIT=20 NETWORK_DOWNLINK_MBIT=50 \
+  scripts/11_network_condition.sh apply realistic
 ```
 
 Before starting Caddy and the traffic runner, set:

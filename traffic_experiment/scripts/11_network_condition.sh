@@ -10,6 +10,9 @@ HOST_CIDR="${HOST_VETH_CIDR:-10.200.0.1/24}"
 CLIENT_CIDR="${CLIENT_VETH_CIDR:-10.200.0.2/24}"
 MTU="${NETWORK_MTU:-1500}"
 RTT_MS="${NETWORK_RTT_MS:-40}"
+UPLINK_MBIT="${NETWORK_UPLINK_MBIT:-20}"
+DOWNLINK_MBIT="${NETWORK_DOWNLINK_MBIT:-50}"
+QUEUE_PACKETS="${NETWORK_QUEUE_PACKETS:-1000}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -46,9 +49,9 @@ case "${ACTION}" in
       exit 2
     fi
     case "${CONDITION}" in
-      baseline | rtt) ;;
+      baseline | rtt | realistic) ;;
       *)
-        echo "Condition must be baseline or rtt; got ${CONDITION}." >&2
+        echo "Condition must be baseline, rtt, or realistic; got ${CONDITION}." >&2
         exit 2
         ;;
     esac
@@ -58,6 +61,10 @@ case "${ACTION}" in
     fi
     if ((RTT_MS < 0 || RTT_MS % 2 != 0)); then
       echo "NETWORK_RTT_MS must be a non-negative even integer; got ${RTT_MS}." >&2
+      exit 2
+    fi
+    if ((UPLINK_MBIT <= 0 || DOWNLINK_MBIT <= 0 || QUEUE_PACKETS <= 0)); then
+      echo "Network rates and queue size must be positive." >&2
       exit 2
     fi
 
@@ -74,11 +81,19 @@ case "${ACTION}" in
     ip netns exec "${NETNS}" ethtool -K "${CLIENT_IF}" \
       tso off gso off gro off lro off
 
-    if [[ "${CONDITION}" == "rtt" ]]; then
+    if [[ "${CONDITION}" == "rtt" || "${CONDITION}" == "realistic" ]]; then
       half_rtt=$((RTT_MS / 2))
-      tc qdisc add dev "${HOST_IF}" root netem delay "${half_rtt}ms"
-      ip netns exec "${NETNS}" tc qdisc add dev "${CLIENT_IF}" \
-        root netem delay "${half_rtt}ms"
+      if [[ "${CONDITION}" == "realistic" ]]; then
+        # HOST_IF egress is server-to-client (downlink); CLIENT_IF egress is uplink.
+        tc qdisc add dev "${HOST_IF}" root netem \
+          delay "${half_rtt}ms" rate "${DOWNLINK_MBIT}mbit" limit "${QUEUE_PACKETS}"
+        ip netns exec "${NETNS}" tc qdisc add dev "${CLIENT_IF}" root netem \
+          delay "${half_rtt}ms" rate "${UPLINK_MBIT}mbit" limit "${QUEUE_PACKETS}"
+      else
+        tc qdisc add dev "${HOST_IF}" root netem delay "${half_rtt}ms"
+        ip netns exec "${NETNS}" tc qdisc add dev "${CLIENT_IF}" \
+          root netem delay "${half_rtt}ms"
+      fi
     fi
     show_status
     ;;

@@ -56,6 +56,8 @@ class RunSettings:
     openrouter_provider: str | None = None
     tls_ca_file: Path | None = None
     curl_executable: str = "curl"
+    session_id: str | None = None
+    inter_request_delay_seconds: float = 0.0
 
 
 def parse_sse_lines(lines: Iterable[str]) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -400,6 +402,8 @@ def run_experiment(settings: RunSettings) -> Path:
         raise ValueError("transport must be http1, tls13, or http3")
     if settings.connection_mode not in {"warm", "cold"}:
         raise ValueError("connection mode must be warm or cold")
+    if settings.inter_request_delay_seconds < 0:
+        raise ValueError("inter-request delay must be non-negative")
 
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     verify: ssl.SSLContext | str | bool
@@ -567,6 +571,8 @@ def run_experiment(settings: RunSettings) -> Path:
                 "model": settings.model,
                 "transport": settings.transport,
                 "connection_mode": settings.connection_mode,
+                "session_id": settings.session_id,
+                "inter_request_delay_seconds": settings.inter_request_delay_seconds,
                 "request_sha256": request_sha,
                 "messages_sha256": request["messages_sha256"],
                 "capture_file": str(capture_result.path) if capture_result.path else None,
@@ -606,6 +612,11 @@ def run_experiment(settings: RunSettings) -> Path:
             append_jsonl(results_path, result)
             if completed_ok:
                 completed.add(key)
+            if (
+                index < len(trials)
+                and settings.inter_request_delay_seconds > 0
+            ):
+                time.sleep(settings.inter_request_delay_seconds)
 
     finally:
         if shared_http3 is not None:
