@@ -64,6 +64,12 @@ latency CV below 0.7%, so three repetitions are sufficient for the primary run.
 Use `MAIN_REPETITIONS` or `REPETITIONS_OVERRIDE` only when a documented power or
 variance analysis justifies a different count.
 
+Run the local secure profile under the two link conditions defined in
+`docs/network_conditions.md`: MTU 1500 with offloads disabled and either no added
+delay or 40 ms RTT. Use one warm TLS or QUIC connection per worker as the primary
+app-like condition. Retain the completed cold pilot as a separate setup-overhead
+sensitivity result; do not add a ten-repetition calibration run.
+
 Recommended backend order:
 
 1. local vLLM/Qwen3.5-9B;
