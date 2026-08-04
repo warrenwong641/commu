@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import ssl
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,13 +20,7 @@ class Http3Response:
     time_to_first_byte_seconds: float | None
 
 
-async def _request(
-    url: str,
-    headers: dict[str, str],
-    payload: dict[str, Any],
-    timeout_seconds: float,
-    ca_file: Path | None,
-) -> Http3Response:
+def _runtime():
     try:
         from aioquic.asyncio import QuicConnectionProtocol, connect
         from aioquic.h3.connection import H3_ALPN, H3Connection
@@ -79,7 +75,13 @@ async def _request(
                         )
                     )
 
-        async def post(self) -> Http3Response:
+        async def post(
+            self,
+            url: str,
+            headers: dict[str, str],
+            payload: dict[str, Any],
+            timeout_seconds: float,
+        ) -> Http3Response:
             parsed = urlparse(url)
             stream_id = self._quic.get_next_available_stream_id()
             loop = asyncio.get_running_loop()
@@ -110,20 +112,109 @@ async def _request(
             self.transmit()
             return await asyncio.wait_for(waiter, timeout=timeout_seconds)
 
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("HTTP/3 endpoint must be an https URL with a hostname")
-    configuration = QuicConfiguration(is_client=True, alpn_protocols=H3_ALPN)
+    return connect, H3_ALPN, QuicConfiguration, Protocol
+
+
+def _configuration(ca_file: Path | None):
+    _, h3_alpn, configuration_type, _ = _runtime()
+    configuration = configuration_type(is_client=True, alpn_protocols=h3_alpn)
     configuration.verify_mode = ssl.CERT_REQUIRED
     if ca_file:
         configuration.load_verify_locations(str(ca_file))
+    return configuration
+
+
+async def _request(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout_seconds: float,
+    ca_file: Path | None,
+) -> Http3Response:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("HTTP/3 endpoint must be an https URL with a hostname")
+    connect, _, _, protocol_type = _runtime()
+    configuration = _configuration(ca_file)
     async with connect(
         parsed.hostname,
         parsed.port or 443,
         configuration=configuration,
-        create_protocol=Protocol,
+        create_protocol=protocol_type,
     ) as protocol:
-        return await protocol.post()
+        return await protocol.post(url, headers, payload, timeout_seconds)
+
+
+class PersistentHttp3Client:
+    """Synchronous facade over one reusable aioquic connection."""
+
+    def __init__(
+        self,
+        base_url: str,
+        ca_file: Path | None,
+        connect_timeout_seconds: float = 30,
+    ) -> None:
+        parsed = urlparse(base_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("HTTP/3 base URL must be https and include a hostname")
+        self.host = parsed.hostname
+        self.port = parsed.port or 443
+        self.ca_file = ca_file
+        self.loop = asyncio.new_event_loop()
+        self.ready: concurrent.futures.Future[bool] = concurrent.futures.Future()
+        self.context: Any = None
+        self.protocol: Any = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        self.ready.result(timeout=connect_timeout_seconds)
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._open())
+        except BaseException as exc:
+            self.ready.set_exception(exc)
+            self.loop.close()
+            return
+        self.ready.set_result(True)
+        self.loop.run_forever()
+        self.loop.close()
+
+    async def _open(self) -> None:
+        connect, _, _, protocol_type = _runtime()
+        self.context = connect(
+            self.host,
+            self.port,
+            configuration=_configuration(self.ca_file),
+            create_protocol=protocol_type,
+        )
+        self.protocol = await self.context.__aenter__()
+
+    def post(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> Http3Response:
+        future = asyncio.run_coroutine_threadsafe(
+            self.protocol.post(url, headers, payload, timeout_seconds),
+            self.loop,
+        )
+        return future.result(timeout=timeout_seconds + 5)
+
+    def close(self) -> None:
+        if not self.thread.is_alive():
+            return
+
+        async def close_context() -> None:
+            if self.context is not None:
+                await self.context.__aexit__(None, None, None)
+
+        future = asyncio.run_coroutine_threadsafe(close_context(), self.loop)
+        future.result(timeout=10)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=10)
 
 
 def post_http3(

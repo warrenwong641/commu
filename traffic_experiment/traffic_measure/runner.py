@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -24,7 +25,7 @@ from .backends import (
 )
 from .capture import CaptureResult, DumpcapCapture
 from .common import append_jsonl, read_jsonl, sha256_file, sha256_json, utc_now
-from .http3_client import post_http3
+from .http3_client import PersistentHttp3Client, post_http3
 
 
 @dataclass(frozen=True)
@@ -243,16 +244,25 @@ def _request_once_http3(
     backend: str,
     timeout_seconds: float,
     tls_ca_file: Path | None,
+    client: PersistentHttp3Client | None = None,
 ) -> dict[str, Any]:
     request_started = utc_now()
     start = time.perf_counter()
-    response = post_http3(
-        request.endpoint,
-        request.headers,
-        request.payload,
-        timeout_seconds,
-        tls_ca_file,
-    )
+    if client is None:
+        response = post_http3(
+            request.endpoint,
+            request.headers,
+            request.payload,
+            timeout_seconds,
+            tls_ca_file,
+        )
+    else:
+        response = client.post(
+            request.endpoint,
+            request.headers,
+            request.payload,
+            timeout_seconds,
+        )
     if response.status >= 400:
         raise RuntimeError(f"HTTP {response.status}: {response.body[-1000:]}")
     parsed = parse_backend_response(backend, response.body.splitlines())
@@ -301,15 +311,42 @@ def run_experiment(settings: RunSettings) -> Path:
         raise ValueError("transport must be http1, tls13, or http3")
     if settings.connection_mode not in {"warm", "cold"}:
         raise ValueError("connection mode must be warm or cold")
-    if settings.transport != "http1" and settings.connection_mode != "cold":
-        raise ValueError("strict TLS 1.3 and HTTP/3 profiles currently require cold connections")
 
     settings.output_dir.mkdir(parents=True, exist_ok=True)
+    verify: ssl.SSLContext | str | bool
+    if settings.transport == "tls13":
+        verify = ssl.create_default_context(
+            cafile=str(settings.tls_ca_file) if settings.tls_ca_file else None
+        )
+        verify.minimum_version = ssl.TLSVersion.TLSv1_3
+        verify.maximum_version = ssl.TLSVersion.TLSv1_3
+    else:
+        verify = str(settings.tls_ca_file) if settings.tls_ca_file else True
     shared_client = httpx.Client(
         timeout=httpx.Timeout(settings.request_timeout_seconds),
-        verify=str(settings.tls_ca_file) if settings.tls_ca_file else True,
+        verify=verify,
+        http1=True,
+        http2=False,
     )
+    shared_http3: PersistentHttp3Client | None = None
     try:
+        if settings.transport == "tls13" and settings.connection_mode == "warm":
+            warm_headers = (
+                {"Authorization": f"Bearer {settings.api_key}"}
+                if settings.api_key
+                else {}
+            )
+            warm_response = shared_client.get(
+                settings.base_url.rstrip("/") + "/models",
+                headers=warm_headers,
+            )
+            warm_response.raise_for_status()
+        elif settings.transport == "http3" and settings.connection_mode == "warm":
+            shared_http3 = PersistentHttp3Client(
+                settings.base_url,
+                settings.tls_ca_file,
+            )
+
         for index, (request, repetition) in enumerate(trials, start=1):
             key = (str(request["request_id"]), repetition)
             if key in completed:
@@ -368,20 +405,28 @@ def run_experiment(settings: RunSettings) -> Path:
                         if settings.connection_mode == "cold":
                             client.close()
                 elif settings.transport == "tls13":
-                    response_data = _request_once_curl(
-                        backend_request,
-                        settings.backend,
-                        settings.transport,
-                        settings.request_timeout_seconds,
-                        settings.curl_executable,
-                        settings.tls_ca_file,
-                    )
+                    if settings.connection_mode == "warm":
+                        response_data = _request_once(
+                            shared_client,
+                            backend_request,
+                            settings.backend,
+                        )
+                    else:
+                        response_data = _request_once_curl(
+                            backend_request,
+                            settings.backend,
+                            settings.transport,
+                            settings.request_timeout_seconds,
+                            settings.curl_executable,
+                            settings.tls_ca_file,
+                        )
                 else:
                     response_data = _request_once_http3(
                         backend_request,
                         settings.backend,
                         settings.request_timeout_seconds,
                         settings.tls_ca_file,
+                        client=shared_http3,
                     )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
@@ -442,5 +487,7 @@ def run_experiment(settings: RunSettings) -> Path:
                 completed.add(key)
 
     finally:
+        if shared_http3 is not None:
+            shared_http3.close()
         shared_client.close()
     return results_path

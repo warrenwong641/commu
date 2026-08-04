@@ -6,6 +6,14 @@ require_value CAPTURE_INTERFACE
 require_command dumpcap
 
 TRANSPORT="${TRANSPORT:-tls13}"
+SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-localhost}"
+CAPTURE_INTERFACE_EFFECTIVE="${CAPTURE_INTERFACE_OVERRIDE:-${CAPTURE_INTERFACE}}"
+CONNECTION_MODE="${CONNECTION_MODE:-warm}"
+RUN_PREFIX=()
+if [[ -n "${CLIENT_NETNS:-}" ]]; then
+  require_command ip
+  RUN_PREFIX=(ip netns exec "${CLIENT_NETNS}")
+fi
 case "${TRANSPORT}" in
   tls13)
     PORT=8443
@@ -48,11 +56,11 @@ MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH_EFFECTIVE}")"
 RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")/local_vllm_${TRANSPORT}_${PROFILE}"
 mkdir -p "${RUN_DIR}"
 
-"${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli run \
+"${RUN_PREFIX[@]}" "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli run \
   --manifest "${MANIFEST_ABS}" \
   --output-dir "${RUN_DIR}" \
   --backend local_vllm \
-  --base-url "https://localhost:${PORT}/v1" \
+  --base-url "https://${SECURE_PROXY_HOST}:${PORT}/v1" \
   --model "${VLLM_SERVED_MODEL_NAME}" \
   --samples "${SAMPLES}" \
   --repetitions "${REPETITIONS}" \
@@ -60,8 +68,8 @@ mkdir -p "${RUN_DIR}"
   --max-output-tokens "${MAX_OUTPUT_TOKENS_EFFECTIVE}" \
   --request-timeout-seconds "${REQUEST_TIMEOUT_SECONDS}" \
   --observation-seconds "${OBSERVATION_SECONDS_EFFECTIVE}" \
-  --capture-interface "${CAPTURE_INTERFACE}" \
+  --capture-interface "${CAPTURE_INTERFACE_EFFECTIVE}" \
   --capture-filter "$(if [[ "${TRANSPORT}" == http3 ]]; then echo "udp port ${PORT}"; else echo "tcp port ${PORT}"; fi)" \
   --transport "${TRANSPORT}" \
-  --connection-mode cold \
+  --connection-mode "${CONNECTION_MODE}" \
   --tls-ca-file "${CA_FILE}"

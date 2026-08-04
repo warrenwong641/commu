@@ -13,6 +13,14 @@ if [[ "${PARALLEL_WORKERS}" -ne 2 ]]; then
 fi
 
 TRANSPORT="${TRANSPORT:-tls13}"
+SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-localhost}"
+CAPTURE_INTERFACE_EFFECTIVE="${CAPTURE_INTERFACE_OVERRIDE:-${CAPTURE_INTERFACE}}"
+CONNECTION_MODE="${CONNECTION_MODE:-warm}"
+RUN_PREFIX=()
+if [[ -n "${CLIENT_NETNS:-}" ]]; then
+  require_command ip
+  RUN_PREFIX=(ip netns exec "${CLIENT_NETNS}")
+fi
 case "${TRANSPORT}" in
   tls13)
     PORTS=(8443 8543)
@@ -63,11 +71,11 @@ for worker in 0 1; do
   worker_dir="${RUN_DIR}/worker-${worker}"
   worker_log="${RUN_DIR}/worker-${worker}.log"
   echo "Worker ${worker}: secure port=${port}, output=${worker_dir}"
-  "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli run \
+  "${RUN_PREFIX[@]}" "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli run \
     --manifest "${MANIFEST_ABS}" \
     --output-dir "${worker_dir}" \
     --backend local_vllm \
-    --base-url "https://localhost:${port}/v1" \
+    --base-url "https://${SECURE_PROXY_HOST}:${port}/v1" \
     --model "${VLLM_SERVED_MODEL_NAME}" \
     --api-key "${LOCAL_VLLM_API_KEY}" \
     --samples "${SAMPLES}" \
@@ -76,12 +84,12 @@ for worker in 0 1; do
     --max-output-tokens "${MAX_OUTPUT_TOKENS_EFFECTIVE}" \
     --request-timeout-seconds "${REQUEST_TIMEOUT_SECONDS}" \
     --observation-seconds "${OBSERVATION_SECONDS_EFFECTIVE}" \
-    --capture-interface "${CAPTURE_INTERFACE}" \
+    --capture-interface "${CAPTURE_INTERFACE_EFFECTIVE}" \
     --capture-filter "${FILTER_PROTOCOL} port ${port}" \
     --worker-count 2 \
     --worker-index "${worker}" \
     --transport "${TRANSPORT}" \
-    --connection-mode cold \
+    --connection-mode "${CONNECTION_MODE}" \
     --tls-ca-file "${CA_FILE}" \
     >"${worker_log}" 2>&1 &
   pids+=("$!")

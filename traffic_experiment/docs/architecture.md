@@ -80,11 +80,12 @@ tool version, and SHA-256 hash in the run metadata.
 
 ## Warm and cold connections
 
-The current HTTPX cleartext/API path can reuse a warm connection. The strict
-TLS 1.3 and HTTP/3 profiles use an external curl process and are therefore labeled
-`cold`; the runner rejects a `warm` label for those profiles. Never combine warm
-and cold results in one mean. A future warm-QUIC extension must use a persistent
-HTTP/3 client and demonstrate connection reuse in the capture.
+The HTTPX cleartext/API path and strict TLS 1.3 path can reuse a warm connection.
+The HTTP/3 path keeps one aioquic connection open per worker and uses a new stream
+for each request. For strict TLS, cold mode uses an external curl process for each
+request; for HTTP/3, cold mode creates a new QUIC connection for each request.
+Never combine warm and cold results in one mean. Demonstrate connection reuse in
+the captures before accepting a warm profile.
 
 ## Traffic isolation
 
