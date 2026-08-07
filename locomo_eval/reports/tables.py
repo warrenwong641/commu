@@ -6,6 +6,22 @@ import pandas as pd
 
 def add_method_family(results: pd.DataFrame) -> pd.DataFrame:
     frame = results.copy()
+    if "valid_for_analysis" in frame.columns:
+        def is_valid(value) -> bool:
+            if pd.isna(value):
+                return True
+            if isinstance(value, str):
+                return value.strip().lower() not in {
+                    "false",
+                    "0",
+                    "no",
+                    "invalid",
+                }
+            return bool(value)
+
+        frame = frame.loc[
+            frame["valid_for_analysis"].map(is_valid)
+        ].copy()
     if "method" not in frame.columns:
         return frame
     frame["method_family"] = frame["method"].apply(lambda method: "upper_bound_oracle" if method == "oracle_evidence" else "real_method")

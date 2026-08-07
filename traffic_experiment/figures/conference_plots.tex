@@ -1,0 +1,313 @@
+\usepackage{pgfplots}
+\usepgfplotslibrary{groupplots,statistics,fillbetween}
+\pgfplotsset{compat=1.18}
+
+\definecolor{AIBlue}{HTML}{0072B2}
+\definecolor{AIOrange}{HTML}{D55E00}
+\definecolor{AIGreen}{HTML}{009E73}
+\definecolor{AIPurple}{HTML}{7B61A8}
+\definecolor{AIGray}{HTML}{6B7280}
+\definecolor{AIGrid}{HTML}{E5E7EB}
+
+\pgfplotsset{
+  conference/.style={
+    width=0.93\linewidth,
+    height=0.56\textheight,
+    axis line style={draw=AIGray},
+    tick style={draw=AIGray},
+    grid=major,
+    grid style={draw=AIGrid,line width=0.35pt},
+    tick label style={font=\scriptsize},
+    label style={font=\small},
+    title style={font=\small\bfseries},
+    legend style={
+      draw=none,
+      fill=none,
+      font=\scriptsize,
+      /tikz/every even column/.append style={column sep=0.8em}
+    },
+    every axis plot/.append style={line width=1.2pt},
+    unbounded coords=discard,
+  },
+  conference bar/.style={
+    conference,
+    ybar,
+    bar width=8pt,
+    enlarge x limits=0.22,
+    nodes near coords,
+    nodes near coords style={font=\tiny,/pgf/number format/fixed,/pgf/number format/precision=0},
+    legend columns=-1,
+  },
+}
+
+\newcommand{\PlotTokenMedians}{
+\begin{tikzpicture}
+\begin{axis}[
+  conference bar,
+  xtick={0,1,2},
+  xticklabels={Original,2x,4x},
+  ylabel={Median input tokens (thousands)},
+  ymin=0,
+  ymax=52,
+  legend style={at={(0.5,1.02)},anchor=south,legend columns=-1},
+]
+\addplot+[fill=AIBlue,draw=AIBlue] table[x=x,y=qa_k,col sep=comma]
+  {figures/data/plot_token_medians.csv};
+\addplot+[fill=AIOrange,draw=AIOrange] table[x=x,y=summary_k,col sep=comma]
+  {figures/data/plot_token_medians.csv};
+\legend{QA,Event summary}
+\end{axis}
+\end{tikzpicture}
+}
+
+\newcommand{\ReductionPlot}[2]{
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=1.25cm},
+  conference bar,
+  width=0.46\linewidth,
+  height=0.54\textheight,
+  xtick={0,1},
+  xticklabels={2x,4x},
+  ylabel={Median reduction (\%)},
+  ymin=0,
+  ymax=85,
+  legend style={at={(0.5,1.16)},anchor=south,legend columns=-1},
+  error bars/y dir=both,
+  error bars/y explicit,
+]
+\nextgroupplot[title={QA}]
+\addplot+[fill=AIBlue,draw=AIBlue] table[
+  x=x,y=qa_tls13,y error plus=qa_tls13_err_plus,y error minus=qa_tls13_err_minus,col sep=comma]
+  {#1};
+\addplot+[fill=AIOrange,draw=AIOrange] table[
+  x=x,y=qa_http3,y error plus=qa_http3_err_plus,y error minus=qa_http3_err_minus,col sep=comma]
+  {#1};
+\legend{TLS 1.3,HTTP/3}
+\nextgroupplot[title={Event summary},ylabel={}]
+\addplot+[fill=AIBlue,draw=AIBlue] table[
+  x=x,y=summary_tls13,y error plus=summary_tls13_err_plus,y error minus=summary_tls13_err_minus,col sep=comma]
+  {#1};
+\addplot+[fill=AIOrange,draw=AIOrange] table[
+  x=x,y=summary_http3,y error plus=summary_http3_err_plus,y error minus=summary_http3_err_minus,col sep=comma]
+  {#1};
+\end{groupplot}
+\end{tikzpicture}
+}
+\newcommand{\PlotUploadReduction}{
+  \ReductionPlot{figures/data/plot_upload_reduction.csv}{Client-to-server bytes}
+}
+\newcommand{\PlotTotalReduction}{
+  \ReductionPlot{figures/data/plot_total_reduction.csv}{Bidirectional frame bytes}
+}
+\newcommand{\PlotLatencyReduction}{
+  \ReductionPlot{figures/data/plot_latency_reduction.csv}{End-to-end generation latency}
+}
+
+\newcommand{\DirectionPlot}[2]{
+\begin{tikzpicture}
+\begin{axis}[
+  conference,
+  ybar stacked,
+  bar width=15pt,
+  width=0.96\linewidth,
+  height=0.56\textheight,
+  xtick={0,1,2,4,5,6},
+  xticklabels={TLS Orig.,TLS 2x,TLS 4x,H3 Orig.,H3 2x,H3 4x},
+  xticklabel style={rotate=22,anchor=east,font=\scriptsize},
+  ylabel={Median captured bytes (KiB)},
+  ymin=0,
+  legend style={at={(0.5,1.02)},anchor=south,legend columns=-1},
+]
+\addplot+[fill=AIBlue,draw=AIBlue] table[x=x,y=upload_kib,col sep=comma]{#1};
+\addplot+[fill=AIOrange,draw=AIOrange] table[x=x,y=download_kib,col sep=comma]{#1};
+\legend{Client $\rightarrow$ server,Server $\rightarrow$ client}
+\end{axis}
+\end{tikzpicture}
+}
+\newcommand{\PlotDirectionQA}{
+  \DirectionPlot{figures/data/plot_direction_qa.csv}{QA is upload dominated}
+}
+\newcommand{\PlotDirectionSummary}{
+  \DirectionPlot{figures/data/plot_direction_summary.csv}{Summary traffic is output dominated}
+}
+
+\newcommand{\PlotProtocolBytes}{
+\begin{tikzpicture}
+\begin{axis}[
+  conference bar,
+  xtick={0,1,2},
+  xticklabels={Original,2x,4x},
+  ylabel={HTTP/3 / TLS total-byte ratio},
+  ymin=0.85,
+  ymax=1.12,
+  nodes near coords style={font=\tiny,/pgf/number format/fixed,/pgf/number format/precision=2},
+  legend style={at={(0.5,1.02)},anchor=south,legend columns=-1},
+]
+\addplot+[fill=AIBlue,draw=AIBlue] table[x=x,y=qa_bytes,col sep=comma]
+  {figures/data/plot_protocol_ratio.csv};
+\addplot+[fill=AIOrange,draw=AIOrange] table[x=x,y=summary_bytes,col sep=comma]
+  {figures/data/plot_protocol_ratio.csv};
+\addplot[AIGray,dashed,sharp plot,forget plot] coordinates {(-0.5,1) (2.5,1)};
+\legend{QA,Event summary}
+\end{axis}
+\end{tikzpicture}
+}
+
+\newcommand{\PlotProtocolPackets}{
+\begin{tikzpicture}
+\begin{axis}[
+  conference bar,
+  xtick={0,1,2},
+  xticklabels={Original,2x,4x},
+  ylabel={HTTP/3 / TLS packet-count ratio},
+  ymin=0,
+  ymax=3.3,
+  nodes near coords style={font=\tiny,/pgf/number format/fixed,/pgf/number format/precision=2},
+  legend style={at={(0.5,1.02)},anchor=south,legend columns=-1},
+]
+\addplot+[fill=AIBlue,draw=AIBlue] table[x=x,y=qa_packets,col sep=comma]
+  {figures/data/plot_protocol_ratio.csv};
+\addplot+[fill=AIOrange,draw=AIOrange] table[x=x,y=summary_packets,col sep=comma]
+  {figures/data/plot_protocol_ratio.csv};
+\addplot[AIGray,dashed,sharp plot,forget plot] coordinates {(-0.5,1) (2.5,1)};
+\legend{QA,Event summary}
+\end{axis}
+\end{tikzpicture}
+}
+
+\newcommand{\PlotLatencyMedians}{
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=1.2cm},
+  conference,
+  width=0.46\linewidth,
+  height=0.54\textheight,
+  xtick={0,1,2},
+  xticklabels={Original,2x,4x},
+  ylabel={Median latency (s)},
+  ymin=0,
+  legend style={at={(0.5,1.16)},anchor=south,legend columns=-1},
+]
+\nextgroupplot[title={QA},ymax=10]
+\addplot+[mark=*,color=AIBlue] table[x=x,y=qa_tls13,col sep=comma]{figures/data/plot_latency_medians.csv};
+\addplot+[mark=square*,color=AIOrange] table[x=x,y=qa_http3,col sep=comma]{figures/data/plot_latency_medians.csv};
+\legend{TLS 1.3,HTTP/3}
+\nextgroupplot[title={Event summary},ylabel={},ymax=28]
+\addplot+[mark=*,color=AIBlue] table[x=x,y=summary_tls13,col sep=comma]{figures/data/plot_latency_medians.csv};
+\addplot+[mark=square*,color=AIOrange] table[x=x,y=summary_http3,col sep=comma]{figures/data/plot_latency_medians.csv};
+\end{groupplot}
+\end{tikzpicture}
+}
+
+\newcommand{\PlotAbsoluteTotal}{
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=1.2cm},
+  conference bar,
+  width=0.46\linewidth,
+  height=0.54\textheight,
+  xtick={0,1,2},
+  xticklabels={Original,2x,4x},
+  ylabel={Median total traffic (KiB)},
+  ymin=0,
+  legend style={at={(0.5,1.16)},anchor=south,legend columns=-1},
+]
+\nextgroupplot[title={QA},ymax=180]
+\addplot+[fill=AIBlue,draw=AIBlue] table[x=x,y=qa_tls13,col sep=comma]{figures/data/plot_total_kib.csv};
+\addplot+[fill=AIOrange,draw=AIOrange] table[x=x,y=qa_http3,col sep=comma]{figures/data/plot_total_kib.csv};
+\legend{TLS 1.3,HTTP/3}
+\nextgroupplot[title={Event summary},ylabel={},ymax=430]
+\addplot+[fill=AIBlue,draw=AIBlue] table[x=x,y=summary_tls13,col sep=comma]{figures/data/plot_total_kib.csv};
+\addplot+[fill=AIOrange,draw=AIOrange] table[x=x,y=summary_http3,col sep=comma]{figures/data/plot_total_kib.csv};
+\end{groupplot}
+\end{tikzpicture}
+}
+
+\newcommand{\PlotTokenUploadScatter}{
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=1.2cm},
+  conference,
+  width=0.46\linewidth,
+  height=0.54\textheight,
+  xlabel={Input tokens},
+  ylabel={Client-to-server traffic (KiB)},
+  xmin=0,
+  ymin=0,
+  legend style={at={(0.5,1.16)},anchor=south,legend columns=-1},
+]
+\nextgroupplot[title={TLS 1.3}]
+\addplot+[only marks,mark=*,mark size=1.7pt,color=AIBlue,opacity=0.72]
+  table[x=input_tokens,y=upload_kib,col sep=comma]{figures/data/scatter_qa_tls13.csv};
+\addplot+[only marks,mark=triangle*,mark size=2pt,color=AIOrange,opacity=0.72]
+  table[x=input_tokens,y=upload_kib,col sep=comma]{figures/data/scatter_summary_tls13.csv};
+\legend{QA,Event summary}
+\nextgroupplot[title={HTTP/3},ylabel={}]
+\addplot+[only marks,mark=*,mark size=1.7pt,color=AIBlue,opacity=0.72]
+  table[x=input_tokens,y=upload_kib,col sep=comma]{figures/data/scatter_qa_http3.csv};
+\addplot+[only marks,mark=triangle*,mark size=2pt,color=AIOrange,opacity=0.72]
+  table[x=input_tokens,y=upload_kib,col sep=comma]{figures/data/scatter_summary_http3.csv};
+\end{groupplot}
+\end{tikzpicture}
+}
+
+\newcommand{\PlotTotalECDF}{
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=1.2cm},
+  conference,
+  width=0.46\linewidth,
+  height=0.54\textheight,
+  xlabel={Compressed / original total bytes},
+  ylabel={Fraction of paired samples},
+  xmin=0.2,
+  xmax=1.2,
+  ymin=0,
+  ymax=1.02,
+  legend style={at={(0.5,1.16)},anchor=south,legend columns=2},
+]
+\nextgroupplot[title={QA}]
+\addplot+[color=AIBlue,solid] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_qa_tls13_longllmlingua_2x.csv};
+\addlegendentry{TLS 2$\times$}
+\addplot+[color=AIOrange,solid] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_qa_tls13_longllmlingua_4x.csv};
+\addlegendentry{TLS 4$\times$}
+\addplot+[color=AIBlue,dashed] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_qa_http3_longllmlingua_2x.csv};
+\addlegendentry{H3 2$\times$}
+\addplot+[color=AIOrange,dashed] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_qa_http3_longllmlingua_4x.csv};
+\addlegendentry{H3 4$\times$}
+\nextgroupplot[title={Event summary},ylabel={}]
+\addplot+[color=AIBlue,solid] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_summary_tls13_longllmlingua_2x.csv};
+\addplot+[color=AIOrange,solid] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_summary_tls13_longllmlingua_4x.csv};
+\addplot+[color=AIBlue,dashed] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_summary_http3_longllmlingua_2x.csv};
+\addplot+[color=AIOrange,dashed] table[x=ratio,y=ecdf,col sep=comma]
+  {figures/data/ecdf_summary_http3_longllmlingua_4x.csv};
+\end{groupplot}
+\end{tikzpicture}
+}
+
+\newcommand{\PlotOutputShare}{
+\begin{tikzpicture}
+\begin{axis}[
+  conference bar,
+  width=0.96\linewidth,
+  height=0.56\textheight,
+  xtick={0,1,2,4,5,6},
+  xticklabels={TLS Orig.,TLS 2x,TLS 4x,H3 Orig.,H3 2x,H3 4x},
+  xticklabel style={rotate=22,anchor=east,font=\scriptsize},
+  ylabel={Download share of median traffic (\%)},
+  ymin=0,
+  ymax=85,
+]
+\addplot+[fill=AIOrange,draw=AIOrange] table[x=x,y=output_share_pct,col sep=comma]
+  {figures/data/plot_direction_summary.csv};
+\end{axis}
+\end{tikzpicture}
+}

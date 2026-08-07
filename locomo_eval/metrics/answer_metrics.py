@@ -25,9 +25,13 @@ def normalize_answer(text: str) -> str:
     return " ".join(text.split())
 
 
-def token_f1(prediction: str, reference: str) -> float:
+def legacy_token_f1(prediction: str, reference: str) -> float:
     pred_tokens = prediction.lower().split()
     ref_tokens = reference.lower().split()
+    return _token_f1_from_tokens(pred_tokens, ref_tokens)
+
+
+def _token_f1_from_tokens(pred_tokens: list[str], ref_tokens: list[str]) -> float:
     if not pred_tokens and not ref_tokens:
         return 1.0
     if not pred_tokens or not ref_tokens:
@@ -39,6 +43,13 @@ def token_f1(prediction: str, reference: str) -> float:
     precision = overlap / len(pred_tokens)
     recall = overlap / len(ref_tokens)
     return 2 * precision * recall / (precision + recall)
+
+
+def token_f1(prediction: str, reference: str) -> float:
+    """SQuAD-style token overlap after punctuation/article normalization."""
+    pred_tokens = normalize_answer(prediction).split()
+    ref_tokens = normalize_answer(reference).split()
+    return _token_f1_from_tokens(pred_tokens, ref_tokens)
 
 
 def rouge_l(prediction: str, reference: str) -> float:
@@ -84,6 +95,7 @@ def score_answer(prediction: str, reference: str) -> dict[str, float | None]:
     reference_entities = _extract_entities(reference)
     return {
         "token_f1": token_f1(prediction, reference),
+        "legacy_token_f1": legacy_token_f1(prediction, reference),
         "rouge_l": rouge_l(prediction, reference),
         "exact_match": exact_match(prediction, reference),
         "date_f1": set_f1(prediction_dates, reference_dates),

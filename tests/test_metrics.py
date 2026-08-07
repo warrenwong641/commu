@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from locomo_eval.metrics.answer_metrics import token_f1
+from locomo_eval.metrics.answer_metrics import legacy_token_f1, token_f1
 from locomo_eval.metrics.answer_metrics import score_answer
 from locomo_eval.metrics.compression_metrics import compression_ratio
 from locomo_eval.metrics.evidence_metrics import answerable_context_rate, evidence_recall, evidence_session_recall
@@ -8,6 +8,11 @@ from locomo_eval.metrics.evidence_metrics import answerable_context_rate, eviden
 
 def test_identical_token_f1():
     assert token_f1("hello world", "hello world") == 1.0
+
+
+def test_token_f1_normalizes_punctuation_and_articles_but_keeps_legacy_score():
+    assert token_f1("The answer is Luna.", "answer is Luna") == 1.0
+    assert legacy_token_f1("Luna.", "Luna") == 0.0
 
 
 def test_empty_context_recall():

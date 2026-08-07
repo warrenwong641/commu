@@ -1,0 +1,14 @@
+{
+	admin localhost:2020
+}
+
+# Direct-public-hostname alternative. Use this only when the lab firewall
+# explicitly permits inbound TCP 80/443 and DNS points to the lab server.
+<JUPYTER-SUBDOMAIN.EXAMPLE.EDU> {
+	reverse_proxy 127.0.0.1:8888
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+	}
+}

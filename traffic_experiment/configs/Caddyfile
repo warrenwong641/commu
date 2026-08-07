@@ -1,0 +1,46 @@
+{
+	servers :8443 {
+		protocols h1
+	}
+	servers :8444 {
+		protocols h3
+	}
+	servers :8543 {
+		protocols h1
+	}
+	servers :8544 {
+		protocols h3
+	}
+}
+
+https://{$SECURE_PROXY_HOST:localhost}:8443 {
+	tls internal {
+		protocols tls1.3
+		curves x25519
+	}
+	reverse_proxy {$VLLM_HOST}:{$VLLM_PORT}
+}
+
+https://{$SECURE_PROXY_HOST:localhost}:8444 {
+	tls internal {
+		protocols tls1.3
+		curves x25519
+	}
+	reverse_proxy {$VLLM_HOST}:{$VLLM_PORT}
+}
+
+https://{$SECURE_PROXY_HOST:localhost}:8543 {
+	tls internal {
+		protocols tls1.3
+		curves x25519
+	}
+	reverse_proxy {$VLLM_HOST}:{$VLLM_SECONDARY_PORT}
+}
+
+https://{$SECURE_PROXY_HOST:localhost}:8544 {
+	tls internal {
+		protocols tls1.3
+		curves x25519
+	}
+	reverse_proxy {$VLLM_HOST}:{$VLLM_SECONDARY_PORT}
+}
