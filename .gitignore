@@ -34,3 +34,15 @@ results/exp_002_merged/exp_002_report.snm
 results/exp_002_merged/exp_002_report.toc
 results/exp_002_merged/exp_002_report.vrb
 results/exp_002_merged/texput.log
+
+# Server-side zero-transport runtime state
+server_side_zero_transport/config.env
+server_side_zero_transport/runs/
+server_side_zero_transport/verification/
+
+# Generated transfer bundles and checksum sidecars
+frozen_manifests.tar.gz
+frozen_manifests.tar.gz.sha256
+commu-lab-transfer.tar.gz
+commu-lab-transfer.tar.gz.sha256
+commu-lab-transfer.tar.gz.manifests.sha256

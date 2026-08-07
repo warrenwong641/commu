@@ -1,0 +1,9 @@
+# Named Cloudflare Tunnel configuration. Replace all angle-bracket values.
+# Protect the hostname with a Cloudflare Access identity policy before use.
+tunnel: <TUNNEL-UUID>
+credentials-file: /home/<LAB-USER>/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: <JUPYTER-SUBDOMAIN.EXAMPLE.EDU>
+    service: http://127.0.0.1:8888
+  - service: http_status:404

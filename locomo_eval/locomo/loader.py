@@ -80,6 +80,7 @@ def _parse_locomo_github_format(raw: dict, source_name: str = "") -> Conversatio
         turns = [_parse_turn(turn, session_id, timestamp) for turn in conversation_block.get(session_key, [])]
         summary_key = f"{session_key}_summary"
         event_key = f"{session_key}_summary"
+        official_event_key = f"events_{session_key}"
         observation_values = observation.get(session_key, [])
         if isinstance(observation_values, str):
             observations = [observation_values]
@@ -96,7 +97,8 @@ def _parse_locomo_github_format(raw: dict, source_name: str = "") -> Conversatio
                 timestamp=timestamp,
                 turns=turns,
                 summary=session_summary.get(summary_key),
-                event_summary=event_summary.get(event_key),
+                event_summary=event_summary.get(official_event_key)
+                or event_summary.get(event_key),
                 observations=observations,
             )
         )

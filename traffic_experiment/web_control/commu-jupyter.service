@@ -1,0 +1,21 @@
+[Unit]
+Description=Commu experiment JupyterLab (localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/commu-jupyter/environment
+Environment=JUPYTER_PASSWORD_HASH_FILE=%h/.config/commu-jupyter/password_hash
+WorkingDirectory=%h
+ExecStart=/usr/bin/bash -lc 'exec "$JUPYTER_VENV/bin/jupyter" lab --config="$JUPYTER_CONFIG_FILE"'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

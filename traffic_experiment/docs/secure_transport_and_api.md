@@ -1,0 +1,75 @@
+# Secure transport, summary, and API profiles
+
+## Prepare event summaries
+
+Run `scripts/02_prepare_summary_manifest.sh`. It selects conversations with
+annotated event summaries, creates a speaker-specific chronological-summary prompt,
+and precomputes the same three compression conditions used by QA. Point
+`MANIFEST_PATH` at the resulting file and use the checked-in 1024-token output
+ceiling when measuring this workload. Summary preparation defaults to no
+compression, LongLLMLingua 2x, and LongLLMLingua 4x.
+
+## Start the local secure proxy
+
+Run `scripts/00_install_caddy.sh` to install the pinned, checksum-verified Caddy
+binary inside the experiment directory, then run `scripts/07_start_secure_proxy.sh`.
+The script validates `configs/Caddyfile`, starts Caddy in the background, and prints
+the local CA path. Keep vLLM on port 8000.
+
+- TCP 8443: TLS 1.3 plus HTTP/1.1.
+- UDP 8444: TLS 1.3 as used by QUIC plus HTTP/3 only.
+- TCP/UDP 8543/8544: identical transports routed only to the second vLLM worker.
+
+The runner uses aioquic for an HTTP/3-only client, so there is no TCP fallback.
+Run `TRANSPORT=tls13 scripts/08_run_transport_profile.sh` and then
+`TRANSPORT=http3 scripts/08_run_transport_profile.sh`. Analyze each output
+directory separately. A valid QUIC row must record HTTP version 3 and the capture
+must contain UDP/QUIC packets on port 8444.
+
+For the two-GPU pilot, use `scripts/08_run_transport_profile_parallel.sh`.
+It assigns disjoint complete sample blocks to ports 8000 and 8001 through separate
+secure listeners, merges the 72 rows, and runs tshark analysis automatically.
+
+After starting the TLS QA pilot, `scripts/10_run_local_transport_pipeline.sh`
+can supervise it, validate all captures, then run the HTTP/3 QA pilot and the
+no-compression LoCoMo event-summary smoke pilots over both secure transports.
+The parallel launcher writes PID/start-time/script identity to
+`launcher.state` while active; the pipeline refuses legacy bare `launcher.pid`
+files and stops waiting if that recorded identity changes.
+
+## External API pilot
+
+Fill only the non-secret OpenRouter or Gemini model/provider variables in the
+untracked `server.env`. OpenRouter requires both an exact model slug and a single
+provider name; the request disables fallback. Gemini requires a stable model ID.
+Load the selected provider key only into the current shell, then run:
+
+```bash
+read -rsp "Provider API key: " OPENROUTER_API_KEY
+printf '\n'
+export OPENROUTER_API_KEY
+BACKEND=openrouter PROFILE=pilot scripts/09_run_api_profile.sh
+
+# For Gemini instead:
+read -rsp "Provider API key: " GEMINI_API_KEY
+printf '\n'
+export GEMINI_API_KEY
+BACKEND=gemini PROFILE=pilot scripts/09_run_api_profile.sh
+```
+
+Unset the selected variable after the run. API keys are read from the process
+environment and are not written into configuration or results.
+The runner stores returned usage, provider/generation ID, and model version when
+the service exposes them. External TLS captures remain encrypted; packet size,
+direction, timing, retransmission, and endpoint metadata are sufficient for the
+traffic analysis.
+
+## Required validity checks
+
+1. Keep QA and event-summary analyses separate.
+2. Confirm the negotiated HTTP version in every successful transport row.
+3. Reject any QUIC run that used TCP or reports a version other than HTTP/3.
+4. Inspect a capture for unrelated traffic before the pilot.
+5. Report cold and warm connection results separately.
+6. Pin dataset, manifest hash, model revision, provider route, commands, and tool
+   versions before the main experiment.

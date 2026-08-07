@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/locomo-traffic-run.schema.json",
+  "title": "LoCoMo traffic measurement run",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "run_id",
+    "sample_id",
+    "condition",
+    "repetition",
+    "backend",
+    "model",
+    "request_sha256",
+    "capture_file",
+    "capture_sha256",
+    "started_at_utc",
+    "completed"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string"
+    },
+    "sample_id": {
+      "type": ["string", "integer"]
+    },
+    "condition": {
+      "enum": ["no_compression", "longllmlingua_2x", "longllmlingua_4x"]
+    },
+    "repetition": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "backend": {
+      "enum": ["local_vllm", "openrouter", "gemini"]
+    },
+    "task_type": {
+      "enum": ["qa", "event_summary"]
+    },
+    "transport": {
+      "enum": ["http1", "tls13", "http3"]
+    },
+    "connection_mode": {
+      "enum": ["warm", "cold"]
+    },
+    "negotiated_http_version": {
+      "type": ["string", "null"]
+    },
+    "provider": {
+      "type": ["string", "null"]
+    },
+    "model": {
+      "type": "string"
+    },
+    "model_revision": {
+      "type": ["string", "null"]
+    },
+    "model_version": {
+      "type": ["string", "null"]
+    },
+    "request_sha256": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
+    },
+    "input_tokens": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "output_tokens": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "cached_input_tokens": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "started_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "first_byte_at_utc": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "first_token_at_utc": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "finished_at_utc": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "completed": {
+      "type": "boolean"
+    },
+    "http_status": {
+      "type": ["integer", "null"]
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "capture_file": {
+      "type": ["string", "null"]
+    },
+    "capture_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[a-fA-F0-9]{64}$"
+    },
+    "capture_interface": {
+      "type": ["string", "null"]
+    },
+    "capture_filter": {
+      "type": ["string", "null"]
+    }
+  }
+}

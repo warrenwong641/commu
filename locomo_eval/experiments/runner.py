@@ -4,6 +4,7 @@ import logging
 import json
 import time
 from dataclasses import asdict
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,22 @@ from locomo_eval.metrics.perplexity_metrics import summarize_perplexity
 LOGGER = logging.getLogger(__name__)
 
 
+class CompressionBudgetExceeded(Exception):
+    def __init__(self, compressed) -> None:
+        self.compressed = compressed
+        message = compressed.metadata.get(
+            "budget_error",
+            "compressed context exceeds the configured token budget",
+        )
+        super().__init__(message)
+
+
+EXPERIMENTAL_COMPRESSOR_FACTORIES = {
+    "claude_context": "locomo_eval.experimental.claude_context:build_claude_context_compressor",
+    "claude_server_context": "locomo_eval.experimental.claude_context:build_claude_context_compressor",
+}
+
+
 class ExperimentRunner:
     def __init__(self, config, model_adapter) -> None:
         self.config = config
@@ -37,6 +54,9 @@ class ExperimentRunner:
         self._dense_retrieval_cache: dict[tuple[str, str], DenseRetrievalCompressor] = {}
 
     def _build_compressor(self, method: str, precomputed: ConversationPrecomputed, evidence_ids: list[str]):
+        experimental = self._build_experimental_compressor(method)
+        if experimental is not None:
+            return experimental
         if method == "no_compression":
             return NoCompressionCompressor()
         if method == "last_k_turns":
@@ -101,6 +121,15 @@ class ExperimentRunner:
             summary_text = "\n".join(session.summary or "" for session in precomputed.conversation.sessions if session.summary)
             return SessionSummaryCompressor(summary_text=summary_text)
         raise ValueError(f"Unknown compression method: {method}")
+
+    def _build_experimental_compressor(self, method: str):
+        target = EXPERIMENTAL_COMPRESSOR_FACTORIES.get(method)
+        if target is None:
+            return None
+        module_name, factory_name = target.split(":", 1)
+        module = import_module(module_name)
+        factory = getattr(module, factory_name)
+        return factory(self.config.method_options.get(method, {}))
 
     def _build_work_items(self, conversations: list) -> list[tuple[Any, ConversationPrecomputed, Any]]:
         by_conversation: list[tuple[Any, ConversationPrecomputed, list]] = []
@@ -167,6 +196,8 @@ class ExperimentRunner:
 
                         try:
                             compressed = compressor.compress(conversation.all_turns, qa.question, budget, format_and_count_fn)
+                            if compressed.metadata.get("budget_satisfied") is False:
+                                raise CompressionBudgetExceeded(compressed)
                             messages = build_context_messages(
                                 compressed.kept_turns,
                                 conversation.speaker_a,
@@ -232,6 +263,16 @@ class ExperimentRunner:
                                     "reference": qa.answer,
                                     "evidence_ids": qa.evidence_ids,
                                     "kept_turn_ids": compressed.kept_turn_ids,
+                                    "extra_context": compressed.extra_context,
+                                    "compression_metadata": json.dumps(compressed.metadata, sort_keys=True),
+                                    "compression_budget_satisfied": compressed.metadata.get(
+                                        "budget_satisfied"
+                                    ),
+                                    "compression_error": compressed.metadata.get(
+                                        "budget_error"
+                                    ),
+                                    "valid_for_analysis": True,
+                                    "error": None,
                                     "original_tokens": original_tokens,
                                     "compressed_tokens": compressed.token_count,
                                     "compression_ratio": compression_ratio(original_tokens, compressed.token_count),
@@ -255,6 +296,72 @@ class ExperimentRunner:
                                     **judge_scores,
                                 }
                             )
+                        except CompressionBudgetExceeded as exc:
+                            compressed = exc.compressed
+                            LOGGER.error(
+                                "Compression budget exceeded for %s/%s "
+                                "method=%s budget=%s: %s",
+                                conversation.conversation_id,
+                                qa.question_id,
+                                method,
+                                budget,
+                                exc,
+                            )
+                            rows.append(
+                                {
+                                    "conversation_id": conversation.conversation_id,
+                                    "question_id": qa.question_id,
+                                    "question": qa.question,
+                                    "category": qa.category,
+                                    "method": method,
+                                    "budget": budget,
+                                    "budget_label": str(budget_raw),
+                                    "prediction": None,
+                                    "reference": qa.answer,
+                                    "evidence_ids": qa.evidence_ids,
+                                    "kept_turn_ids": compressed.kept_turn_ids,
+                                    "extra_context": compressed.extra_context,
+                                    "compression_metadata": json.dumps(
+                                        compressed.metadata,
+                                        sort_keys=True,
+                                    ),
+                                    "compression_budget_satisfied": False,
+                                    "compression_error": str(exc),
+                                    "valid_for_analysis": False,
+                                    "original_tokens": original_tokens,
+                                    "compressed_tokens": compressed.token_count,
+                                    "compression_ratio": None,
+                                    "token_saving": None,
+                                    "evidence_recall": None,
+                                    "evidence_precision": None,
+                                    "evidence_session_recall": None,
+                                    "answerable_context_rate": None,
+                                    "perplexity": None,
+                                    "nll": None,
+                                    "token_nlls": [],
+                                    "answer_tokens": [],
+                                    "scored_answer_tokens": 0,
+                                    "answer_tokens_total": 0,
+                                    "context_tokens_used": 0,
+                                    "context_tokens_dropped": 0,
+                                    "attention_maps": None,
+                                    "latency": None,
+                                    "gpu_memory_mb": None,
+                                    "token_f1": None,
+                                    "rouge_l": None,
+                                    "exact_match": None,
+                                    "date_f1": None,
+                                    "number_f1": None,
+                                    "entity_f1": None,
+                                    "llm_judge_correct": None,
+                                    "llm_judge_score": None,
+                                    "llm_judge_rationale": None,
+                                    "error": (
+                                        "COMPRESSION_BUDGET_EXCEEDED: "
+                                        f"{exc}"
+                                    ),
+                                }
+                            )
                         except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
                             if isinstance(exc, RuntimeError) and "CUDA" not in str(exc) and "cuda" not in str(exc):
                                 raise
@@ -274,6 +381,11 @@ class ExperimentRunner:
                                     "reference": qa.answer,
                                     "evidence_ids": qa.evidence_ids,
                                     "kept_turn_ids": [],
+                                    "extra_context": None,
+                                    "compression_metadata": None,
+                                    "compression_budget_satisfied": None,
+                                    "compression_error": None,
+                                    "valid_for_analysis": False,
                                     "original_tokens": original_tokens,
                                     "compressed_tokens": 0,
                                     "compression_ratio": None,

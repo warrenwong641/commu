@@ -1,0 +1,95 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+\usetheme[progressbar=frametitle,numbering=fraction]{metropolis}
+\usefonttheme{professionalfonts}
+\usepackage[T1]{fontenc}
+\usepackage{sourcesanspro}
+\usepackage{booktabs}
+\input{figures/data/findings.tex}
+\input{figures/conference_plots.tex}
+
+\definecolor{DeckNavy}{HTML}{102A43}
+\setbeamercolor{normal text}{fg=DeckNavy,bg=white}
+\setbeamercolor{frametitle}{fg=white,bg=DeckNavy}
+\setbeamercolor{progress bar}{fg=AIBlue,bg=AIGrid}
+\setbeamercolor{alerted text}{fg=AIOrange}
+\setbeamertemplate{navigation symbols}{}
+
+\begin{document}
+\begin{frame}[plain,noframenumbering]
+\vfill
+{\Huge\bfseries Candidate Result Figures\par}
+\vspace{0.3cm}
+{\Large Prompt compression and local LLM traffic\par}
+\vspace{0.45cm}
+{\color{AIBlue}\rule{0.88\linewidth}{1.2pt}\par}
+\vspace{0.45cm}
+{\small Preliminary baseline experiment}
+\vfill
+\end{frame}
+
+\begin{frame}{F1 --- Compression reaches distinct token budgets}
+\centering
+\PlotTokenMedians
+\end{frame}
+
+\begin{frame}{F2 --- Upload traffic falls with prompt compression}
+\centering
+\PlotUploadReduction
+\end{frame}
+
+\begin{frame}{F3 --- Total traffic reduction depends on the workload}
+\centering
+\PlotTotalReduction
+\end{frame}
+
+\begin{frame}{F4 --- QA traffic is dominated by prompt upload}
+\centering
+\PlotDirectionQA
+\end{frame}
+
+\begin{frame}{F5 --- Generated summaries dominate bidirectional traffic}
+\centering
+\PlotDirectionSummary
+\end{frame}
+
+\begin{frame}{F6 --- TLS and HTTP/3 transfer similar total bytes}
+\centering
+\PlotProtocolBytes
+\end{frame}
+
+\begin{frame}{F7 --- HTTP/3 uses more packets for short QA exchanges}
+\centering
+\PlotProtocolPackets
+\end{frame}
+
+\begin{frame}{F8 --- Compression shortens QA latency more strongly}
+\centering
+\PlotLatencyMedians
+\end{frame}
+
+\begin{frame}{F9 --- Input tokens predict client-to-server traffic}
+\centering
+\PlotTokenUploadScatter
+\end{frame}
+
+\begin{frame}{F10 --- Paired samples expose workload-dependent gains}
+\centering
+\PlotTotalECDF
+\end{frame}
+
+\begin{frame}{F11 --- Summary output limits end-to-end traffic savings}
+\centering
+\PlotOutputShare
+\end{frame}
+
+\begin{frame}{F12 --- Absolute traffic separates the two workloads}
+\centering
+\PlotAbsoluteTotal
+\end{frame}
+
+\begin{frame}{F13 --- Latency reduction follows the input-dominated path}
+\centering
+\PlotLatencyReduction
+\end{frame}
+
+\end{document}
