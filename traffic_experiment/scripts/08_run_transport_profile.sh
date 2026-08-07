@@ -76,5 +76,6 @@ mkdir -p "${RUN_DIR}"
   --capture-filter "$(if [[ "${TRANSPORT}" == http3 ]]; then echo "udp port ${PORT}"; else echo "tcp port ${PORT}"; fi)" \
   "${CAPTURE_COMPLETION_ARGS[@]}" \
   --transport "${TRANSPORT}" \
+  ${CONDITION_OVERRIDE:+--condition "${CONDITION_OVERRIDE}"} \
   --connection-mode "${CONNECTION_MODE}" \
   --tls-ca-file "${CA_FILE}"

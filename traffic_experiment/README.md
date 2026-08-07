@@ -34,6 +34,10 @@ TLS records, and server-side behavior are not controlled by the researcher.
 - `configs/.env.example`: variable names only; never commit real API keys.
 - `docs/architecture.md`: client/server and packet-capture design.
 - `docs/run_protocol.md`: reproducible pilot and main-run procedure.
+- `docs/experiment_rigor.md`: causal controls, blocking, bootstrap, and
+  multiple-comparison requirements.
+- `docs/physical_client_validation.md`: separate physical-interface TLS/HTTP/3
+  pilot and acceptance gate.
 - `docs/cost_time_estimates.md`: formulas and numerical estimates.
 - `docs/local_server_handoff.md`: copy-to-server installation and run commands.
 - `docs/lab_server_migration.md`: final lab deployment, network controls, and
@@ -42,7 +46,7 @@ TLS records, and server-side behavior are not controlled by the researcher.
   exposing Jupyter directly.
 - `schemas/run_manifest.schema.json`: minimum metadata for every measured request.
 - `traffic_measure/`: manifest preparation, vLLM runner, capture, and analysis code.
-- `scripts/`: Linux batch-equivalent setup and execution commands.
+- `scripts/`: Linux setup, validation, execution, reporting, and teardown commands.
 - `server.env.example`: server-specific blanks and defaults.
 
 ## Profiles
@@ -87,6 +91,39 @@ the weighted average is 5,250 input tokens per call.
   Montieri-compatible ten-minute warm sessions.
 - `scripts/20_setup_jupyter_web.sh`: localhost-only JupyterLab user service.
 - `scripts/21_check_jupyter_web.sh`: listener and health verification.
+- `scripts/22_validate_protocol_pilots.sh`: namespace TLS/HTTP/3 pilot gate.
+- `scripts/23_server_physical_listener.sh`: explicit start/status/stop lifecycle
+  for physical-interface Caddy listeners.
+- `scripts/24_create_client_bundle.sh`: credential-free physical-client bundle.
+- `scripts/25_physical_firewall.sh`: narrow apply/status/cleanup lifecycle for
+  project-owned firewall rules.
+- `scripts/discover_capture_interface.sh`: capture-interface discovery.
+- `scripts/run_physical_client.sh`: physical-client pilot runner.
+
+## Service and network lifecycle
+
+The vLLM service is the controlled experiment server. The project may configure,
+start, restart, or stop it. Before changing an existing instance, record its
+configuration, owner, GPUs, PID or service/container identity, bind address, and
+ports. Do not alter unrelated GPU workloads or services.
+
+Public interfaces and ports are allowed only for a documented profile with the
+intended authentication and narrow network restrictions. Record all
+project-created vLLM processes, Caddy listeners, tunnels, namespaces, qdiscs,
+containers, Jupyter services, firewall rules, and port mappings.
+
+At the end of a run or after a failure:
+
+1. stop the physical listener with `scripts/23_server_physical_listener.sh stop`;
+2. remove project firewall rules with `scripts/25_physical_firewall.sh cleanup`;
+3. stop other project-created services and remove project namespaces/qdiscs;
+4. restore modified shared state; and
+5. verify owned PIDs exited and public TCP/UDP ports are no longer listening.
+
+Cleanup must target recorded project-owned resources only. Never stop an
+unrelated process merely because it occupies a desired port. The legacy
+PowerShell client/tunnel path is outside the current Linux/server workflow unless
+explicitly requested.
 
 Pricing in this plan was checked on 2026-08-03 and is deliberately stored as
 configuration rather than embedded in experiment code.

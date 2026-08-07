@@ -39,8 +39,6 @@ for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
     --tensor-parallel-size 1 \
     --max-model-len "${MAX_MODEL_LEN}" \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
-    --reasoning-parser qwen3 \
-    --language-model-only \
     "${revision_args[@]}" \
     --generation-config vllm \
     >"${log}" 2>&1 &

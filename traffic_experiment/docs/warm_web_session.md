@@ -21,16 +21,20 @@ SSE response, with one persistent client and sequential POST requests.
 
 Use a closed-loop session with a soft 30-second admission window:
 
-1. start a warm connection and submit the first frozen question;
+1. start a warm connection and dispatch the first frozen prompt — the admission
+   clock begins at this moment;
 2. read its streamed response to completion;
-3. if less than 30 seconds have elapsed, immediately submit one more question;
-4. read that response to completion and end the session;
-5. if the first response crosses 30 seconds, do not cancel it, but end the
-   session when it finishes without admitting a second question.
+3. if completion occurs before 30.000 seconds have elapsed, immediately admit
+   the next frozen prompt;
+4. repeat: after each completed response, if the admission clock is still under
+   30.000 s, admit one more prompt — otherwise stop admitting;
+5. the last admitted response is always allowed to finish past 30 seconds;
+   never cancel an in-flight generation.
 
-Thus, the session contains at most two prompts. The 30-second value controls
-whether a new request may start; it is not a response timeout or truncation
-boundary.
+The 30-second budget controls whether a new request may start; it is not a
+response timeout or truncation boundary. A session may contain many short
+responses or a single response that exceeds the window. The number of admitted
+prompts depends on the generation speed, not on a fixed count.
 
 Montieri et al.'s paper-matched sensitivity profile remains available separately:
 ten minutes, ten prompts, one prompt per minute, complete response before the
@@ -102,10 +106,11 @@ For each transport and compression condition:
 
 - one baseline session;
 - three technical repetitions under the realistic profile;
-- at most two sequential turns per session;
 - identical frozen prompt order;
-- one compression condition per session so two samples mean exactly two prompts;
-- a 30-second soft admission window with no cancellation of in-flight answers;
+- one compression condition per session so every sample under that condition
+  is eligible for admission;
+- a 30-second soft admission window: prompts are admitted sequentially until
+  the 30-second clock expires; the last admitted response always finishes;
 - one persistent connection;
 - one continuous packet capture and paired vLLM snapshots.
 

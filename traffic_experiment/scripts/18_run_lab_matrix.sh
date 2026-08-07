@@ -13,6 +13,7 @@ REPETITIONS="${LAB_REPETITIONS:-3}"
 PROXY_HOST="${SECURE_PROXY_HOST:-10.200.0.1}"
 NETNS="${CLIENT_NETNS:-llm-client}"
 HOST_IF="${HOST_VETH:-llmhost0}"
+CLIENT_IF="${CLIENT_VETH:-llmclient0}"
 NETWORKS="${LAB_NETWORKS:-baseline rtt realistic}"
 TRANSPORTS="${LAB_TRANSPORTS:-tls13 http3}"
 WORKLOADS="${LAB_WORKLOADS:-qa summary}"
@@ -57,7 +58,7 @@ run_cell() {
   CAPTURE_STOP_ON_RESPONSE="true" \
   CLIENT_NETNS="${NETNS}" \
   SECURE_PROXY_HOST="${PROXY_HOST}" \
-  CAPTURE_INTERFACE_OVERRIDE="${HOST_IF}" \
+  CAPTURE_INTERFACE_OVERRIDE="${CLIENT_IF}" \
     "${SCRIPT_DIR}/08_run_transport_profile_parallel.sh"
 }
 

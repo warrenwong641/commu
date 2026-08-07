@@ -5,7 +5,10 @@ import json
 import os
 from pathlib import Path
 
+import tempfile
+
 from .analyze import analyze_results
+from .common import append_jsonl, read_jsonl, sha256_file
 from .prepare import (
     DEFAULT_SYSTEM_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
@@ -14,6 +17,7 @@ from .prepare import (
     prepare_manifest,
     prepare_summary_manifest,
 )
+from .report import generate_report
 from .runner import RunSettings, health_check, run_experiment
 from .session_timeline import analyze_session_timeline
 from .vllm_metrics import (
@@ -157,6 +161,17 @@ def _parser() -> argparse.ArgumentParser:
     timeline.add_argument("--segment-seconds", type=float, default=30)
     timeline.add_argument("--tshark", default="tshark")
 
+    report = subparsers.add_parser(
+        "report",
+        help="generate comprehensive CSV tables and figure data from completed runs",
+    )
+    report.add_argument("--results", type=Path, required=True,
+                        help="merged results.jsonl from a completed experiment")
+    report.add_argument("--output-dir", type=Path, required=True,
+                        help="directory for output CSV files")
+    report.add_argument("--seed", type=int, default=42)
+    report.add_argument("--tshark", default="tshark")
+
     snapshot = subparsers.add_parser(
         "server-snapshot",
         help="capture token, request, queue, and latency counters from vLLM",
@@ -172,7 +187,90 @@ def _parser() -> argparse.ArgumentParser:
     diff.add_argument("--before", type=Path, required=True)
     diff.add_argument("--after", type=Path, required=True)
     diff.add_argument("--output", type=Path, required=True)
+
+    repair = subparsers.add_parser(
+        "repair",
+        help="bind an existing external PCAP to a completed results row without traffic",
+    )
+    repair.add_argument("--results", type=Path, required=True,
+                        help="existing results.jsonl to update in-place")
+    repair.add_argument("--pcap", type=Path, required=True,
+                        help="existing PCAP file to attach")
+    repair.add_argument("--request-id", required=True,
+                        help="request_id of the row to repair")
+    repair.add_argument("--condition", default="no_compression",
+                        help="compression condition of the row")
+    repair.add_argument("--transport", choices=["tls13", "http3"], required=True,
+                        help="transport protocol of the row")
     return parser
+
+
+def _repair_results(
+    results_path: Path,
+    pcap_path: Path,
+    request_id: str,
+    condition: str,
+    transport: str,
+) -> int:
+    """Attach an existing external PCAP to a completed results row.
+
+    Reads *results_path*, finds the matching row, computes the PCAP
+    SHA-256, updates capture_file + capture_sha256 in-place with an
+    append-only audit trail, and writes back atomically.  No traffic is
+    sent.  The row must already be completed=True.
+    """
+    if not pcap_path.is_file():
+        print(f"ERROR: PCAP not found: {pcap_path}", file=__import__("sys").stderr)
+        return 1
+    rows = read_jsonl(results_path)
+    target_idx = None
+    for i, row in enumerate(rows):
+        if (str(row.get("request_id")) == request_id
+                and str(row.get("condition")) == condition
+                and str(row.get("transport")) == transport):
+            target_idx = i
+            break
+    if target_idx is None:
+        print(f"ERROR: no row matching request_id={request_id} "
+              f"condition={condition} transport={transport}", file=__import__("sys").stderr)
+        return 1
+    row = rows[target_idx]
+    if not row.get("completed"):
+        print("ERROR: row is not completed — refusing to attach PCAP", file=__import__("sys").stderr)
+        return 1
+    if row.get("capture_file") and row.get("capture_sha256"):
+        print(f"Row already has capture_file={row['capture_file']} — skipping", file=__import__("sys").stderr)
+        return 0
+
+    cap_hash = sha256_file(pcap_path)
+    row["capture_file"] = str(pcap_path)
+    row["capture_sha256"] = cap_hash
+    row["repair_attached_pcap"] = True
+    row["repair_timestamp_utc"] = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).isoformat()
+
+    # Atomic write: temp file + rename.
+    tmp = results_path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(__import__("json").dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
+    tmp.replace(results_path)
+
+    # Append audit entry.
+    audit = results_path.parent / "repair_audit.jsonl"
+    append_jsonl(audit, {
+        "action": "repair_attach_pcap",
+        "results_path": str(results_path),
+        "pcap_path": str(pcap_path),
+        "pcap_sha256": cap_hash,
+        "request_id": request_id,
+        "condition": condition,
+        "transport": transport,
+        "timestamp_utc": row["repair_timestamp_utc"],
+    })
+    print(f"Repaired: {request_id} → capture_file={pcap_path} sha256={cap_hash}")
+    return 0
 
 
 def main() -> int:
@@ -305,6 +403,24 @@ def main() -> int:
         write_json(args.output, diff)
         print(f"Server metrics difference: {args.output}")
         return 0
+    if args.command == "report":
+        outputs = generate_report(
+            args.results,
+            args.output_dir,
+            seed=args.seed,
+            tshark=args.tshark,
+        )
+        for name, path in sorted(outputs.items()):
+            print(f"{name}: {path}")
+        return 0
+    if args.command == "repair":
+        return _repair_results(
+            results_path=args.results,
+            pcap_path=args.pcap,
+            request_id=args.request_id,
+            condition=args.condition,
+            transport=args.transport,
+        )
     return 2
 
 

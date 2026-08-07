@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import socket
 import ssl
@@ -431,6 +432,26 @@ def _warm_http3_client(
     return replacement
 
 
+def _ensure_capture_writable(output_dir: Path) -> None:
+    """Chown parent directories between the first user-owned ancestor and
+    *output_dir* so the runner can write results.jsonl as a non-root user.
+
+    The captures/ subdirectory is intentionally left root-owned — see
+    capture._fixup_capture_ownership for why dumpcap needs that.
+    """
+    uid = int(os.environ.get("SUDO_UID", os.getuid()))
+    gid = int(os.environ.get("SUDO_GID", os.getgid()))
+    if uid == 0:
+        return
+    try:
+        for ancestor in reversed(output_dir.parents):
+            if ancestor.stat().st_uid == uid:
+                break
+            os.chown(ancestor, uid, gid)
+    except PermissionError:
+        pass
+
+
 def run_experiment(settings: RunSettings) -> Path:
     manifest = read_jsonl(settings.manifest_path)
     if settings.condition is not None:
@@ -474,6 +495,7 @@ def run_experiment(settings: RunSettings) -> Path:
         )
 
     settings.output_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_capture_writable(settings.output_dir)
     verify: ssl.SSLContext | str | bool
     if settings.transport == "tls13":
         verify = ssl.create_default_context(
@@ -490,7 +512,6 @@ def run_experiment(settings: RunSettings) -> Path:
         http2=False,
     )
     shared_http3: PersistentHttp3Client | None = None
-    session_started_monotonic = time.perf_counter()
     try:
         if settings.transport == "tls13" and settings.connection_mode == "warm":
             warm_headers = (
@@ -508,24 +529,14 @@ def run_experiment(settings: RunSettings) -> Path:
                 settings.base_url,
                 settings.tls_ca_file,
             )
+        # Admission clock starts after warm-up, immediately before first request.
+        session_started_monotonic = time.perf_counter()
 
         for index, (request, repetition) in enumerate(trials, start=1):
-            session_elapsed_at_start = (
-                time.perf_counter() - session_started_monotonic
-            )
-            if (
-                index > 1
-                and settings.session_budget_seconds > 0
-                and session_elapsed_at_start >= settings.session_budget_seconds
-            ):
-                print(
-                    "stop session before next request: "
-                    f"{session_elapsed_at_start:.3f}s elapsed "
-                    f"(budget={settings.session_budget_seconds:.3f}s)",
-                    flush=True,
-                )
-                break
             trial_started_monotonic = time.perf_counter()
+            session_elapsed_at_start = (
+                trial_started_monotonic - session_started_monotonic
+            )
             key = (str(request["request_id"]), repetition)
             if key in completed:
                 print(f"[{index}/{len(trials)}] skip completed {key[0]} repetition={repetition}", flush=True)
@@ -718,6 +729,21 @@ def run_experiment(settings: RunSettings) -> Path:
             append_jsonl(results_path, result)
             if completed_ok:
                 completed.add(key)
+            # Closed-loop admission: after each completed response, stop
+            # admitting new prompts once the session budget has elapsed.
+            # The last admitted response is always allowed to finish.
+            if (
+                index < len(trials)
+                and settings.session_budget_seconds > 0
+                and (time.perf_counter() - session_started_monotonic)
+                >= settings.session_budget_seconds
+            ):
+                print(
+                    "session budget exhausted after response; "
+                    "stopping further admission",
+                    flush=True,
+                )
+                break
             if (
                 index < len(trials)
                 and settings.request_start_interval_seconds > 0

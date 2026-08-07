@@ -32,6 +32,9 @@ if [[ -d "${RUN_DIR}" ]] && find "${RUN_DIR}" -mindepth 1 -maxdepth 1 -print -qu
   exit 2
 fi
 mkdir -p "${RUN_DIR}"
+# dumpcap runs as root inside the network namespace without
+# CAP_DAC_OVERRIDE.  The session directory MUST stay root-owned
+# so the owner permission bits (rwx) apply.  Do NOT chown it.
 CADDY_RUN_DIR_ABS="$(absolute_from_experiment "${CADDY_RUN_DIR}")"
 CA_FILE="${CADDY_RUN_DIR_ABS}/data/caddy/pki/authorities/local/root.crt"
 if [[ ! -f "${CA_FILE}" ]]; then
