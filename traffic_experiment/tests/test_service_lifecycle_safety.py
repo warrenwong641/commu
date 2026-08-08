@@ -95,6 +95,16 @@ def test_dual_vllm_cleanup_tracks_exact_active_children_and_checks_ports():
     assert 'kill "${pid}"' not in script
 
 
+def test_dual_vllm_serve_command_is_text_only():
+    script = _script("03_start_vllm_dual.sh")
+    serve_command = script[
+        script.index('exec setsid "${VLLM_BIN}" serve') :
+        script.index(') >"${log}" 2>&1 &')
+    ]
+
+    assert serve_command.count("--language-model-only") == 1
+
+
 def _proxy_fixture(tmp_path: Path, tcp_listeners: str, ss_status: int = 0):
     bash = shutil.which("bash")
     if os.name == "nt":
