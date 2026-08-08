@@ -164,6 +164,31 @@ def test_torch_cuda_runtime_is_parsed_without_importing_torch(tmp_path: Path):
     ]
 
 
+def test_torch_cuda_runtime_missing_version_file_is_error(tmp_path: Path):
+    distribution = SimpleNamespace(locate_file=lambda relative: tmp_path / relative)
+    findings = preflight.inspect_torch_cuda_runtime(
+        PINNED, distribution_getter=lambda _name: distribution
+    )
+    assert [(item.level, item.check) for item in findings] == [
+        ("error", "cuda.wheel_runtime")
+    ]
+    assert "cannot statically inspect missing" in findings[0].message
+
+
+def test_torch_cuda_runtime_unparsable_version_file_is_error(tmp_path: Path):
+    version_file = tmp_path / "torch" / "version.py"
+    version_file.parent.mkdir()
+    version_file.write_text("cuda = ", encoding="utf-8")
+    distribution = SimpleNamespace(locate_file=lambda relative: tmp_path / relative)
+    findings = preflight.inspect_torch_cuda_runtime(
+        PINNED, distribution_getter=lambda _name: distribution
+    )
+    assert [(item.level, item.check) for item in findings] == [
+        ("error", "cuda.wheel_runtime")
+    ]
+    assert "could not parse" in findings[0].message
+
+
 def test_model_config_accepts_expected_nested_architecture(tmp_path: Path):
     path = canonical_config_path(tmp_path)
     findings = preflight.check_model_config(PINNED, good_config(), path)

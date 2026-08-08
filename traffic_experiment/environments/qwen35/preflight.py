@@ -192,7 +192,7 @@ def inspect_torch_cuda_runtime(
     if not version_file.is_file():
         return [
             _finding(
-                "warning",
+                "error",
                 "cuda.wheel_runtime",
                 f"cannot statically inspect missing {version_file}",
             )
@@ -202,7 +202,7 @@ def inspect_torch_cuda_runtime(
     except (OSError, SyntaxError, ValueError) as exc:
         return [
             _finding(
-                "warning",
+                "error",
                 "cuda.wheel_runtime",
                 f"could not parse {version_file}: {exc}",
             )
