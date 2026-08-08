@@ -12,6 +12,14 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 2
 fi
 
+# Staging examples are static review inputs, never runtime configuration.
+if grep -Eq \
+  "^[[:space:]]*(export[[:space:]]+)?STAGING_ONLY[[:space:]]*=[[:space:]]*(['\"]?1['\"]?)[[:space:]]*(#.*)?$" \
+  "${ENV_FILE}"; then
+  echo "Staging-only configuration found in ${ENV_FILE}; refusing to source it." >&2
+  exit 2
+fi
+
 # Configuration is intentionally non-secret. Refuse legacy/populated files
 # before sourcing them so credentials cannot be normalized into this workflow.
 if grep -Eq \

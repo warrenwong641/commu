@@ -87,8 +87,9 @@ the weighted average is 5,250 input tokens per call.
 
 - `server.lab.env.example`: lab defaults with direct TCP/UDP, MTU 1500,
   controlled RTT/capacity, three repetitions, and a 4,096-token output ceiling.
-- `server.qwen35.staging.env.example`: tracked credential-free, non-runnable
-  Qwen3.5 migration values validated by
+- `server.qwen35.staging.env.example`: tracked credential-free Qwen3.5
+  migration values, marked `STAGING_ONLY=1` so `scripts/lib.sh` refuses to
+  source them, and validated by
   `scripts/validate_qwen35_staging_config.py`.
 - `scripts/16_create_lab_bundle.sh`: credential-free transfer archive.
 - `scripts/17_lab_preflight.sh`: machine and reproducibility audit.

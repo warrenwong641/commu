@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 EXPECTED = {
+    "STAGING_ONLY": "1",
+    "VLLM_HOST": "127.0.0.1",
     "VLLM_MODEL": "Qwen/Qwen3.5-9B",
     "VLLM_SERVED_MODEL_NAME": "Qwen/Qwen3.5-9B",
     "VLLM_MODEL_REVISION": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
@@ -28,16 +29,18 @@ PATH_PLACEHOLDERS = {
     "VLLM_BIN": "__STAGED_VLLM_BIN__",
     "RUNNER_PYTHON": "__STAGED_RUNNER_PYTHON__",
 }
-ALLOWED_KEYS = {"VLLM_HOST", *EXPECTED, *PATH_PLACEHOLDERS}
+ALLOWED_KEYS = {*EXPECTED, *PATH_PLACEHOLDERS}
 ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(.*)$")
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"^(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*="
+    r"(?<![A-Za-z0-9_])(?:export[ \t]+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*="
 )
 CREDENTIAL_KEY_RE = re.compile(
     r"(?:^|_)(?:API_KEY|TOKEN|PASSWORD|SECRET|CREDENTIALS?)(?:$|_)",
     re.IGNORECASE,
 )
 UNSAFE_VALUE_RE = re.compile(r"[`$;&|<>]")
+WINDOWS_DRIVE_PATH_RE = re.compile(r"^/?[A-Za-z]:[\\/]")
 
 
 class ConfigError(ValueError):
@@ -77,14 +80,16 @@ def parse_static_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line_number, original in enumerate(text.splitlines(), start=1):
         line = original.strip()
-        if not line or line.startswith("#"):
+        if not line:
             continue
-        credential_match = CREDENTIAL_ASSIGNMENT_RE.match(line)
+        credential_match = CREDENTIAL_ASSIGNMENT_RE.search(line)
         if credential_match and CREDENTIAL_KEY_RE.search(credential_match.group(1)):
             raise ConfigError(
                 f"line {line_number}: credential assignment "
                 f"{credential_match.group(1)} is forbidden"
             )
+        if line.startswith("#"):
+            continue
         match = ASSIGNMENT_RE.fullmatch(line)
         if not match:
             raise ConfigError(
@@ -116,24 +121,28 @@ def _positive_int(values: dict[str, str], key: str) -> int:
 def _validate_path(key: str, value: str) -> None:
     if value == PATH_PLACEHOLDERS[key]:
         return
-    path = Path(value)
-    if not path.is_absolute() or value.endswith("/"):
+    if (
+        not value.startswith("/")
+        or value.startswith("//")
+        or "\\" in value
+        or WINDOWS_DRIVE_PATH_RE.match(value)
+        or value.endswith("/")
+    ):
         raise ConfigError(
-            f"{key} must be its explicit staging placeholder or an absolute staged "
-            "executable path"
+            f"{key} must be its explicit staging placeholder or an absolute Linux "
+            "POSIX staged executable path"
+        )
+    path = PurePosixPath(value)
+    if not path.is_absolute():
+        raise ConfigError(
+            f"{key} must be its explicit staging placeholder or an absolute Linux "
+            "POSIX staged executable path"
         )
     if ".." in path.parts:
         raise ConfigError(f"{key} cannot contain parent-directory traversal")
 
 
 def validate(values: dict[str, str]) -> None:
-    try:
-        host = ipaddress.ip_address(values["VLLM_HOST"])
-    except ValueError as exc:
-        raise ConfigError("VLLM_HOST must be an explicit loopback IP address") from exc
-    if not host.is_loopback:
-        raise ConfigError("VLLM_HOST must be loopback-only; public bindings are unsafe")
-
     workers = _positive_int(values, "PARALLEL_WORKERS")
     port = _positive_int(values, "VLLM_PORT")
     secondary_port = _positive_int(values, "VLLM_SECONDARY_PORT")

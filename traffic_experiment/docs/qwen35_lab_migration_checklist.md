@@ -4,6 +4,8 @@ This checklist prepares a future Qwen3.5 lab migration without changing the
 active ignored `server.lab.env`. The tracked staging example is intentionally
 credential-free and non-runnable. Static validation does not prove that the lab
 machine, CUDA stack, model cache, executables, GPUs, or listeners are ready.
+The required `STAGING_ONLY=1` sentinel makes `scripts/lib.sh` refuse this file
+before sourcing it, even after its executable-path placeholders are replaced.
 
 ## Phase A: cloud/static checks (safe to run now)
 
@@ -16,7 +18,8 @@ machine, CUDA stack, model cache, executables, GPUs, or listeners are ready.
   - revision `c202236235762e1c871ad0ccb60c8ee5ba337b9a`;
   - exactly GPUs `0,1`, two workers, and ports `8000`/`8001`;
   - tensor parallel size 1, context limit 65536, and both output limits 4096;
-  - a loopback-only vLLM host;
+  - the runtime-blocking `STAGING_ONLY=1` sentinel;
+  - vLLM host exactly `127.0.0.1`;
   - explicit staging placeholders or absolute staged paths for `VLLM_BIN` and
     `RUNNER_PYTHON`.
 - [ ] Run the non-executing validator from the repository root:
@@ -53,6 +56,8 @@ approved the migration window.
 - [ ] Replace only the two staging placeholders in a temporary copy, rerun the
       static validator, and independently verify both paths exist and are
       executable. Static validation intentionally does not access the paths.
+- [ ] Keep `STAGING_ONLY=1` in every staging copy. Do not pass a staging copy as
+      `EXPERIMENT_ENV_FILE`; `scripts/lib.sh` intentionally refuses it.
 - [ ] Verify the pinned model revision is available locally and record its
       cache/source digest. Do not download the model during packet capture.
 - [ ] Verify physical GPU IDs `0` and `1` are the intended free devices and that
