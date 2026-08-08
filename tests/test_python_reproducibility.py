@@ -185,6 +185,10 @@ def test_lock_provenance_and_handoff_cover_supported_paths() -> None:
     assert ".venv-compression/bin/python\" -P" in handoff
     assert 'cd "${TMPDIR:-/tmp}"' in handoff
     assert "env -u PYTHONHOME" in handoff
+    assert "CPU-only" in provenance
+    assert "torch 2.7.1+cpu" in provenance
+    assert "no CUDA toolkit" in provenance
+    assert "separately approved compatibility smoke test" in provenance
 
 
 def test_locks_contain_hashes_and_pinned_provenance() -> None:
@@ -199,3 +203,40 @@ def test_locks_contain_hashes_and_pinned_provenance() -> None:
         assert "x86_64-unknown-linux-gnu" in lock
         assert "--index-url https://pypi.org/simple" in lock
         assert "--hash=sha256:" in lock
+
+    compression_lock = (
+        REPOSITORY_ROOT / "traffic_experiment" / "requirements-compression.lock"
+    ).read_text()
+    assert (
+        "torch-2.7.1%2Bcpu-cp311-cp311-manylinux_2_28_x86_64.whl"
+        in compression_lock
+    )
+    assert "#sha256=a1684793e352f03fa14f78857e55d65d" in compression_lock
+    for line in compression_lock.splitlines():
+        assert not line.startswith(("cuda-", "nvidia-", "triton=="))
+
+
+def test_compressor_defaults_and_gpu_gate_are_explicit() -> None:
+    for relative_path in (
+        "traffic_experiment/server.env.example",
+        "traffic_experiment/server.lab.env.example",
+    ):
+        example = (REPOSITORY_ROOT / relative_path).read_text()
+        assert 'COMPRESSOR_DEVICE="cpu"' in example
+        assert 'COMPRESSOR_DEVICE="cuda"' not in example
+
+    library = (
+        REPOSITORY_ROOT / "traffic_experiment" / "scripts" / "lib.sh"
+    ).read_text()
+    assert "require_compressor_device_for_conditions()" in library
+    assert "GPU_COMPRESSOR_SMOKE_TEST_APPROVED" in library
+    assert "default .venv-compression is CPU-only" in library
+    source_index = library.index('source "${ENV_FILE}"')
+    helper_index = library.index("require_compressor_device_for_conditions()")
+    assert source_index < helper_index
+    assert "STAGING_ONLY rejection must remain above" in library
+    guard_body = library.replace("STAGING_ONLY rejection", "")
+    if "STAGING_ONLY" in guard_body:
+        assert guard_body.index("STAGING_ONLY") < guard_body.index(
+            'source "${ENV_FILE}"'
+        )

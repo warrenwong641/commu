@@ -9,6 +9,7 @@ if [[ ! -d "${LOCOMO_DATA_DIR}" ]]; then
   exit 2
 fi
 CONDITIONS=(no_compression longllmlingua_2x longllmlingua_4x)
+require_compressor_device_for_conditions "${COMPRESSOR_DEVICE}" "${CONDITIONS[@]}"
 PREPARATION_PYTHON="$(select_manifest_python "${CONDITIONS[@]}")"
 if [[ ! -x "${PREPARATION_PYTHON}" ]]; then
   echo "Preparation Python not found: ${PREPARATION_PYTHON}; run 01_setup_runner.sh first." >&2
@@ -37,4 +38,4 @@ run_python_safely "${PREPARATION_PYTHON}" \
 chmod a-w -- "${MANIFEST_ABS}"
 echo "Manifest prepared at ${MANIFEST_ABS}"
 echo "MANIFEST_SHA256=$(sha256sum "${MANIFEST_ABS}" | awk '{print $1}')"
-echo "Stop the compressor process/environment before starting vLLM to release GPU memory."
+echo "Let the compressor exit before starting vLLM so preparation and measurement stay isolated."

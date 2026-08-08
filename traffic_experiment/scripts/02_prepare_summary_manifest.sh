@@ -14,6 +14,8 @@ if [[ -e "${OUTPUT_ABS}" || -L "${OUTPUT_ABS}" ||
 fi
 read -r -a SUMMARY_CONDITION_ARGS <<< \
   "${SUMMARY_CONDITIONS:-no_compression longllmlingua_2x longllmlingua_4x}"
+require_compressor_device_for_conditions \
+  "${COMPRESSOR_DEVICE}" "${SUMMARY_CONDITION_ARGS[@]}"
 PREPARATION_PYTHON="$(select_manifest_python "${SUMMARY_CONDITION_ARGS[@]}")"
 if [[ ! -x "${PREPARATION_PYTHON}" ]]; then
   echo "Preparation Python not found: ${PREPARATION_PYTHON}; run 01_setup_runner.sh first." >&2

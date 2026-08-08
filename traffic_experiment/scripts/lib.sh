@@ -22,6 +22,8 @@ if grep -Eq \
   exit 2
 fi
 
+# Integration invariant: Cloud C's STAGING_ONLY rejection must remain above
+# this source command; compression helpers belong below the pre-source guards.
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
 
@@ -62,6 +64,27 @@ run_python_safely() {
       PYTHONSAFEPATH=1 \
       "${python_bin}" -P "$@"
   )
+}
+
+require_compressor_device_for_conditions() {
+  local condition
+  for condition in "${@:2}"; do
+    [[ "${condition}" != "no_compression" ]] || continue
+    if [[ "$1" == "cpu" ]]; then
+      return 0
+    fi
+    if [[ "${GPU_COMPRESSOR_SMOKE_TEST_APPROVED:-}" != "true" ]]; then
+      echo "GPU compression is not validated by the reproducible CPU lock." >&2
+      echo "Use COMPRESSOR_DEVICE=cpu, or obtain approval for a separate GPU environment and smoke test." >&2
+      exit 2
+    fi
+    if [[ "${COMPRESSION_PYTHON}" == "${EXPERIMENT_ROOT}/.venv-compression/bin/python" ]]; then
+      echo "The default .venv-compression is CPU-only and cannot be approved for GPU use." >&2
+      echo "Point COMPRESSION_PYTHON to the separately validated GPU environment." >&2
+      exit 2
+    fi
+    return 0
+  done
 }
 
 require_value() {

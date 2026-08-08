@@ -5,3 +5,6 @@ llmlingua==0.2.2
 # LLMLingua 0.2.2 expects the legacy tuple-based attention cache.
 transformers==4.36.2
 tokenizers==0.15.2
+# CPU-only PyTorch artifact for the supported CPython 3.11/Linux x86_64 target.
+# GPU compression requires a separate, approved environment and smoke test.
+torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.7.1%2Bcpu-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=a1684793e352f03fa14f78857e55d65de4ada8405ded1da2bf4f452179c4b779

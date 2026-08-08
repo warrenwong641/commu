@@ -62,4 +62,4 @@ compile_lock traffic_experiment/requirements-compression.lock \
   traffic_experiment/requirements-runner.txt \
   traffic_experiment/requirements-compression.txt
 
-echo "Regenerated core, runner, and compression Linux x86_64 locks with uv ${UV_VERSION}."
+echo "Regenerated core, runner, and CPU-compression Linux x86_64 locks with uv ${UV_VERSION}."

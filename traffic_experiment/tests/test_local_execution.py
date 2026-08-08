@@ -16,6 +16,7 @@ from traffic_experiment.traffic_measure.backends import (
 from traffic_experiment.traffic_measure.capture import CaptureResult
 from traffic_experiment.traffic_measure.common import read_jsonl, write_jsonl
 from traffic_experiment.traffic_measure.prepare import (
+    _load_compressor,
     merge_manifest_shards,
     prepare_manifest,
     prepare_summary_manifest,
@@ -91,6 +92,18 @@ def test_prepare_manifest_without_compressor(tmp_path):
             compressor_model="unused",
             compressor_device="cpu",
         )
+
+
+def test_missing_compressor_error_points_to_locked_environment(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "llmlingua", None)
+
+    with pytest.raises(RuntimeError) as error:
+        _load_compressor("unused", "cpu")
+
+    message = str(error.value)
+    assert "traffic_experiment/scripts/01_setup_runner.sh" in message
+    assert "traffic_experiment/.venv-compression/bin/python" in message
+    assert "requirements-compression.txt" not in message
 
 
 def test_prepare_manifest_shards_merge_in_original_order(tmp_path):

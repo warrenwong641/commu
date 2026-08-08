@@ -52,6 +52,8 @@ distinct `.venv-compression` from the hashed compression lock. It supports both
 uv and an existing CPython 3.11 plus its bundled pip; both paths require the same
 SHA-256 hashes. Do not install `requirements-compression.txt` into
 `.venv-runner`: that file is a lock input, not an installation artifact.
+The reproducible compression environment is CPU-only and defaults
+`COMPRESSOR_DEVICE=cpu`; its lock does not install CUDA packages.
 
 vLLM should be installed in a CUDA-compatible environment appropriate for the
 server. Set `VLLM_BIN` in `server.env` to its executable. Keeping vLLM installation
@@ -84,8 +86,11 @@ This selects 32 eligible LoCoMo QA examples with seed 42 and writes 96 frozen
 request rows: 32 uncompressed, 32 LongLLMLingua 2x, and 32 LongLLMLingua 4x.
 Compression metadata and prompt hashes are saved in the manifest.
 
-LongLLMLingua loads a separate compressor model. Let the command exit and confirm
-its GPU memory has been released before starting Qwen.
+LongLLMLingua loads a separate compressor model. Let the preparation command
+exit before starting Qwen so model preparation and traffic measurement remain
+isolated. GPU compression is not validated by the CPU lock. It requires a
+separate environment and a separately approved compatibility smoke test; do not
+point the CPU-only `.venv-compression` at CUDA.
 
 ## Start Qwen3.5-9B
 

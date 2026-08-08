@@ -18,8 +18,11 @@ compiled from `traffic_experiment/requirements-runner.txt` and
 `traffic_experiment/requirements-compression.lock` is compiled from
 `traffic_experiment/requirements-runner.txt` and
 `traffic_experiment/requirements-compression.txt`; it provides an isolated
-manifest-preparation environment and is never synchronized into the runner or
-vLLM environments.
+CPU-only manifest-preparation environment and is never synchronized into the
+runner or vLLM environments. Its PyTorch input is the CPython 3.11/Linux x86_64
+`torch 2.7.1+cpu` wheel from PyTorch's official CPU wheel repository, pinned by
+its SHA-256 hash. The lock intentionally contains no CUDA toolkit, NVIDIA
+runtime, or Triton packages.
 
 Regenerate all three files from the repository root:
 
@@ -43,5 +46,7 @@ The setup scripts require those hashes for both `uv pip sync` and the non-uv
 module, verifies that it supports `--require-hashes`, and performs no network
 upgrade or other install before synchronizing the lock. The resulting locks are
 not claimed to support Windows, macOS, non-x86_64 systems, musl-based Linux, or
-a GPU/CUDA stack other than the Linux wheels selected by this resolution. vLLM
-remains a separately managed server environment and is not part of these locks.
+GPU compression. A GPU compressor requires a separate environment plus a
+separately approved compatibility smoke test before it may be selected; this
+CPU lock is not evidence for any CUDA configuration. vLLM remains a separately
+managed server environment and is not part of these locks.

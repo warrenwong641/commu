@@ -125,6 +125,7 @@ def test_manifest_entrypoints_select_isolated_interpreters_with_safe_imports():
     assert 'PYTHONPATH="${REPOSITORY_ROOT}"' in library
     assert "PYTHONSAFEPATH=1" in library
     assert '"${python_bin}" -P' in library
+    assert "require_compressor_device_for_conditions()" in library
 
     for name in (
         "02_prepare_manifest.sh",
@@ -135,6 +136,7 @@ def test_manifest_entrypoints_select_isolated_interpreters_with_safe_imports():
         assert "select_manifest_python" in script
         assert "PREPARATION_PYTHON" in script
         assert '"${PREPARATION_PYTHON}"' in script
+        assert "require_compressor_device_for_conditions" in script
 
     parallel = _script("02_prepare_manifest_parallel.sh")
     assert "exec setsid env -u PYTHONHOME" in parallel
@@ -142,6 +144,8 @@ def test_manifest_entrypoints_select_isolated_interpreters_with_safe_imports():
     assert "PYTHONSAFEPATH=1" in parallel
     assert '"${PREPARATION_PYTHON}" -P' in parallel
     assert 'run_python_safely "${RUNNER_PYTHON}"' in parallel
+    assert 'if [[ "${COMPRESSOR_DEVICE}" == "cpu" ]]' in parallel
+    assert "unset CUDA_VISIBLE_DEVICES" in parallel
 
 
 def test_jupyter_config_consumes_only_argon2_password_verifier(

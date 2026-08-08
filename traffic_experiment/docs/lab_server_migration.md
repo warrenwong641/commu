@@ -86,6 +86,11 @@ with the lab driver's CUDA runtime, then point `VLLM_BIN` at that environment.
 Do not blindly copy the AutoDL vLLM environment: CUDA, PyTorch, flash-attention,
 and driver combinations are machine-specific.
 
+The locked compression environment is deliberately CPU-only and the shipped
+profiles default `COMPRESSOR_DEVICE=cpu`. A GPU compressor must use a distinct
+environment and pass a separately approved compatibility smoke test; the CPU
+lock and the vLLM environment are not GPU-compressor validation evidence.
+
 During `tshark` installation, either permit non-root capture and configure the
 `dumpcap` group, or let the privileged matrix orchestrator invoke capture. The
 matrix and session orchestrators require root because they create namespaces
