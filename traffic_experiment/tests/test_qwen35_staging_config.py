@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -216,7 +217,10 @@ class Qwen35StagingConfigTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 2)
                     self.assertIn("absolute Linux POSIX", result.stderr)
 
-    @unittest.skipUnless(shutil.which("bash"), "bash is required for lib.sh")
+    @unittest.skipUnless(
+        os.name == "posix" and shutil.which("bash"),
+        "a POSIX host with bash is required for lib.sh",
+    )
     def test_runtime_refuses_staging_file_before_sourcing(self):
         with tempfile.TemporaryDirectory() as temporary:
             staged = Path(temporary) / "staging.env"
