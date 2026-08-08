@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.venv/
+.venv-*/
 *.so
 .Python
 build/
@@ -19,6 +21,8 @@ wheels/
 .installed.cfg
 *.egg
 .pytest_cache/
+traffic_experiment/runs/
+traffic_experiment/environments/
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*

@@ -1,0 +1,2 @@
+# Test-only dependencies for traffic_experiment/tests/.
+pytest>=8.3,<9

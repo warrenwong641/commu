@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,21 @@ ROOT = Path(__file__).parents[1]
 LIB = ROOT / "scripts" / "lib.sh"
 
 
+def _proc_exposes_child_processes() -> bool:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1)"])
+    try:
+        return Path(f"/proc/{child.pid}/stat").is_file()
+    finally:
+        child.terminate()
+        child.wait()
+
+
 @pytest.mark.skipif(
-    os.name != "posix" or shutil.which("bash") is None or shutil.which("setsid") is None,
-    reason="the owned-session lifecycle is Linux-specific",
+    os.name != "posix"
+    or shutil.which("bash") is None
+    or shutil.which("setsid") is None
+    or not _proc_exposes_child_processes(),
+    reason="the owned-session lifecycle requires Linux with child /proc visibility",
 )
 def test_owned_child_cleanup_covers_descendants_and_refuses_bad_identity(
     tmp_path: Path,

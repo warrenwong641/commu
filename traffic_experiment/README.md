@@ -128,3 +128,30 @@ explicitly requested.
 
 Pricing in this plan was checked on 2026-08-03 and is deliberately stored as
 configuration rather than embedded in experiment code.
+
+## Python setup and tests
+
+Use Python 3.11 for the traffic runner. The setup script prefers `uv`, creates
+`.venv-runner`, and synchronizes the exact runtime and test versions in
+`requirements-runner.lock`:
+
+```bash
+bash scripts/01_setup_runner.sh
+```
+
+Without `uv`, the script uses `python3.11`, `venv`, and `pip` against the same
+lock file. Set `PYTHON_BIN` only when the Python 3.11 executable has a different
+name. To refresh the lock intentionally:
+
+```bash
+uv pip compile --python-version 3.11 \
+  requirements-runner.txt requirements-test.txt \
+  -o requirements-runner.lock
+```
+
+From the repository root, `bash scripts/run_tests.sh` runs both test trees from a
+temporary working directory with Python safe-path mode (`-P`). This keeps the
+working directory and ignored package installations out of the implicit import
+path without disabling NLTK import security. `pytest.ini` scopes default
+collection to the two maintained test directories and excludes `runs/`, local
+environments, caches, and virtual environments.

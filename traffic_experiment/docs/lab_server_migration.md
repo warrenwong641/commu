@@ -65,12 +65,16 @@ storage for the Qwen model, vLLM cache, manifests, and captures.
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  git curl ca-certificates python3 python3-venv \
+  git curl ca-certificates python3.11 python3.11-venv \
   iproute2 ethtool iperf3 tshark
 
 bash scripts/00_install_caddy.sh
 bash scripts/01_setup_runner.sh
 ```
+
+Install `uv` before the runner setup when practical; it obtains Python 3.11 and
+synchronizes `requirements-runner.lock`. The documented fallback uses the
+system `python3.11` and `pip` against the same lock file.
 
 Install vLLM in a separate CUDA environment following the version compatible
 with the lab driver's CUDA runtime, then point `VLLM_BIN` at that environment.

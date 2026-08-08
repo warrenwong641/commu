@@ -24,12 +24,22 @@ APIs are treated as validation environments.
 
 ## Core evaluation
 
-Install the Python dependencies in an isolated environment:
+The supported development runtime is Python 3.11. Install the locked core and
+test dependencies with `uv`:
 
 ```bash
-python3 -m venv .venv
+bash scripts/setup_python.sh
 . .venv/bin/activate
-python -m pip install -r requirements.txt
+```
+
+`uv` is preferred because it can obtain Python 3.11 and synchronizes the exact
+versions in `requirements.lock`. If `uv` is unavailable, the same script falls
+back to `python3.11 -m venv` and `pip`; set `PYTHON_BIN` if Python 3.11 has a
+different executable name. Update the lock intentionally with:
+
+```bash
+uv pip compile --python-version 3.11 \
+  requirements.txt requirements-test.txt -o requirements.lock
 ```
 
 Prepare LoCoMo data and run an experiment:
@@ -41,11 +51,17 @@ python -m locomo_eval.cli run --config configs/first_experiment.yaml
 python -m locomo_eval.cli report --results-dir results/exp_002_stratified_budgeted
 ```
 
-Run the test suite:
+Run both the core and traffic test suites:
 
 ```bash
-python -m pytest -q
+bash traffic_experiment/scripts/01_setup_runner.sh
+bash scripts/run_tests.sh
 ```
+
+The wrapper invokes both interpreters with Python's `-P` safe-path option from
+a temporary working directory. It passes only `tests/` and
+`traffic_experiment/tests/` to pytest, while `pytest.ini` also excludes ignored
+runtime and environment trees from accidental discovery.
 
 The core configuration compares no compression, recent-turn windows, sparse and
 dense retrieval, neighbor windows, hybrid selection, and oracle evidence across
