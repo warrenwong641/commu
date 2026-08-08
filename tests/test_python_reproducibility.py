@@ -2,10 +2,36 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
+
+import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _find_working_posix_bash() -> str | None:
+    if os.name != "posix":
+        return None
+
+    bash = shutil.which("bash")
+    if bash is None:
+        return None
+
+    try:
+        probe = subprocess.run(
+            [bash, "--noprofile", "--norc", "-c", ":"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return bash if probe.returncode == 0 else None
+
+
+WORKING_POSIX_BASH = _find_working_posix_bash()
 
 
 def test_python_version_and_test_discovery_are_scoped() -> None:
@@ -51,7 +77,12 @@ def test_test_wrapper_uses_safe_path_and_safe_working_directory() -> None:
     assert "NLTK_DISABLE_IMPORT_SECURITY" not in wrapper
 
 
+@pytest.mark.skipif(
+    WORKING_POSIX_BASH is None,
+    reason="scripts/run_tests.sh requires POSIX and a working Bash executable",
+)
 def test_test_wrapper_rejects_inherited_python_paths(tmp_path: Path) -> None:
+    assert WORKING_POSIX_BASH is not None
     hostile_path = tmp_path / "hostile"
     hostile_path.mkdir()
     (hostile_path / "sentinel.py").write_text(
@@ -80,7 +111,7 @@ def test_test_wrapper_rejects_inherited_python_paths(tmp_path: Path) -> None:
     )
 
     completed = subprocess.run(
-        ["bash", str(REPOSITORY_ROOT / "scripts" / "run_tests.sh")],
+        [WORKING_POSIX_BASH, str(REPOSITORY_ROOT / "scripts" / "run_tests.sh")],
         cwd=REPOSITORY_ROOT,
         env=environment,
         check=False,
