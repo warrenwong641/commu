@@ -83,6 +83,20 @@ require_compressor_device_for_conditions() {
       echo "Point COMPRESSION_PYTHON to the separately validated GPU environment." >&2
       exit 2
     fi
+    local approved_python selected_python
+    if [[ -z "${GPU_COMPRESSOR_APPROVED_PYTHON:-}" ]]; then
+      echo "GPU_COMPRESSOR_APPROVED_PYTHON must record the approved interpreter path." >&2
+      exit 2
+    fi
+    if ! approved_python="$(readlink -e -- "${GPU_COMPRESSOR_APPROVED_PYTHON}")" ||
+      ! selected_python="$(readlink -e -- "${COMPRESSION_PYTHON}")"; then
+      echo "The approved and selected GPU compressor interpreters must both exist." >&2
+      exit 2
+    fi
+    if [[ "${approved_python}" != "${selected_python}" ]]; then
+      echo "The selected GPU compressor interpreter does not match the approved identity." >&2
+      exit 2
+    fi
     return 0
   done
 }

@@ -89,8 +89,12 @@ Compression metadata and prompt hashes are saved in the manifest.
 LongLLMLingua loads a separate compressor model. Let the preparation command
 exit before starting Qwen so model preparation and traffic measurement remain
 isolated. GPU compression is not validated by the CPU lock. It requires a
-separate environment and a separately approved compatibility smoke test; do not
-point the CPU-only `.venv-compression` at CUDA.
+separate environment and a separately approved compatibility smoke test whose
+recorded `GPU_COMPRESSOR_APPROVED_PYTHON` resolves to the selected
+`COMPRESSION_PYTHON`; do not point the CPU-only `.venv-compression` at CUDA.
+Use `scripts/02_prepare_manifest.sh` for CPU preparation. The parallel manifest
+entry point rejects CPU mode before starting a compressor so two 7B processes
+cannot silently consume memory at the same time.
 
 ## Start Qwen3.5-9B
 

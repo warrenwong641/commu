@@ -157,6 +157,12 @@ runner. See [`../docs/python_lock_provenance.md`](../docs/python_lock_provenance
 the exact CPython patch, uv version, Linux platform, index, inputs, and hash
 policy. Cross-platform support is not claimed.
 
+CPU manifest preparation must use `scripts/02_prepare_manifest.sh`, which runs
+one LongLLMLingua 7B process at a time. The parallel manifest entry point fails
+closed in CPU mode so it cannot silently double compressor RAM use. It is only
+for a separately validated GPU environment whose approved smoke-test record is
+bound to the exact selected interpreter.
+
 From the repository root, `bash scripts/run_tests.sh` runs both test trees from a
 temporary working directory with Python safe-path mode (`-P`). This keeps the
 working directory and inherited Python import/install variables out of the

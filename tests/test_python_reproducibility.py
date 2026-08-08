@@ -177,6 +177,10 @@ def test_lock_provenance_and_handoff_cover_supported_paths() -> None:
         assert expected in compile_script
     for expected in ("Linux x86_64", "CPython 3.11.15", "uv 0.11.33", "SHA-256"):
         assert expected in provenance
+    assert "public PyPI simple index" in provenance
+    assert "download-r2.pytorch.org/whl/cpu/torch-2.7.1%2Bcpu" in provenance
+    assert "not a general secondary index" in provenance
+    assert "`https://pypi.org/simple` only" not in provenance
     assert "distinct `.venv-compression`" in handoff
     assert "both paths require the same" in handoff
     assert "SHA-256 hashes" in handoff
@@ -230,6 +234,8 @@ def test_compressor_defaults_and_gpu_gate_are_explicit() -> None:
     ).read_text()
     assert "require_compressor_device_for_conditions()" in library
     assert "GPU_COMPRESSOR_SMOKE_TEST_APPROVED" in library
+    assert "GPU_COMPRESSOR_APPROVED_PYTHON" in library
+    assert 'readlink -e -- "${GPU_COMPRESSOR_APPROVED_PYTHON}"' in library
     assert "default .venv-compression is CPU-only" in library
     source_index = library.index('source "${ENV_FILE}"')
     helper_index = library.index("require_compressor_device_for_conditions()")
