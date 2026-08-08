@@ -24,7 +24,7 @@ fi
 if command -v uv >/dev/null 2>&1; then
   uv venv --python 3.11 --clear "${VENV_PATH}"
   require_python_311 "${VENV_PATH}/bin/python"
-  uv pip sync --python "${VENV_PATH}/bin/python" "${LOCK_FILE}"
+  uv pip sync --require-hashes --python "${VENV_PATH}/bin/python" "${LOCK_FILE}"
 else
   if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "uv is unavailable and ${PYTHON_BIN} was not found." >&2
@@ -34,7 +34,7 @@ else
   require_python_311 "${PYTHON_BIN}"
   "${PYTHON_BIN}" -m venv --clear "${VENV_PATH}"
   "${VENV_PATH}/bin/python" -P -m pip install --upgrade pip
-  "${VENV_PATH}/bin/python" -P -m pip install -r "${LOCK_FILE}"
+  "${VENV_PATH}/bin/python" -P -m pip install --require-hashes -r "${LOCK_FILE}"
 fi
 
 echo "Core Python 3.11 environment is ready at ${VENV_PATH}."

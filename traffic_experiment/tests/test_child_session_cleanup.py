@@ -49,7 +49,7 @@ source {shlex.quote(str(LIB))}
 
 (
   trap - INT TERM
-  exec setsid python3 -c {shlex.quote(child_code)}
+  exec setsid {shlex.quote(sys.executable)} -c {shlex.quote(child_code)}
 ) >/dev/null 2>&1 &
 child_pid=$!
 child_ticks="$(record_owned_session_start_ticks "${{child_pid}}")"

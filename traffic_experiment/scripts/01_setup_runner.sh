@@ -25,7 +25,7 @@ fi
 if command -v uv >/dev/null 2>&1; then
   uv venv --python 3.11 --clear "${RUNNER_VENV}"
   require_python_311 "${RUNNER_VENV}/bin/python"
-  uv pip sync --python "${RUNNER_VENV}/bin/python" "${LOCK_FILE}"
+  uv pip sync --require-hashes --python "${RUNNER_VENV}/bin/python" "${LOCK_FILE}"
 else
   if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "uv is unavailable and ${PYTHON_BIN} was not found." >&2
@@ -35,7 +35,7 @@ else
   require_python_311 "${PYTHON_BIN}"
   "${PYTHON_BIN}" -m venv --clear "${RUNNER_VENV}"
   "${RUNNER_VENV}/bin/python" -P -m pip install --upgrade pip
-  "${RUNNER_VENV}/bin/python" -P -m pip install -r "${LOCK_FILE}"
+  "${RUNNER_VENV}/bin/python" -P -m pip install --require-hashes -r "${LOCK_FILE}"
 fi
 
 echo

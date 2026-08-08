@@ -32,15 +32,20 @@ bash scripts/setup_python.sh
 . .venv/bin/activate
 ```
 
-`uv` is preferred because it can obtain Python 3.11 and synchronizes the exact
-versions in `requirements.lock`. If `uv` is unavailable, the same script falls
-back to `python3.11 -m venv` and `pip`; set `PYTHON_BIN` if Python 3.11 has a
-different executable name. Update the lock intentionally with:
+`uv` is the portable primary path because it can obtain Python 3.11 and
+synchronizes the exact versions and hashes in `requirements.lock`. If `uv` is
+unavailable, the same script can use an existing CPython 3.11 interpreter,
+`venv`, and `pip`; package names and availability vary by distribution and
+release, so set `PYTHON_BIN` to the installed interpreter. Regenerate both locks
+using the pinned resolver workflow:
 
 ```bash
-uv pip compile --python-version 3.11 \
-  requirements.txt requirements-test.txt -o requirements.lock
+bash scripts/compile_python_locks.sh
 ```
+
+The supported lock target and complete resolver provenance are documented in
+[`docs/python_lock_provenance.md`](docs/python_lock_provenance.md). These locks
+are not claimed to support Windows, macOS, other CPU architectures, or musl.
 
 Prepare LoCoMo data and run an experiment:
 
@@ -59,9 +64,10 @@ bash scripts/run_tests.sh
 ```
 
 The wrapper invokes both interpreters with Python's `-P` safe-path option from
-a temporary working directory. It passes only `tests/` and
-`traffic_experiment/tests/` to pytest, while `pytest.ini` also excludes ignored
-runtime and environment trees from accidental discovery.
+a temporary working directory. It clears inherited Python import/install
+variables, sets only the repository import root, and passes only `tests/` and
+`traffic_experiment/tests/` to pytest. `pytest.ini` excludes runtime trees from
+accidental discovery without excluding tracked environment specifications.
 
 The core configuration compares no compression, recent-turn windows, sparse and
 dense retrieval, neighbor windows, hybrid selection, and oracle evidence across

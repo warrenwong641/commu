@@ -139,19 +139,24 @@ Use Python 3.11 for the traffic runner. The setup script prefers `uv`, creates
 bash scripts/01_setup_runner.sh
 ```
 
-Without `uv`, the script uses `python3.11`, `venv`, and `pip` against the same
-lock file. Set `PYTHON_BIN` only when the Python 3.11 executable has a different
-name. To refresh the lock intentionally:
+Without `uv`, the script can use an existing CPython 3.11 interpreter, `venv`,
+and `pip` against the same hashed lock. Interpreter package names and
+availability vary by distribution and release; set `PYTHON_BIN` to the
+installed executable. Refresh both locks using the pinned Linux resolver
+workflow from the repository root:
 
 ```bash
-uv pip compile --python-version 3.11 \
-  requirements-runner.txt requirements-test.txt \
-  -o requirements-runner.lock
+bash scripts/compile_python_locks.sh
 ```
+
+See [`../docs/python_lock_provenance.md`](../docs/python_lock_provenance.md) for
+the exact CPython patch, uv version, Linux platform, index, inputs, and hash
+policy. Cross-platform support is not claimed.
 
 From the repository root, `bash scripts/run_tests.sh` runs both test trees from a
 temporary working directory with Python safe-path mode (`-P`). This keeps the
-working directory and ignored package installations out of the implicit import
-path without disabling NLTK import security. `pytest.ini` scopes default
-collection to the two maintained test directories and excludes `runs/`, local
-environments, caches, and virtual environments.
+working directory and inherited Python import/install variables out of the
+import path without disabling NLTK import security. `pytest.ini` scopes default
+collection to the two maintained test directories and excludes run directories,
+caches, and virtual environments. Tracked environment specifications are not
+excluded; their tests belong in `traffic_experiment/tests/`.

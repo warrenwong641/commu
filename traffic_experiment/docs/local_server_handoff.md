@@ -45,7 +45,11 @@ The exact administrator command is distribution-specific.
 ```bash
 chmod +x scripts/*.sh
 ./scripts/01_setup_runner.sh
-uv pip install --python .venv-runner/bin/python -r requirements-compression.txt
+if command -v uv >/dev/null 2>&1; then
+  uv pip install --python .venv-runner/bin/python -r requirements-compression.txt
+else
+  .venv-runner/bin/python -P -m pip install -r requirements-compression.txt
+fi
 ```
 
 vLLM should be installed in a CUDA-compatible environment appropriate for the
@@ -53,9 +57,12 @@ server. Set `VLLM_BIN` in `server.env` to its executable. Keeping vLLM installat
 separate avoids changing a working CUDA/PyTorch environment.
 
 Python 3.11 is required for the reproducible runner and the older,
-research-pinned LLMLingua dependency. The setup script uses `uv` to obtain it.
-Without `uv`, install Python 3.11 first and select its executable through
-`PYTHON_BIN`; the script refuses other Python feature versions.
+research-pinned LLMLingua dependency. The portable primary path is `uv`, which
+obtains Python 3.11 itself. The non-uv fallback requires an existing CPython
+3.11 interpreter with `venv`; whether a distribution supplies that interpreter
+in its default package repositories depends on the distribution and release.
+Select a suitable executable through `PYTHON_BIN`; the setup script refuses
+other Python feature versions.
 
 ## Prepare prompts
 

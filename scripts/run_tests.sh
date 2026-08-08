@@ -8,6 +8,14 @@ TRAFFIC_PYTHON="${TRAFFIC_PYTHON:-${REPOSITORY_ROOT}/traffic_experiment/.venv-ru
 SAFE_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/commu-tests.XXXXXX")"
 trap 'rm -rf -- "${SAFE_WORKDIR}"' EXIT
 
+# Never inherit import roots or an alternate Python installation from the
+# caller. The repository is the only explicit import root for these suites.
+unset PYTHONHOME
+export PYTHONPATH="${REPOSITORY_ROOT}"
+# The suites use loopback mock servers and must not depend on caller proxy
+# configuration or optional HTTPX proxy extras.
+unset ALL_PROXY HTTP_PROXY HTTPS_PROXY all_proxy http_proxy https_proxy
+
 require_test_python() {
   local label="$1"
   local python_bin="$2"
@@ -29,10 +37,6 @@ require_test_python "Core" "${CORE_PYTHON}"
 require_test_python "Traffic" "${TRAFFIC_PYTHON}"
 
 cd "${SAFE_WORKDIR}"
-export PYTHONPATH="${REPOSITORY_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-# The suites use loopback mock servers and must not depend on caller proxy
-# configuration or optional HTTPX proxy extras.
-unset ALL_PROXY HTTP_PROXY HTTPS_PROXY all_proxy http_proxy https_proxy
 
 "${CORE_PYTHON}" -P -m pytest -c "${REPOSITORY_ROOT}/pytest.ini" -q \
   "${REPOSITORY_ROOT}/tests"

@@ -22,7 +22,11 @@ wheels/
 *.egg
 .pytest_cache/
 traffic_experiment/runs/
-traffic_experiment/environments/
+# Local traffic runtime environments are ignored, while qwen35 is a tracked
+# source/specification tree shared with the staged-environment workflow.
+traffic_experiment/environments/*
+!traffic_experiment/environments/qwen35/
+!traffic_experiment/environments/qwen35/**
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
