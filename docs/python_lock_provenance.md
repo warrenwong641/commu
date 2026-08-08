@@ -15,8 +15,13 @@ The committed Python locks support one explicit resolution target:
 `requirements-test.txt`. `traffic_experiment/requirements-runner.lock` is
 compiled from `traffic_experiment/requirements-runner.txt` and
 `traffic_experiment/requirements-test.txt`.
+`traffic_experiment/requirements-compression.lock` is compiled from
+`traffic_experiment/requirements-runner.txt` and
+`traffic_experiment/requirements-compression.txt`; it provides an isolated
+manifest-preparation environment and is never synchronized into the runner or
+vLLM environments.
 
-Regenerate both files from the repository root:
+Regenerate all three files from the repository root:
 
 ```bash
 bash scripts/compile_python_locks.sh
@@ -28,11 +33,15 @@ pins the package index and release cutoff, and emits hashes. A clean
 regeneration must leave the following command empty:
 
 ```bash
-git diff -- requirements.lock traffic_experiment/requirements-runner.lock
+git diff -- requirements.lock \
+  traffic_experiment/requirements-runner.lock \
+  traffic_experiment/requirements-compression.lock
 ```
 
 The setup scripts require those hashes for both `uv pip sync` and the non-uv
-`pip install` fallback. The resulting locks are not claimed to support Windows,
-macOS, non-x86_64 systems, musl-based Linux, or a GPU/CUDA stack other than the
-Linux wheels selected by this resolution. vLLM remains a separately managed
-server environment and is not part of these locks.
+`pip install` fallback. The fallback uses the pip bundled by Python's `venv`
+module, verifies that it supports `--require-hashes`, and performs no network
+upgrade or other install before synchronizing the lock. The resulting locks are
+not claimed to support Windows, macOS, non-x86_64 systems, musl-based Linux, or
+a GPU/CUDA stack other than the Linux wheels selected by this resolution. vLLM
+remains a separately managed server environment and is not part of these locks.

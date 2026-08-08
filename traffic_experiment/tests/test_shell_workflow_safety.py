@@ -116,6 +116,34 @@ def test_manifest_entrypoints_refuse_overwrite_and_preflight_checks_digests():
     )
 
 
+def test_manifest_entrypoints_select_isolated_interpreters_with_safe_imports():
+    library = _script("lib.sh")
+    assert '.venv-compression/bin/python' in library
+    assert "select_manifest_python()" in library
+    assert "run_python_safely()" in library
+    assert "env -u PYTHONHOME" in library
+    assert 'PYTHONPATH="${REPOSITORY_ROOT}"' in library
+    assert "PYTHONSAFEPATH=1" in library
+    assert '"${python_bin}" -P' in library
+
+    for name in (
+        "02_prepare_manifest.sh",
+        "02_prepare_manifest_parallel.sh",
+        "02_prepare_summary_manifest.sh",
+    ):
+        script = _script(name)
+        assert "select_manifest_python" in script
+        assert "PREPARATION_PYTHON" in script
+        assert '"${PREPARATION_PYTHON}"' in script
+
+    parallel = _script("02_prepare_manifest_parallel.sh")
+    assert "exec setsid env -u PYTHONHOME" in parallel
+    assert 'PYTHONPATH="${REPOSITORY_ROOT}"' in parallel
+    assert "PYTHONSAFEPATH=1" in parallel
+    assert '"${PREPARATION_PYTHON}" -P' in parallel
+    assert 'run_python_safely "${RUNNER_PYTHON}"' in parallel
+
+
 def test_jupyter_config_consumes_only_argon2_password_verifier(
     monkeypatch,
     tmp_path: Path,

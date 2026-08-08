@@ -35,8 +35,9 @@ bash scripts/setup_python.sh
 `uv` is the portable primary path because it can obtain Python 3.11 and
 synchronizes the exact versions and hashes in `requirements.lock`. If `uv` is
 unavailable, the same script can use an existing CPython 3.11 interpreter,
-`venv`, and `pip`; package names and availability vary by distribution and
-release, so set `PYTHON_BIN` to the installed interpreter. Regenerate both locks
+`venv`, and its bundled pip without upgrading it; package names and availability
+vary by distribution and release, so set `PYTHON_BIN` to the installed
+interpreter. Regenerate all locks
 using the pinned resolver workflow:
 
 ```bash
@@ -62,6 +63,10 @@ Run both the core and traffic test suites:
 bash traffic_experiment/scripts/01_setup_runner.sh
 bash scripts/run_tests.sh
 ```
+
+The traffic setup creates `.venv-runner` from its runtime/test lock and a
+separate `.venv-compression` from its manifest-preparation lock. Compression
+packages never mutate the runner environment.
 
 The wrapper invokes both interpreters with Python's `-P` safe-path option from
 a temporary working directory. It clears inherited Python import/install

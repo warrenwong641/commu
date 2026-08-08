@@ -9,8 +9,10 @@ if [[ ! -d "${LOCOMO_DATA_DIR}" ]]; then
   echo "LoCoMo data directory does not exist: ${LOCOMO_DATA_DIR}" >&2
   exit 2
 fi
-if [[ ! -x "${RUNNER_PYTHON}" ]]; then
-  echo "Runner Python not found: ${RUNNER_PYTHON}; run 01_setup_runner.sh first." >&2
+CONDITIONS=(no_compression longllmlingua_2x longllmlingua_4x)
+PREPARATION_PYTHON="$(select_manifest_python "${CONDITIONS[@]}")"
+if [[ ! -x "${PREPARATION_PYTHON}" ]]; then
+  echo "Preparation Python not found: ${PREPARATION_PYTHON}; run 01_setup_runner.sh first." >&2
   exit 2
 fi
 
@@ -42,7 +44,10 @@ prepare_shard() {
   trap - INT TERM
   cd "${PYTHON_WORK_DIR}"
   export CUDA_VISIBLE_DEVICES="${device}"
-  exec setsid "${RUNNER_PYTHON}" \
+  exec setsid env -u PYTHONHOME \
+    PYTHONPATH="${REPOSITORY_ROOT}" \
+    PYTHONSAFEPATH=1 \
+    "${PREPARATION_PYTHON}" -P \
     -m traffic_experiment.traffic_measure.cli prepare \
     --data-dir "${LOCOMO_DATA_DIR}" \
     --output "${output}" \
@@ -50,7 +55,7 @@ prepare_shard() {
     --seed "${RANDOM_SEED}" \
     --compressor-model "${COMPRESSOR_MODEL}" \
     --compressor-device "${COMPRESSOR_DEVICE}" \
-    --conditions no_compression longllmlingua_2x longllmlingua_4x \
+    --conditions "${CONDITIONS[@]}" \
     --shard-count "${SHARD_COUNT}" \
     --shard-index "${shard_index}"
 }
@@ -118,7 +123,8 @@ fi
 
 (
   cd "${PYTHON_WORK_DIR}"
-  "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli merge-manifests \
+  run_python_safely "${RUNNER_PYTHON}" \
+    -m traffic_experiment.traffic_measure.cli merge-manifests \
     --input "${SHARD_ZERO}" "${SHARD_ONE}" \
     --output "${MANIFEST_ABS}" \
     --expected-rows 96

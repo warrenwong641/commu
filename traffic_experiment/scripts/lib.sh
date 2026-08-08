@@ -26,6 +26,7 @@ fi
 source "${ENV_FILE}"
 
 RUNNER_PYTHON="${RUNNER_PYTHON:-${EXPERIMENT_ROOT}/.venv-runner/bin/python}"
+COMPRESSION_PYTHON="${COMPRESSION_PYTHON:-${EXPERIMENT_ROOT}/.venv-compression/bin/python}"
 if [[ -n "${VLLM_BIN:-}" ]]; then
   VLLM_BIN_DIR="$(cd -- "$(dirname -- "${VLLM_BIN}")" && pwd)"
   export PATH="${VLLM_BIN_DIR}:${PATH}"
@@ -39,6 +40,29 @@ export CUDA_VISIBLE_DEVICES
 if [[ -n "${HF_TOKEN:-}" ]]; then
   export HF_TOKEN
 fi
+
+select_manifest_python() {
+  local condition
+  for condition in "$@"; do
+    if [[ "${condition}" != "no_compression" ]]; then
+      printf '%s\n' "${COMPRESSION_PYTHON}"
+      return 0
+    fi
+  done
+  printf '%s\n' "${RUNNER_PYTHON}"
+}
+
+run_python_safely() {
+  local python_bin="$1"
+  shift
+  (
+    cd "${TMPDIR:-/tmp}"
+    env -u PYTHONHOME \
+      PYTHONPATH="${REPOSITORY_ROOT}" \
+      PYTHONSAFEPATH=1 \
+      "${python_bin}" -P "$@"
+  )
+}
 
 require_value() {
   local name="$1"

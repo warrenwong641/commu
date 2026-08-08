@@ -33,7 +33,11 @@ else
   fi
   require_python_311 "${PYTHON_BIN}"
   "${PYTHON_BIN}" -m venv --clear "${VENV_PATH}"
-  "${VENV_PATH}/bin/python" -P -m pip install --upgrade pip
+  if ! "${VENV_PATH}/bin/python" -P -m pip install --help 2>&1 | grep -q -- '--require-hashes'; then
+    echo "The pip bundled with ${PYTHON_BIN} does not support --require-hashes." >&2
+    echo "Install uv, or provide a Python 3.11 build with a compatible bundled pip." >&2
+    exit 1
+  fi
   "${VENV_PATH}/bin/python" -P -m pip install --require-hashes -r "${LOCK_FILE}"
 fi
 

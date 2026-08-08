@@ -131,25 +131,29 @@ configuration rather than embedded in experiment code.
 
 ## Python setup and tests
 
-Use Python 3.11 for the traffic runner. The setup script prefers `uv`, creates
-`.venv-runner`, and synchronizes the exact runtime and test versions in
-`requirements-runner.lock`:
+Use Python 3.11 for the traffic tools. The setup script prefers `uv`, creates
+`.venv-runner` from the exact runtime/test versions in
+`requirements-runner.lock`, and independently creates `.venv-compression` from
+the exact manifest-preparation versions in `requirements-compression.lock`:
 
 ```bash
 bash scripts/01_setup_runner.sh
 ```
 
 Without `uv`, the script can use an existing CPython 3.11 interpreter, `venv`,
-and `pip` against the same hashed lock. Interpreter package names and
-availability vary by distribution and release; set `PYTHON_BIN` to the
-installed executable. Refresh both locks using the pinned Linux resolver
-workflow from the repository root:
+and its bundled `pip` against the same hashed locks. The bundled pip must support
+`--require-hashes`; the script does not upgrade it from the network. Interpreter
+package names and availability vary by distribution and release; set
+`PYTHON_BIN` to the installed executable. Refresh all locks using the pinned
+Linux resolver workflow from the repository root:
 
 ```bash
 bash scripts/compile_python_locks.sh
 ```
 
-See [`../docs/python_lock_provenance.md`](../docs/python_lock_provenance.md) for
+Manifest preparation automatically selects `.venv-compression` when any
+LongLLMLingua condition is present; no-compression-only preparation can use the
+runner. See [`../docs/python_lock_provenance.md`](../docs/python_lock_provenance.md) for
 the exact CPython patch, uv version, Linux platform, index, inputs, and hash
 policy. Cross-platform support is not claimed.
 

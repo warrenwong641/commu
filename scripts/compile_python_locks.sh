@@ -58,5 +58,8 @@ compile_lock requirements.lock requirements.txt requirements-test.txt
 compile_lock traffic_experiment/requirements-runner.lock \
   traffic_experiment/requirements-runner.txt \
   traffic_experiment/requirements-test.txt
+compile_lock traffic_experiment/requirements-compression.lock \
+  traffic_experiment/requirements-runner.txt \
+  traffic_experiment/requirements-compression.txt
 
-echo "Regenerated hashed Linux x86_64 locks with uv ${UV_VERSION}."
+echo "Regenerated core, runner, and compression Linux x86_64 locks with uv ${UV_VERSION}."

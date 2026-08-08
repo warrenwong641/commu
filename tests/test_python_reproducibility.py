@@ -48,6 +48,7 @@ def test_python_version_and_test_discovery_are_scoped() -> None:
 def test_qwen35_source_tree_is_trackable_while_runtime_siblings_are_ignored() -> None:
     qwen_source = "traffic_experiment/environments/qwen35/README.md"
     runtime_file = "traffic_experiment/environments/local-runner/bin/python"
+    compression_runtime = "traffic_experiment/.venv-compression/bin/python"
 
     qwen_check = subprocess.run(
         ["git", "check-ignore", "--quiet", "--no-index", qwen_source],
@@ -59,9 +60,15 @@ def test_qwen35_source_tree_is_trackable_while_runtime_siblings_are_ignored() ->
         cwd=REPOSITORY_ROOT,
         check=False,
     )
+    compression_check = subprocess.run(
+        ["git", "check-ignore", "--quiet", "--no-index", compression_runtime],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
 
     assert qwen_check.returncode == 1, "qwen35 tracked source must not be ignored"
     assert runtime_check.returncode == 0, "runtime environment siblings must be ignored"
+    assert compression_check.returncode == 0, "compression environment must be ignored"
 
 
 def test_test_wrapper_uses_safe_path_and_safe_working_directory() -> None:
@@ -132,10 +139,16 @@ def test_setup_scripts_install_locked_test_dependencies() -> None:
         assert "uv pip sync" in setup
         assert "Python 3.11 is required" in setup
         assert "--require-hashes" in setup
+        assert "pip install --upgrade" not in setup
+        assert "pip install --help" in setup
         assert "NLTK_DISABLE_IMPORT_SECURITY" not in setup
 
     assert "requirements.lock" in core_setup
     assert "requirements-runner.lock" in traffic_setup
+    assert "requirements-compression.lock" in traffic_setup
+    assert ".venv-compression" in traffic_setup
+    assert 'sync_with_bundled_pip "${RUNNER_VENV}" "${RUNNER_LOCK_FILE}"' in traffic_setup
+    assert 'sync_with_bundled_pip "${COMPRESSION_VENV}" "${COMPRESSION_LOCK_FILE}"' in traffic_setup
 
 
 def test_lock_provenance_and_handoff_cover_supported_paths() -> None:
@@ -164,14 +177,21 @@ def test_lock_provenance_and_handoff_cover_supported_paths() -> None:
         assert expected in compile_script
     for expected in ("Linux x86_64", "CPython 3.11.15", "uv 0.11.33", "SHA-256"):
         assert expected in provenance
-    assert "uv pip install --python .venv-runner/bin/python" in handoff
-    assert ".venv-runner/bin/python -P -m pip install" in handoff
+    assert "distinct `.venv-compression`" in handoff
+    assert "both paths require the same" in handoff
+    assert "SHA-256 hashes" in handoff
+    assert "Do not install `requirements-compression.txt`" in handoff
+    assert "performs no pip upgrade" in handoff
+    assert ".venv-compression/bin/python\" -P" in handoff
+    assert 'cd "${TMPDIR:-/tmp}"' in handoff
+    assert "env -u PYTHONHOME" in handoff
 
 
 def test_locks_contain_hashes_and_pinned_provenance() -> None:
     for relative_lock in (
         "requirements.lock",
         "traffic_experiment/requirements-runner.lock",
+        "traffic_experiment/requirements-compression.lock",
     ):
         lock = (REPOSITORY_ROOT / relative_lock).read_text()
         assert "uv 0.11.33" in lock

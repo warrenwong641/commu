@@ -1,4 +1,5 @@
-# Install this in the environment used only for manifest preparation.
+# Lock input for the environment used only for manifest preparation.
+# Install requirements-compression.lock, not this file directly.
 # LLMLingua loads a separate compressor model; stop it before starting vLLM.
 llmlingua==0.2.2
 # LLMLingua 0.2.2 expects the legacy tuple-based attention cache.
