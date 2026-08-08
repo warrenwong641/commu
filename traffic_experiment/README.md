@@ -43,6 +43,8 @@ TLS records, and server-side behavior are not controlled by the researcher.
 - `docs/local_server_handoff.md`: copy-to-server installation and run commands.
 - `docs/lab_server_migration.md`: final lab deployment, network controls, and
   resumable 4096-token workflows.
+- `docs/qwen35_lab_migration_checklist.md`: static staging gate and separately
+  authorized lab-runtime checklist for a future Qwen3.5 migration.
 - `docs/jupyter_web_access.md`: secure AutoDL-like browser access without
   exposing Jupyter directly.
 - `schemas/run_manifest.schema.json`: minimum metadata for every measured request.
@@ -85,6 +87,9 @@ the weighted average is 5,250 input tokens per call.
 
 - `server.lab.env.example`: lab defaults with direct TCP/UDP, MTU 1500,
   controlled RTT/capacity, three repetitions, and a 4,096-token output ceiling.
+- `server.qwen35.staging.env.example`: tracked credential-free, non-runnable
+  Qwen3.5 migration values validated by
+  `scripts/validate_qwen35_staging_config.py`.
 - `scripts/16_create_lab_bundle.sh`: credential-free transfer archive.
 - `scripts/17_lab_preflight.sh`: machine and reproducibility audit.
 - `scripts/18_run_lab_matrix.sh`: resumable TLS/QUIC × network × workload matrix.
