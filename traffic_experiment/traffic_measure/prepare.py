@@ -172,7 +172,8 @@ def _load_compressor(model_name: str, device_map: str):
     except ImportError as exc:
         raise RuntimeError(
             "LongLLMLingua is required for compressed conditions. "
-            "Install requirements-compression.txt in the preparation environment."
+            "Run traffic_experiment/scripts/01_setup_runner.sh, then use "
+            "traffic_experiment/.venv-compression/bin/python for preparation."
         ) from exc
     return PromptCompressor(model_name=model_name, device_map=device_map)
 

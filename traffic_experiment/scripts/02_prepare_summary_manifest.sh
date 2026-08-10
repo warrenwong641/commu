@@ -12,31 +12,25 @@ if [[ -e "${OUTPUT_ABS}" || -L "${OUTPUT_ABS}" ||
   echo "Preserve the existing artifact and choose a new SUMMARY_MANIFEST_PATH." >&2
   exit 2
 fi
-DEFAULT_COMPRESSION_PYTHON="$(absolute_from_experiment ".venv-compression/bin/python")"
-if [[ -x "${DEFAULT_COMPRESSION_PYTHON}" ]]; then
-  COMPRESSION_PYTHON="${COMPRESSION_PYTHON:-${DEFAULT_COMPRESSION_PYTHON}}"
-else
-  COMPRESSION_PYTHON="${COMPRESSION_PYTHON:-${RUNNER_PYTHON}}"
-fi
-if [[ ! -x "${COMPRESSION_PYTHON}" ]]; then
-  echo "Compression Python not found: ${COMPRESSION_PYTHON}" >&2
-  exit 2
-fi
 read -r -a SUMMARY_CONDITION_ARGS <<< \
   "${SUMMARY_CONDITIONS:-no_compression longllmlingua_2x longllmlingua_4x}"
+require_compressor_device_for_conditions \
+  "${COMPRESSOR_DEVICE}" "${SUMMARY_CONDITION_ARGS[@]}"
+PREPARATION_PYTHON="$(select_manifest_python "${SUMMARY_CONDITION_ARGS[@]}")"
+if [[ ! -x "${PREPARATION_PYTHON}" ]]; then
+  echo "Preparation Python not found: ${PREPARATION_PYTHON}; run 01_setup_runner.sh first." >&2
+  exit 2
+fi
 
-(
-  cd "${TMPDIR:-/tmp}"
-  PYTHONSAFEPATH=1 "${COMPRESSION_PYTHON}" -P \
-    -m traffic_experiment.traffic_measure.cli prepare-summaries \
+run_python_safely "${PREPARATION_PYTHON}" \
+  -m traffic_experiment.traffic_measure.cli prepare-summaries \
     --data-dir "${LOCOMO_DATA_DIR}" \
     --output "${OUTPUT_ABS}" \
     --conversations "${SUMMARY_CONVERSATIONS:-10}" \
     --seed "${RANDOM_SEED}" \
     --compressor-model "${COMPRESSOR_MODEL}" \
     --compressor-device "${COMPRESSOR_DEVICE}" \
-    --conditions "${SUMMARY_CONDITION_ARGS[@]}"
-)
+  --conditions "${SUMMARY_CONDITION_ARGS[@]}"
 
 chmod a-w -- "${OUTPUT_ABS}"
 echo "Summary manifest prepared at ${OUTPUT_ABS}"

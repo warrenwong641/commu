@@ -9,8 +9,16 @@ if [[ ! -d "${LOCOMO_DATA_DIR}" ]]; then
   echo "LoCoMo data directory does not exist: ${LOCOMO_DATA_DIR}" >&2
   exit 2
 fi
-if [[ ! -x "${RUNNER_PYTHON}" ]]; then
-  echo "Runner Python not found: ${RUNNER_PYTHON}; run 01_setup_runner.sh first." >&2
+CONDITIONS=(no_compression longllmlingua_2x longllmlingua_4x)
+require_compressor_device_for_conditions "${COMPRESSOR_DEVICE}" "${CONDITIONS[@]}"
+if [[ "${COMPRESSOR_DEVICE}" == "cpu" ]]; then
+  echo "CPU parallel manifest preparation is disabled to prevent unapproved concurrent 7B compressor memory use." >&2
+  echo "Use scripts/02_prepare_manifest.sh for reproducible serial CPU preparation." >&2
+  exit 2
+fi
+PREPARATION_PYTHON="$(select_manifest_python "${CONDITIONS[@]}")"
+if [[ ! -x "${PREPARATION_PYTHON}" ]]; then
+  echo "Preparation Python not found: ${PREPARATION_PYTHON}; run 01_setup_runner.sh first." >&2
   exit 2
 fi
 
@@ -41,8 +49,15 @@ prepare_shard() {
   local output="$3"
   trap - INT TERM
   cd "${PYTHON_WORK_DIR}"
-  export CUDA_VISIBLE_DEVICES="${device}"
-  exec setsid "${RUNNER_PYTHON}" \
+  if [[ "${COMPRESSOR_DEVICE}" == "cpu" ]]; then
+    unset CUDA_VISIBLE_DEVICES
+  else
+    export CUDA_VISIBLE_DEVICES="${device}"
+  fi
+  exec setsid env -u PYTHONHOME \
+    PYTHONPATH="${REPOSITORY_ROOT}" \
+    PYTHONSAFEPATH=1 \
+    "${PREPARATION_PYTHON}" -P \
     -m traffic_experiment.traffic_measure.cli prepare \
     --data-dir "${LOCOMO_DATA_DIR}" \
     --output "${output}" \
@@ -50,7 +65,7 @@ prepare_shard() {
     --seed "${RANDOM_SEED}" \
     --compressor-model "${COMPRESSOR_MODEL}" \
     --compressor-device "${COMPRESSOR_DEVICE}" \
-    --conditions no_compression longllmlingua_2x longllmlingua_4x \
+    --conditions "${CONDITIONS[@]}" \
     --shard-count "${SHARD_COUNT}" \
     --shard-index "${shard_index}"
 }
@@ -101,8 +116,8 @@ prepare_shard 1 1 "${SHARD_ONE}" >"${LOG_ONE}" 2>&1 &
 PID_ONE=$!
 register_child "${PID_ONE}"
 
-echo "GPU 0 shard PID: ${PID_ZERO}; log: ${LOG_ZERO}"
-echo "GPU 1 shard PID: ${PID_ONE}; log: ${LOG_ONE}"
+echo "Compression shard 0 PID: ${PID_ZERO}; log: ${LOG_ZERO}"
+echo "Compression shard 1 PID: ${PID_ONE}; log: ${LOG_ONE}"
 
 status=0
 for index in "${!pids[@]}"; do
@@ -118,7 +133,8 @@ fi
 
 (
   cd "${PYTHON_WORK_DIR}"
-  "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli merge-manifests \
+  run_python_safely "${RUNNER_PYTHON}" \
+    -m traffic_experiment.traffic_measure.cli merge-manifests \
     --input "${SHARD_ZERO}" "${SHARD_ONE}" \
     --output "${MANIFEST_ABS}" \
     --expected-rows 96

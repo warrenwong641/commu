@@ -134,3 +134,45 @@ explicitly requested.
 
 Pricing in this plan was checked on 2026-08-03 and is deliberately stored as
 configuration rather than embedded in experiment code.
+
+## Python setup and tests
+
+Use Python 3.11 for the traffic tools. The setup script prefers `uv`, creates
+`.venv-runner` from the exact runtime/test versions in
+`requirements-runner.lock`, and independently creates `.venv-compression` from
+the exact manifest-preparation versions in `requirements-compression.lock`:
+
+```bash
+bash scripts/01_setup_runner.sh
+```
+
+Without `uv`, the script can use an existing CPython 3.11 interpreter, `venv`,
+and its bundled `pip` against the same hashed locks. The bundled pip must support
+`--require-hashes`; the script does not upgrade it from the network. Interpreter
+package names and availability vary by distribution and release; set
+`PYTHON_BIN` to the installed executable. Refresh all locks using the pinned
+Linux resolver workflow from the repository root:
+
+```bash
+bash scripts/compile_python_locks.sh
+```
+
+Manifest preparation automatically selects `.venv-compression` when any
+LongLLMLingua condition is present; no-compression-only preparation can use the
+runner. See [`../docs/python_lock_provenance.md`](../docs/python_lock_provenance.md) for
+the exact CPython patch, uv version, Linux platform, index, inputs, and hash
+policy. Cross-platform support is not claimed.
+
+CPU manifest preparation must use `scripts/02_prepare_manifest.sh`, which runs
+one LongLLMLingua 7B process at a time. The parallel manifest entry point fails
+closed in CPU mode so it cannot silently double compressor RAM use. It is only
+for a separately validated GPU environment whose approved smoke-test record is
+bound to the exact selected interpreter.
+
+From the repository root, `bash scripts/run_tests.sh` runs both test trees from a
+temporary working directory with Python safe-path mode (`-P`). This keeps the
+working directory and inherited Python import/install variables out of the
+import path without disabling NLTK import security. `pytest.ini` scopes default
+collection to the two maintained test directories and excludes run directories,
+caches, and virtual environments. Tracked environment specifications are not
+excluded; their tests belong in `traffic_experiment/tests/`.

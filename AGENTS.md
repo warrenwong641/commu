@@ -47,10 +47,13 @@ validation environments, not interchangeable model-compute replicates.
 3. Make the smallest scoped change. Update docs, examples, schemas, and tests
    when behavior or experiment assumptions change.
 4. Run focused tests, then the complete applicable suite:
-   - `.venv/bin/python -m pytest -q`
-   - `.venv-runner/bin/python -m pytest -q traffic_experiment/tests`
-   - `bash -n traffic_experiment/scripts/*.sh`
-   - `shellcheck traffic_experiment/scripts/*.sh` when available.
+   - `bash scripts/run_tests.sh`
+   - `bash -n scripts/*.sh traffic_experiment/scripts/*.sh`
+   - `shellcheck scripts/*.sh traffic_experiment/scripts/*.sh` when available.
+
+   The wrapper runs the core and traffic suites explicitly from a temporary
+   working directory with Python safe-path mode. Do not replace it with an
+   unscoped repository-root `pytest` invocation.
 5. For experiments: freeze manifests, run a small pilot, validate timestamps,
    token accounting, protocol negotiation, capture completeness, and traffic
    isolation, then run the main matrix.

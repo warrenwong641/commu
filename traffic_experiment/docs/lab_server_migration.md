@@ -65,17 +65,31 @@ storage for the Qwen model, vLLM cache, manifests, and captures.
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  git curl ca-certificates python3 python3-venv \
+  git curl ca-certificates \
   iproute2 ethtool iperf3 tshark
 
 bash scripts/00_install_caddy.sh
 bash scripts/01_setup_runner.sh
 ```
 
+Install `uv` before the runner setup; this is the portable primary path because
+`uv` obtains Python 3.11 and synchronizes the hashed runner and compression
+locks into separate `.venv-runner` and `.venv-compression` environments. For a
+non-uv fallback, install CPython 3.11 plus its `venv` support using packages
+available for the server's exact distribution and release, then set
+`PYTHON_BIN`. The bundled pip must support `--require-hashes`; setup does not
+upgrade pip from the network. Do not assume every Ubuntu/Debian default
+repository contains packages named `python3.11` and `python3.11-venv`.
+
 Install vLLM in a separate CUDA environment following the version compatible
 with the lab driver's CUDA runtime, then point `VLLM_BIN` at that environment.
 Do not blindly copy the AutoDL vLLM environment: CUDA, PyTorch, flash-attention,
 and driver combinations are machine-specific.
+
+The locked compression environment is deliberately CPU-only and the shipped
+profiles default `COMPRESSOR_DEVICE=cpu`. A GPU compressor must use a distinct
+environment and pass a separately approved compatibility smoke test; the CPU
+lock and the vLLM environment are not GPU-compressor validation evidence.
 
 During `tshark` installation, either permit non-root capture and configure the
 `dumpcap` group, or let the privileged matrix orchestrator invoke capture. The

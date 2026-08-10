@@ -66,7 +66,10 @@ This blocks:
 - **vLLM inference** — needs GPU(s) to load Qwen3-8B
 
 ### Blocker 3: NLTK security import (resolved)
-`nltk` shipped with Python 3.11 blocks imports from CWD for security reasons. This was resolved by adding the `-P` flag to the Python invocation. Needs a permanent fix in `lib.sh` or the scripts.
+`nltk` shipped with Python 3.11 blocks imports from CWD for security reasons.
+The permanent repository workflow is now `bash scripts/run_tests.sh` from the
+repository root. It runs from a temporary working directory, uses Python's `-P`
+safe-path option, and never disables NLTK import security.
 
 ---
 

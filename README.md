@@ -24,13 +24,29 @@ APIs are treated as validation environments.
 
 ## Core evaluation
 
-Install the Python dependencies in an isolated environment:
+The supported development runtime is Python 3.11. Install the locked core and
+test dependencies with `uv`:
 
 ```bash
-python3 -m venv .venv
+bash scripts/setup_python.sh
 . .venv/bin/activate
-python -m pip install -r requirements.txt
 ```
+
+`uv` is the portable primary path because it can obtain Python 3.11 and
+synchronizes the exact versions and hashes in `requirements.lock`. If `uv` is
+unavailable, the same script can use an existing CPython 3.11 interpreter,
+`venv`, and its bundled pip without upgrading it; package names and availability
+vary by distribution and release, so set `PYTHON_BIN` to the installed
+interpreter. Regenerate all locks
+using the pinned resolver workflow:
+
+```bash
+bash scripts/compile_python_locks.sh
+```
+
+The supported lock target and complete resolver provenance are documented in
+[`docs/python_lock_provenance.md`](docs/python_lock_provenance.md). These locks
+are not claimed to support Windows, macOS, other CPU architectures, or musl.
 
 Prepare LoCoMo data and run an experiment:
 
@@ -41,11 +57,22 @@ python -m locomo_eval.cli run --config configs/first_experiment.yaml
 python -m locomo_eval.cli report --results-dir results/exp_002_stratified_budgeted
 ```
 
-Run the test suite:
+Run both the core and traffic test suites:
 
 ```bash
-python -m pytest -q
+bash traffic_experiment/scripts/01_setup_runner.sh
+bash scripts/run_tests.sh
 ```
+
+The traffic setup creates `.venv-runner` from its runtime/test lock and a
+separate `.venv-compression` from its manifest-preparation lock. Compression
+packages never mutate the runner environment.
+
+The wrapper invokes both interpreters with Python's `-P` safe-path option from
+a temporary working directory. It clears inherited Python import/install
+variables, sets only the repository import root, and passes only `tests/` and
+`traffic_experiment/tests/` to pytest. `pytest.ini` excludes runtime trees from
+accidental discovery without excluding tracked environment specifications.
 
 The core configuration compares no compression, recent-turn windows, sparse and
 dense retrieval, neighbor windows, hybrid selection, and oracle evidence across

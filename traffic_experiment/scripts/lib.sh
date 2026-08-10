@@ -30,10 +30,13 @@ if grep -Eq \
   exit 2
 fi
 
+# Integration invariant: Cloud C's STAGING_ONLY rejection must remain above
+# this source command; compression helpers belong below the pre-source guards.
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
 
 RUNNER_PYTHON="${RUNNER_PYTHON:-${EXPERIMENT_ROOT}/.venv-runner/bin/python}"
+COMPRESSION_PYTHON="${COMPRESSION_PYTHON:-${EXPERIMENT_ROOT}/.venv-compression/bin/python}"
 if [[ -n "${VLLM_BIN:-}" ]]; then
   VLLM_BIN_DIR="$(cd -- "$(dirname -- "${VLLM_BIN}")" && pwd)"
   export PATH="${VLLM_BIN_DIR}:${PATH}"
@@ -47,6 +50,64 @@ export CUDA_VISIBLE_DEVICES
 if [[ -n "${HF_TOKEN:-}" ]]; then
   export HF_TOKEN
 fi
+
+select_manifest_python() {
+  local condition
+  for condition in "$@"; do
+    if [[ "${condition}" != "no_compression" ]]; then
+      printf '%s\n' "${COMPRESSION_PYTHON}"
+      return 0
+    fi
+  done
+  printf '%s\n' "${RUNNER_PYTHON}"
+}
+
+run_python_safely() {
+  local python_bin="$1"
+  shift
+  (
+    cd "${TMPDIR:-/tmp}"
+    env -u PYTHONHOME \
+      PYTHONPATH="${REPOSITORY_ROOT}" \
+      PYTHONSAFEPATH=1 \
+      "${python_bin}" -P "$@"
+  )
+}
+
+require_compressor_device_for_conditions() {
+  local condition
+  for condition in "${@:2}"; do
+    [[ "${condition}" != "no_compression" ]] || continue
+    if [[ "$1" == "cpu" ]]; then
+      return 0
+    fi
+    if [[ "${GPU_COMPRESSOR_SMOKE_TEST_APPROVED:-}" != "true" ]]; then
+      echo "GPU compression is not validated by the reproducible CPU lock." >&2
+      echo "Use COMPRESSOR_DEVICE=cpu, or obtain approval for a separate GPU environment and smoke test." >&2
+      exit 2
+    fi
+    if [[ "${COMPRESSION_PYTHON}" == "${EXPERIMENT_ROOT}/.venv-compression/bin/python" ]]; then
+      echo "The default .venv-compression is CPU-only and cannot be approved for GPU use." >&2
+      echo "Point COMPRESSION_PYTHON to the separately validated GPU environment." >&2
+      exit 2
+    fi
+    local approved_python selected_python
+    if [[ -z "${GPU_COMPRESSOR_APPROVED_PYTHON:-}" ]]; then
+      echo "GPU_COMPRESSOR_APPROVED_PYTHON must record the approved interpreter path." >&2
+      exit 2
+    fi
+    if ! approved_python="$(readlink -e -- "${GPU_COMPRESSOR_APPROVED_PYTHON}")" ||
+      ! selected_python="$(readlink -e -- "${COMPRESSION_PYTHON}")"; then
+      echo "The approved and selected GPU compressor interpreters must both exist." >&2
+      exit 2
+    fi
+    if [[ "${approved_python}" != "${selected_python}" ]]; then
+      echo "The selected GPU compressor interpreter does not match the approved identity." >&2
+      exit 2
+    fi
+    return 0
+  done
+}
 
 require_value() {
   local name="$1"

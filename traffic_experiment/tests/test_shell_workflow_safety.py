@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import os
 import runpy
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).parents[1]
@@ -11,6 +16,26 @@ SCRIPTS = ROOT / "scripts"
 
 def _script(name: str) -> str:
     return (SCRIPTS / name).read_text(encoding="utf-8")
+
+
+def _working_posix_bash() -> str:
+    if os.name != "posix":
+        pytest.skip("shell workflow execution requires POSIX")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("working Bash is required")
+    try:
+        probe = subprocess.run(
+            [bash, "--noprofile", "--norc", "-c", ":"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("working Bash is required")
+    if probe.returncode != 0:
+        pytest.skip("working Bash is required")
+    return bash
 
 
 def test_namespaced_capture_uses_and_validates_client_visible_interface():
@@ -114,6 +139,143 @@ def test_manifest_entrypoints_refuse_overwrite_and_preflight_checks_digests():
         '"${SUMMARY_MANIFEST_ACTUAL_SHA}" != "${SUMMARY_MANIFEST_SHA256,,}"'
         in preflight
     )
+
+
+def test_manifest_entrypoints_select_isolated_interpreters_with_safe_imports():
+    library = _script("lib.sh")
+    assert '.venv-compression/bin/python' in library
+    assert "select_manifest_python()" in library
+    assert "run_python_safely()" in library
+    assert "env -u PYTHONHOME" in library
+    assert 'PYTHONPATH="${REPOSITORY_ROOT}"' in library
+    assert "PYTHONSAFEPATH=1" in library
+    assert '"${python_bin}" -P' in library
+    assert "require_compressor_device_for_conditions()" in library
+
+    for name in (
+        "02_prepare_manifest.sh",
+        "02_prepare_manifest_parallel.sh",
+        "02_prepare_summary_manifest.sh",
+    ):
+        script = _script(name)
+        assert "select_manifest_python" in script
+        assert "PREPARATION_PYTHON" in script
+        assert '"${PREPARATION_PYTHON}"' in script
+        assert "require_compressor_device_for_conditions" in script
+
+    parallel = _script("02_prepare_manifest_parallel.sh")
+    assert "exec setsid env -u PYTHONHOME" in parallel
+    assert 'PYTHONPATH="${REPOSITORY_ROOT}"' in parallel
+    assert "PYTHONSAFEPATH=1" in parallel
+    assert '"${PREPARATION_PYTHON}" -P' in parallel
+    assert 'run_python_safely "${RUNNER_PYTHON}"' in parallel
+    assert 'if [[ "${COMPRESSOR_DEVICE}" == "cpu" ]]' in parallel
+    assert "unset CUDA_VISIBLE_DEVICES" in parallel
+
+
+def test_parallel_manifest_cpu_gate_precedes_interpreter_and_child_launches():
+    parallel = _script("02_prepare_manifest_parallel.sh")
+    gate = parallel.index('if [[ "${COMPRESSOR_DEVICE}" == "cpu" ]]')
+    refusal = parallel.index("CPU parallel manifest preparation is disabled", gate)
+    exit_gate = parallel.index("exit 2", refusal)
+    interpreter = parallel.index("PREPARATION_PYTHON=", exit_gate)
+    first_launch = parallel.index("prepare_shard 0", interpreter)
+    assert gate < refusal < exit_gate < interpreter < first_launch
+    assert "scripts/02_prepare_manifest.sh" in parallel
+
+
+def test_parallel_manifest_cpu_mode_refuses_without_starting_compressor(tmp_path: Path):
+    bash = _working_posix_bash()
+
+    data_dir = tmp_path / "locomo"
+    data_dir.mkdir()
+    marker = tmp_path / "compressor-started"
+    fake_python = tmp_path / "compression-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        f"touch {str(marker)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env_file = tmp_path / "server.env"
+    env_file.write_text(
+        f'LOCOMO_DATA_DIR={str(data_dir)!r}\n'
+        'COMPRESSOR_DEVICE="cpu"\n'
+        'COMPRESSOR_MODEL="NousResearch/Llama-2-7b-hf"\n'
+        'MANIFEST_PATH="artifacts/test.jsonl"\n'
+        'RANDOM_SEED="42"\n',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EXPERIMENT_ENV_FILE": str(env_file),
+            "COMPRESSION_PYTHON": str(fake_python),
+        }
+    )
+    completed = subprocess.run(
+        [bash, str(SCRIPTS / "02_prepare_manifest_parallel.sh")],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 2
+    assert "CPU parallel manifest preparation is disabled" in completed.stderr
+    assert "02_prepare_manifest.sh" in completed.stderr
+    assert not marker.exists()
+
+
+def test_gpu_compressor_gate_binds_approval_to_canonical_interpreter(tmp_path: Path):
+    bash = _working_posix_bash()
+    selected = tmp_path / "selected-python"
+    other = tmp_path / "other-python"
+    alias = tmp_path / "approved-python"
+    for executable in (selected, other):
+        executable.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    alias.symlink_to(selected)
+    env_file = tmp_path / "server.env"
+    env_file.write_text('COMPRESSOR_DEVICE="cuda"\n', encoding="utf-8")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EXPERIMENT_ENV_FILE": str(env_file),
+            "COMPRESSION_PYTHON": str(selected),
+            "GPU_COMPRESSOR_SMOKE_TEST_APPROVED": "true",
+        }
+    )
+    command = (
+        f"source {str(SCRIPTS / 'lib.sh')!r}; "
+        "require_compressor_device_for_conditions cuda longllmlingua_2x"
+    )
+
+    environment["GPU_COMPRESSOR_APPROVED_PYTHON"] = str(other)
+    mismatch = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", command],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert mismatch.returncode == 2
+    assert "does not match the approved identity" in mismatch.stderr
+
+    environment["GPU_COMPRESSOR_APPROVED_PYTHON"] = str(alias)
+    matched = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", command],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert matched.returncode == 0, matched.stderr
 
 
 def test_jupyter_config_consumes_only_argon2_password_verifier(

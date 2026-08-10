@@ -44,16 +44,29 @@ The exact administrator command is distribution-specific.
 
 ```bash
 chmod +x scripts/*.sh
-PYTHON_BIN=python3.11 ./scripts/01_setup_runner.sh
-./.venv-runner/bin/python -m pip install -r requirements-compression.txt
+./scripts/01_setup_runner.sh
 ```
+
+The setup command creates `.venv-runner` from the hashed runner lock and a
+distinct `.venv-compression` from the hashed compression lock. It supports both
+uv and an existing CPython 3.11 plus its bundled pip; both paths require the same
+SHA-256 hashes. Do not install `requirements-compression.txt` into
+`.venv-runner`: that file is a lock input, not an installation artifact.
+The reproducible compression environment is CPU-only and defaults
+`COMPRESSOR_DEVICE=cpu`; its lock does not install CUDA packages.
 
 vLLM should be installed in a CUDA-compatible environment appropriate for the
 server. Set `VLLM_BIN` in `server.env` to its executable. Keeping vLLM installation
 separate avoids changing a working CUDA/PyTorch environment.
 
-Python 3.11 is recommended for the older, research-pinned LLMLingua dependency.
-If it is unavailable, choose a compatible Python executable through `PYTHON_BIN`.
+Python 3.11 is required for the reproducible runner and the older,
+research-pinned LLMLingua dependency. The portable primary path is `uv`, which
+obtains Python 3.11 itself. The non-uv fallback requires an existing CPython
+3.11 interpreter with `venv` and a bundled pip that supports
+`--require-hashes`; it performs no pip upgrade. Whether a distribution supplies
+that interpreter in its default package repositories depends on the
+distribution and release. Select a suitable executable through `PYTHON_BIN`;
+the setup script refuses other Python feature versions.
 
 ## Prepare prompts
 
@@ -63,12 +76,25 @@ Run this before starting vLLM:
 ./scripts/02_prepare_manifest.sh
 ```
 
+Because the default conditions include LongLLMLingua, this command selects
+`.venv-compression/bin/python`. A no-compression-only summary preparation uses
+the runner; any summary compression condition selects the compression
+interpreter. Both paths run from a safe temporary working directory with Python
+safe-path mode and a repository-only import path.
+
 This selects 32 eligible LoCoMo QA examples with seed 42 and writes 96 frozen
 request rows: 32 uncompressed, 32 LongLLMLingua 2x, and 32 LongLLMLingua 4x.
 Compression metadata and prompt hashes are saved in the manifest.
 
-LongLLMLingua loads a separate compressor model. Let the command exit and confirm
-its GPU memory has been released before starting Qwen.
+LongLLMLingua loads a separate compressor model. Let the preparation command
+exit before starting Qwen so model preparation and traffic measurement remain
+isolated. GPU compression is not validated by the CPU lock. It requires a
+separate environment and a separately approved compatibility smoke test whose
+recorded `GPU_COMPRESSOR_APPROVED_PYTHON` resolves to the selected
+`COMPRESSION_PYTHON`; do not point the CPU-only `.venv-compression` at CUDA.
+Use `scripts/02_prepare_manifest.sh` for CPU preparation. The parallel manifest
+entry point rejects CPU mode before starting a compressor so two 7B processes
+cannot silently consume memory at the same time.
 
 ## Start Qwen3.5-9B
 
@@ -151,10 +177,19 @@ PROFILE=robustness ./scripts/run_local_experiment.sh
 All shell scripts call the same Python CLI:
 
 ```bash
-python -m traffic_experiment.traffic_measure.cli --help
-python -m traffic_experiment.traffic_measure.cli prepare --help
-python -m traffic_experiment.traffic_measure.cli run --help
-python -m traffic_experiment.traffic_measure.cli analyze --help
+REPOSITORY_ROOT="$(cd .. && pwd)"
+(
+  cd "${TMPDIR:-/tmp}"
+  env -u PYTHONHOME PYTHONPATH="${REPOSITORY_ROOT}" PYTHONSAFEPATH=1 \
+    "${REPOSITORY_ROOT}/traffic_experiment/.venv-compression/bin/python" -P \
+    -m traffic_experiment.traffic_measure.cli prepare --help
+  env -u PYTHONHOME PYTHONPATH="${REPOSITORY_ROOT}" PYTHONSAFEPATH=1 \
+    "${REPOSITORY_ROOT}/traffic_experiment/.venv-runner/bin/python" -P \
+    -m traffic_experiment.traffic_measure.cli run --help
+  env -u PYTHONHOME PYTHONPATH="${REPOSITORY_ROOT}" PYTHONSAFEPATH=1 \
+    "${REPOSITORY_ROOT}/traffic_experiment/.venv-runner/bin/python" -P \
+    -m traffic_experiment.traffic_measure.cli analyze --help
+)
 ```
 
 The implementation uses the official LongLLMLingua `PromptCompressor`, vLLM's
