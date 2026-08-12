@@ -35,7 +35,10 @@ _safe_dir() {
 }
 
 # --- owned-resource lifecycle helpers --------------------------------------
-VALIDATION_ROOT="$(absolute_from_experiment "${RUNS_ROOT}")/protocol_validation"
+VALIDATION_ROOT="$(protocol_validation_root_path)"
+if [[ -L "${VALIDATION_ROOT}" ]]; then
+  die "Refusing symlinked protocol-validation root: ${VALIDATION_ROOT}"
+fi
 mkdir -p "${VALIDATION_ROOT}"
 PROTOCOL_MARKER="$(protocol_validation_marker_path)"
 LIFECYCLE_STATE="${VALIDATION_ROOT}/.lifecycle-$$.state"

@@ -86,6 +86,19 @@ def test_protocol_pilot_and_matrix_share_redirect_free_caddyfile():
     assert "sed -n '/servers/" not in pilots
 
 
+def test_protocol_evidence_generations_are_isolated_under_run_root():
+    admission = _script("protocol_admission.sh")
+    pilots = _script("22_validate_protocol_pilots.sh")
+
+    assert "protocol_validation_root_path()" in admission
+    assert "PROTOCOL_VALIDATION_ROOT" in admission
+    assert "realpath -m" in admission
+    assert "must be a direct, named generation" in admission
+    assert '"$(basename -- "${marker}")" != "PROTOCOL_VALIDATION_OK"' in admission
+    assert 'VALIDATION_ROOT="$(protocol_validation_root_path)"' in pilots
+    assert '[[ -L "${VALIDATION_ROOT}" ]]' in pilots
+
+
 def test_measured_orchestrators_gate_before_network_mutation():
     for name in ("18_run_lab_matrix.sh", "19_run_lab_sessions.sh"):
         script = _script(name)

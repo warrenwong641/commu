@@ -27,6 +27,11 @@ Run `TRANSPORT=tls13 scripts/08_run_transport_profile.sh` and then
 directory separately. A valid QUIC row must record HTTP version 3 and the capture
 must contain UDP/QUIC packets on port 8444.
 
+When a bound protocol-stack file changes, preserve the previous immutable pilot
+directory and set `PROTOCOL_VALIDATION_ROOT` to a new direct child of the run root
+named `protocol_validation-<generation>`. Admission then reads the marker from
+that isolated generation; it never reuses evidence created by a different stack.
+
 For the two-GPU pilot, use `scripts/08_run_transport_profile_parallel.sh`.
 It assigns disjoint complete sample blocks to ports 8000 and 8001 through separate
 secure listeners, merges the 72 rows, and runs tshark analysis automatically.
