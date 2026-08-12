@@ -47,10 +47,36 @@ require_protocol_marker_match() {
   fi
 }
 
+protocol_validation_root_path() {
+  local run_root requested parent name
+  run_root="$(realpath -m -- "$(absolute_from_experiment "${RUNS_ROOT}")")"
+  requested="${PROTOCOL_VALIDATION_ROOT:-${run_root}/protocol_validation}"
+  if [[ "${requested}" != /* ]]; then
+    requested="$(absolute_from_experiment "${requested}")"
+  fi
+  requested="$(realpath -m -- "${requested}")"
+  parent="$(dirname -- "${requested}")"
+  name="$(basename -- "${requested}")"
+  if [[ "${parent}" != "${run_root}" ||
+    ! "${name}" =~ ^protocol_validation(-[A-Za-z0-9][A-Za-z0-9._-]*)?$ ]]; then
+    echo "Protocol-validation root must be a direct, named generation under ${run_root}." >&2
+    return 1
+  fi
+  printf '%s\n' "${requested}"
+}
+
 protocol_validation_marker_path() {
-  local marker="${PROTOCOL_VALIDATION_MARKER:-$(absolute_from_experiment "${RUNS_ROOT}")/protocol_validation/PROTOCOL_VALIDATION_OK}"
+  local root marker
+  root="$(protocol_validation_root_path)" || return 1
+  marker="${PROTOCOL_VALIDATION_MARKER:-${root}/PROTOCOL_VALIDATION_OK}"
   if [[ "${marker}" != /* ]]; then
     marker="$(absolute_from_experiment "${marker}")"
+  fi
+  marker="$(realpath -m -- "${marker}")"
+  if [[ "$(dirname -- "${marker}")" != "${root}" ||
+    "$(basename -- "${marker}")" != "PROTOCOL_VALIDATION_OK" ]]; then
+    echo "Protocol-validation marker must be PROTOCOL_VALIDATION_OK inside ${root}." >&2
+    return 1
   fi
   printf '%s\n' "${marker}"
 }
