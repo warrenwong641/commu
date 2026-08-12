@@ -43,7 +43,7 @@ NETWORK_OWNED=0
 CADDY_OWNED=0
 CADDY_PID=""
 CADDY_START_TICKS=""
-CADDYFILE_TMP=""
+CADDY_CONFIG="${EXPERIMENT_ROOT}/configs/Caddyfile"
 CADDY_EXE="$(command -v caddy || true)"
 
 write_lifecycle_state() {
@@ -55,7 +55,7 @@ write_lifecycle_state() {
     printf 'caddy_owned=%s\n' "${CADDY_OWNED}"
     printf 'caddy_pid=%s\n' "${CADDY_PID}"
     printf 'caddy_start_ticks=%s\n' "${CADDY_START_TICKS}"
-    printf 'caddy_config=%s\n' "${CADDYFILE_TMP}"
+    printf 'caddy_config=%s\n' "${CADDY_CONFIG}"
   } >"${LIFECYCLE_STATE}"
 }
 
@@ -127,17 +127,17 @@ stop_owned_caddy() {
   [[ "${CADDY_OWNED}" -eq 1 ]] || return 0
   if ! kill -0 "${CADDY_PID}" 2>/dev/null; then
     :
-  elif caddy_pid_matches "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDYFILE_TMP}"; then
+  elif caddy_pid_matches "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDY_CONFIG}"; then
     kill -TERM "${CADDY_PID}" 2>/dev/null || true
     if ! wait_for_owned_caddy_exit \
-      "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDYFILE_TMP}" 50; then
+      "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDY_CONFIG}" 50; then
       # Recheck immediately before escalation so a PID reused after TERM is
       # never signalled as though it were still this invocation's Caddy.
       if caddy_pid_matches \
-        "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDYFILE_TMP}"; then
+        "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDY_CONFIG}"; then
         kill -KILL "${CADDY_PID}" 2>/dev/null || true
         if ! wait_for_owned_caddy_exit \
-          "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDYFILE_TMP}" 20; then
+          "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDY_CONFIG}" 20; then
           echo "Verified Caddy PID ${CADDY_PID} did not exit; preserving ownership state." >&2
           return 1
         fi
@@ -177,10 +177,6 @@ cleanup_resources() {
       echo "Failed to remove owned namespace/veth; preserving lifecycle state." >&2
       cleanup_failed=1
     fi
-  fi
-  if [[ "${cleanup_failed}" -eq 0 && -n "${CADDYFILE_TMP}" ]] &&
-    ! rm -f "${CADDYFILE_TMP}"; then
-    cleanup_failed=1
   fi
   if [[ "${cleanup_failed}" -eq 0 ]]; then
     if ! rm -f "${LIFECYCLE_STATE}"; then
@@ -330,35 +326,26 @@ echo "=== Link calibration (baseline veth) ==="
 LINK_CALIBRATION_LABEL="protocol_validation" \
   bash "${SCRIPT_DIR}/15_calibrate_link.sh"
 
-# 4. Start Caddy on the host veth IP (10.200.0.1).  Port 80 disabled
-#    because nginx owns it.
+# 4. Start the exact shared Caddy configuration on the host veth IP
+#    (10.200.0.1). Its global auto_https policy disables redirect listeners,
+#    so this project never attempts to claim the unrelated service's port 80.
 echo "=== Caddy start (auto_https disabled, on ${SECURE_PROXY_HOST:-10.200.0.1}) ==="
-# Build a temporary Caddyfile from the repo config, adding the
-# auto_https disable_redirects directive so Caddy never touches :80.
-CADDYFILE_TMP="$(mktemp "${VALIDATION_ROOT}/.commu_validation_caddy.XXXXXX")"
 write_lifecycle_state
-{
-  echo '{'
-  echo '  auto_https disable_redirects'
-  sed -n '/servers/,/^}/p' "${EXPERIMENT_ROOT}/configs/Caddyfile"
-  echo ''
-  sed -n '/^https:\/\//,$ p' "${EXPERIMENT_ROOT}/configs/Caddyfile"
-} >"${CADDYFILE_TMP}"
 # Use host veth IP from server.lab.env so client in namespace can connect.
 export VLLM_HOST VLLM_PORT VLLM_SECONDARY_PORT SECURE_PROXY_HOST
 CADDY_RUN_DIR="$(absolute_from_experiment "${CADDY_RUN_DIR:-runs/caddy}")"
 mkdir -p "${CADDY_RUN_DIR}"
 export XDG_DATA_HOME="${CADDY_RUN_DIR}/data"
 export XDG_CONFIG_HOME="${CADDY_RUN_DIR}/config"
-caddy validate --config "${CADDYFILE_TMP}" --adapter caddyfile
-caddy run --config "${CADDYFILE_TMP}" --adapter caddyfile \
+caddy validate --config "${CADDY_CONFIG}" --adapter caddyfile
+caddy run --config "${CADDY_CONFIG}" --adapter caddyfile \
   >"${VALIDATION_ROOT}/caddy-$$.log" 2>&1 &
 CADDY_PID=$!
 CADDY_START_TICKS="$(process_start_ticks "${CADDY_PID}")"
 CADDY_OWNED=1
 write_lifecycle_state
 sleep 1
-if ! caddy_pid_matches "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDYFILE_TMP}"; then
+if ! caddy_pid_matches "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDY_CONFIG}"; then
   die "Project Caddy failed to start; see ${VALIDATION_ROOT}/caddy-$$.log"
 fi
 echo "Caddy started with auto_https disabled."

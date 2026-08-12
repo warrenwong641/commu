@@ -73,6 +73,19 @@ def test_admission_revalidates_immutable_per_pilot_result_and_pcap_evidence():
     assert "PILOT_EVIDENCE_OK.json" in pilots
 
 
+def test_protocol_pilot_and_matrix_share_redirect_free_caddyfile():
+    caddyfile = (ROOT / "configs" / "Caddyfile").read_text(encoding="utf-8")
+    pilots = _script("22_validate_protocol_pilots.sh")
+
+    global_options = caddyfile[: caddyfile.index("\n}\n")]
+    assert global_options.count("auto_https disable_redirects") == 1
+    assert 'CADDY_CONFIG="${EXPERIMENT_ROOT}/configs/Caddyfile"' in pilots
+    assert 'caddy validate --config "${CADDY_CONFIG}"' in pilots
+    assert 'caddy run --config "${CADDY_CONFIG}"' in pilots
+    assert ".commu_validation_caddy" not in pilots
+    assert "sed -n '/servers/" not in pilots
+
+
 def test_measured_orchestrators_gate_before_network_mutation():
     for name in ("18_run_lab_matrix.sh", "19_run_lab_sessions.sh"):
         script = _script(name)

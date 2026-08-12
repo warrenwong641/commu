@@ -14,7 +14,8 @@ compression, LongLLMLingua 2x, and LongLLMLingua 4x.
 Run `scripts/00_install_caddy.sh` to install the pinned, checksum-verified Caddy
 binary inside the experiment directory, then run `scripts/07_start_secure_proxy.sh`.
 The script validates `configs/Caddyfile`, starts Caddy in the background, and prints
-the local CA path. Keep vLLM on port 8000.
+the local CA path. The shared Caddyfile disables automatic redirect listeners, so
+the experiment never claims TCP port 80. Keep vLLM on port 8000.
 
 - TCP 8443: TLS 1.3 plus HTTP/1.1.
 - UDP 8444: TLS 1.3 as used by QUIC plus HTTP/3 only.
