@@ -162,7 +162,12 @@ def validate_result_evidence(
         "task_type",
         "messages_sha256",
     ):
-        if row.get(key) != selected.get(key):
+        expected = (
+            selected.get(key, "qa")
+            if key == "task_type"
+            else selected.get(key)
+        )
+        if row.get(key) != expected:
             raise ValueError(f"result does not match selected manifest row for {key}")
     backend_request = build_backend_request(
         backend="local_vllm",
