@@ -177,6 +177,57 @@ def test_pilot_evidence_rejects_changed_pcap_and_wrong_result_identity(
         _validate(manifest_path, results_path)
 
 
+def test_pilot_evidence_defaults_missing_manifest_task_type_to_qa(
+    tmp_path: Path,
+):
+    manifest_path, results_path = _write_fixture(tmp_path)
+    manifest = [
+        json.loads(line)
+        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+    ]
+    for row in manifest:
+        del row["task_type"]
+    manifest_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in manifest),
+        encoding="utf-8",
+    )
+    result = json.loads(results_path.read_text(encoding="utf-8"))
+    result["manifest_sha256"] = sha256_file(manifest_path)
+    results_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+
+    evidence = _validate(manifest_path, results_path)
+
+    assert evidence["status"] == "success"
+
+
+def test_pilot_evidence_rejects_explicit_manifest_task_type_mismatch(
+    tmp_path: Path,
+):
+    manifest_path, results_path = _write_fixture(tmp_path)
+    manifest = [
+        json.loads(line)
+        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+    ]
+    selected_sample = random.Random(SEED).sample(
+        sorted(str(row["sample_id"]) for row in manifest),
+        1,
+    )[0]
+    selected = next(
+        row for row in manifest if row["sample_id"] == selected_sample
+    )
+    selected["task_type"] = "event_summary"
+    manifest_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in manifest),
+        encoding="utf-8",
+    )
+    result = json.loads(results_path.read_text(encoding="utf-8"))
+    result["manifest_sha256"] = sha256_file(manifest_path)
+    results_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="selected manifest row for task_type"):
+        _validate(manifest_path, results_path)
+
+
 def test_pilot_evidence_rejects_symlinked_results(tmp_path: Path):
     manifest_path, results_path = _write_fixture(tmp_path)
     link = tmp_path / "results-link.jsonl"
