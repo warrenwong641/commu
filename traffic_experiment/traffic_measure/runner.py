@@ -53,6 +53,7 @@ class RunSettings:
     worker_index: int = 0
     worker_gpu_index: int | None = None
     worker_gpu_uuid: str | None = None
+    topology_worker_index: int | None = None
     no_capture: bool = False
     no_wait_after_request: bool = False
     backend: str = "local_vllm"
@@ -852,6 +853,7 @@ def run_experiment(settings: RunSettings) -> Path:
                 "worker_index": settings.worker_index,
                 "worker_gpu_index": settings.worker_gpu_index,
                 "worker_gpu_uuid": settings.worker_gpu_uuid,
+                "topology_worker_index": settings.topology_worker_index,
                 "backend": settings.backend,
                 "backend_ip": backend_ip,
                 "backend_port": backend_port,

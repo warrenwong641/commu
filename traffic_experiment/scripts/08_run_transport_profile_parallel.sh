@@ -202,6 +202,7 @@ for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
       --worker-index "${worker}" \
       --worker-gpu-index "${WORKER_GPU_INDEXES[worker]}" \
       --worker-gpu-uuid "${WORKER_GPU_UUIDS[worker]}" \
+      --topology-worker-index "${worker}" \
       --transport "${TRANSPORT}" \
       --connection-mode "${CONNECTION_MODE}" \
       --tls-ca-file "${CA_FILE}"
@@ -269,6 +270,8 @@ def register(row, source, seen_attempts, assignments):
         raise SystemExit(f"{source}: worker GPU index does not match topology")
     if str(row["worker_gpu_uuid"]) != str(expected["gpu_uuid"]):
         raise SystemExit(f"{source}: worker GPU UUID does not match topology")
+    if int(row["topology_worker_index"]) != worker:
+        raise SystemExit(f"{source}: topology worker index does not match")
     transport = str(row["transport"])
     expected_port = int(expected["secure_ports"][transport])
     if int(row["backend_port"]) != expected_port:

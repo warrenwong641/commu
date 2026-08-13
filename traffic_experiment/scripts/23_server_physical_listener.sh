@@ -49,7 +49,14 @@ configure_physical_listener_ports() {
 
 configure_physical_listener_ports "${LISTENER_WORKER_COUNT}"
 
-STATE_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/physical_validation/server/${LISTENER_PROFILE}"
+# Service ownership must remain discoverable when an experiment switches to a
+# fresh immutable RUNS_ROOT. Keep physical-listener state in a stable runtime
+# root unless an operator explicitly provides another stable absolute path.
+PHYSICAL_LISTENER_STATE_ROOT="${PHYSICAL_LISTENER_STATE_ROOT:-${EXPERIMENT_ROOT}/runs/service_state/physical_listener}"
+if [[ "${PHYSICAL_LISTENER_STATE_ROOT}" != /* ]]; then
+  PHYSICAL_LISTENER_STATE_ROOT="$(absolute_from_experiment "${PHYSICAL_LISTENER_STATE_ROOT}")"
+fi
+STATE_DIR="${PHYSICAL_LISTENER_STATE_ROOT}/${LISTENER_PROFILE}"
 mkdir -p "${STATE_DIR}"
 PID_FILE="${STATE_DIR}/caddy.pid"
 STATE_FILE="${STATE_DIR}/listener_state"
@@ -291,7 +298,7 @@ status_listener() {
     high_ports) TLS_PORT=8443; H3_PORT=8444; W2_TLS=8543; W2_H3=8544 ;;
     standard_https) TLS_PORT=443; H3_PORT=443; W2_TLS=8543; W2_H3=8544 ;;
   esac
-  STATE_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/physical_validation/server/${LISTENER_PROFILE}"
+  STATE_DIR="${PHYSICAL_LISTENER_STATE_ROOT}/${LISTENER_PROFILE}"
   if [[ -f "${STATE_FILE}" ]]; then
     load_recorded_listener_topology
   fi

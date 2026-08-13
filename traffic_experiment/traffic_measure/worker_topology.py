@@ -90,6 +90,17 @@ def _validate_topology(topology: dict[str, Any]) -> None:
         raise ValueError("workers must use distinct vLLM ports")
     if len(tls_ports) != worker_count or len(http3_ports) != worker_count:
         raise ValueError("workers must use distinct secure ports per transport")
+    all_ports = [
+        port
+        for worker in workers
+        for port in (
+            worker["vllm_port"],
+            worker["secure_ports"]["tls13"],
+            worker["secure_ports"]["http3"],
+        )
+    ]
+    if len(set(all_ports)) != len(all_ports):
+        raise ValueError("vLLM and secure listener ports must not collide")
 
 
 def ensure_worker_topology(output_root: Path, topology: dict[str, Any]) -> Path:

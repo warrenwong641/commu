@@ -96,6 +96,7 @@ mkdir -p "${RUN_DIR}"
   "${CAPTURE_COMPLETION_ARGS[@]}" \
   --worker-gpu-index "${WORKER_GPU_INDEXES[PILOT_WORKER_INDEX]}" \
   --worker-gpu-uuid "${WORKER_GPU_UUIDS[PILOT_WORKER_INDEX]}" \
+  --topology-worker-index "${PILOT_WORKER_INDEX}" \
   --transport "${TRANSPORT}" \
   ${CONDITION_OVERRIDE:+--condition "${CONDITION_OVERRIDE}"} \
   --connection-mode "${CONNECTION_MODE}" \

@@ -111,6 +111,9 @@ def validate_result_evidence(
         "worker_index": row.get("worker_index") == 0,
         "worker_gpu_index": row.get("worker_gpu_index") == worker_gpu_index,
         "worker_gpu_uuid": row.get("worker_gpu_uuid") == worker_gpu_uuid,
+        "topology_worker_index": (
+            row.get("topology_worker_index") == topology_worker_index
+        ),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:

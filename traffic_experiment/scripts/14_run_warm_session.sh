@@ -117,6 +117,7 @@ sleep "${CAPTURE_STARTUP_DELAY_SECONDS:-1}"
   --no-wait-after-request \
   --worker-gpu-index "${WORKER_GPU_INDEXES[0]}" \
   --worker-gpu-uuid "${WORKER_GPU_UUIDS[0]}" \
+  --topology-worker-index 0 \
   "${TLS_ARGS[@]}"
 
 cleanup

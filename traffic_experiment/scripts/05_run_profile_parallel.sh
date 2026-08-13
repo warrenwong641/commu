@@ -101,7 +101,8 @@ for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
       --worker-count "${PARALLEL_WORKERS}" \
       --worker-index "${worker}" \
       --worker-gpu-index "${WORKER_GPU_INDEXES[worker]}" \
-      --worker-gpu-uuid "${WORKER_GPU_UUIDS[worker]}"
+      --worker-gpu-uuid "${WORKER_GPU_UUIDS[worker]}" \
+      --topology-worker-index "${worker}"
   ) >"${worker_log}" 2>&1 &
   register_child "$!"
 done
@@ -167,6 +168,8 @@ def register(row, source, seen_attempts, assignments):
         raise SystemExit(f"{source}: worker GPU index does not match topology")
     if str(row["worker_gpu_uuid"]) != str(expected["gpu_uuid"]):
         raise SystemExit(f"{source}: worker GPU UUID does not match topology")
+    if int(row["topology_worker_index"]) != worker:
+        raise SystemExit(f"{source}: topology worker index does not match")
     if int(row["backend_port"]) != int(expected["vllm_port"]):
         raise SystemExit(f"{source}: backend port does not match topology")
     assigned = assignments.setdefault(trial, worker)

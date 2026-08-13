@@ -18,7 +18,10 @@ sudo --preserve-env=PATH \
 ```
 
 The listener records its PID, executable, process start identity, Caddy
-configuration, and CA certificate. It does not change firewall rules.
+configuration, and CA certificate. Ownership metadata lives under the stable
+`PHYSICAL_LISTENER_STATE_ROOT`, outside topology-specific result roots, so a
+one/two-GPU switch cannot hide a listener that still needs teardown. It does
+not change firewall rules.
 
 If a firewall change is necessary, allow only the exact client address or a
 similarly narrow subnet:

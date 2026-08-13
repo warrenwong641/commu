@@ -228,6 +228,13 @@ def test_topology_change_in_same_output_tree_is_rejected(tmp_path: Path):
         ensure_worker_topology(root, _topology(1))
 
 
+def test_topology_rejects_cross_role_port_collisions(tmp_path: Path):
+    topology = _topology(1)
+    topology["workers"][0]["secure_ports"]["tls13"] = 8000
+    with pytest.raises(ValueError, match="must not collide"):
+        ensure_worker_topology(tmp_path / "runs", topology)
+
+
 def test_writable_topology_marker_is_rejected(tmp_path: Path):
     root = tmp_path / "runs"
     marker = ensure_worker_topology(root, _topology())
@@ -283,8 +290,11 @@ def test_run_cli_accepts_physical_worker_identity():
             "7",
             "--worker-gpu-uuid",
             "GPU-physical",
+            "--topology-worker-index",
+            "1",
         ]
     )
 
     assert args.worker_gpu_index == 7
     assert args.worker_gpu_uuid == "GPU-physical"
+    assert args.topology_worker_index == 1

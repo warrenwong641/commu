@@ -224,11 +224,6 @@ write_protocol_success_marker() {
   local http3_evidence_marker="${3:?HTTP/3 pilot evidence marker is required}"
   local worker_1_tls_evidence_marker="${4:-}"
   local worker_1_http3_evidence_marker="${5:-}"
-  if [[ -e "${marker}" || -L "${marker}" ]]; then
-    echo "Refusing to overwrite protocol-validation marker ${marker}; preserve or move it before revalidation" >&2
-    return 1
-  fi
-
   load_worker_topology
   load_worker_gpu_identities
 
@@ -311,8 +306,13 @@ write_protocol_success_marker() {
     rm -f -- "${marker_tmp}"
     return 1
   fi
-  if ! chmod 0444 "${marker_tmp}" || ! mv "${marker_tmp}" "${marker}"; then
+  # Publish the immutable inode without replacing a marker created by another
+  # validator. chmod precedes the hard link so the final name is never writable.
+  if ! chmod 0444 "${marker_tmp}" ||
+    ! ln "${marker_tmp}" "${marker}" 2>/dev/null; then
     rm -f -- "${marker_tmp}"
+    echo "Refusing to overwrite existing protocol-validation marker ${marker}." >&2
     return 1
   fi
+  rm -f -- "${marker_tmp}"
 }

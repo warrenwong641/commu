@@ -113,6 +113,15 @@ def test_protocol_evidence_generations_are_isolated_under_run_root():
     assert '[[ -L "${VALIDATION_ROOT}" ]]' in pilots
 
 
+def test_protocol_success_marker_is_published_without_overwrite():
+    admission = _script("protocol_admission.sh")
+    writer = admission[admission.index("write_protocol_success_marker() {") :]
+
+    assert 'chmod 0444 "${marker_tmp}"' in writer
+    assert 'ln "${marker_tmp}" "${marker}"' in writer
+    assert 'mv "${marker_tmp}" "${marker}"' not in writer
+
+
 def test_measured_orchestrators_gate_before_network_mutation():
     for name in ("18_run_lab_matrix.sh", "19_run_lab_sessions.sh"):
         script = _script(name)
