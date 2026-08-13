@@ -37,9 +37,12 @@ network trials reuse the exact artifact.
 Run 8 samples x 3 conditions x 3 repetitions = 72 calls per backend.
 
 - Randomize trial order within each worker using the fixed seed.
-- For a two-GPU local run, assign complete sample blocks (all three conditions
-  and repetitions) to one GPU. Use one vLLM process and one TCP port per GPU.
-  Port-specific capture filters prevent cross-worker packet attribution.
+- For a local run, assign complete sample blocks (all three conditions and
+  repetitions) to one worker/GPU. One-worker mode uses the primary ports only;
+  two-worker mode uses one vLLM process and port per GPU. Port-specific capture
+  filters prevent cross-worker packet attribution.
+- Freeze worker count, ordered physical GPU indices and UUIDs, and port mapping.
+  Any topology change starts a fresh `RUNS_ROOT`, never a resume.
 - Treat GPU/worker as a blocking factor. Do not pool the workers as if their
   hardware were identical replicates without reporting the block.
 - Keep external backends in separate blocks; never overlap external captures.

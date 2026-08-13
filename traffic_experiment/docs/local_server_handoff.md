@@ -106,13 +106,26 @@ In terminal 1:
 
 Wait until the server reports that it is listening.
 
-For the controlled two-GPU profile, start one server per GPU and port:
+For the controlled worker profile, set an exact mapping in the untracked env:
+
+```bash
+# One worker, physical GPU 2
+PARALLEL_WORKERS=1
+CUDA_VISIBLE_DEVICES=2
+
+# Or two workers, physical GPUs 2 then 1
+PARALLEL_WORKERS=2
+CUDA_VISIBLE_DEVICES=2,1
+```
+
+Then start one server per selected GPU and port:
 
 ```bash
 ./scripts/03_start_vllm_dual.sh
 ```
 
-The default mapping is GPU 0 to port 8000 and GPU 1 to port 8001.
+Worker 0 uses port 8000; optional worker 1 uses port 8001. Always use a fresh
+`RUNS_ROOT` when changing worker count or GPU mapping.
 
 ## Run a pilot
 
@@ -131,14 +144,15 @@ It checks the endpoint and capture interface first, then writes:
 
 Inspect these outputs before starting the full experiment.
 
-For the two-GPU isolated pilot:
+For the one- or two-GPU isolated pilot:
 
 ```bash
 PROFILE=pilot ./scripts/run_local_experiment_parallel.sh
 ```
 
-Each worker runs 36 serial trials. The workers execute concurrently with
-port-specific captures, then their disjoint results are validated and merged.
+Trials are deterministically sharded across the configured worker count. With
+two workers they execute concurrently; with one, only the primary ports are
+used. Their disjoint results are validated and merged.
 
 ## Run the main experiment
 
@@ -146,8 +160,8 @@ port-specific captures, then their disjoint results are validated and merged.
 PROFILE=main ./scripts/run_local_experiment.sh
 ```
 
-Use `PROFILE=main ./scripts/run_local_experiment_parallel.sh` for the two-GPU
-isolated profile.
+Use `PROFILE=main ./scripts/run_local_experiment_parallel.sh` for the switchable
+one- or two-worker isolated profile.
 
 By default this performs 32 samples x 3 conditions x 3 technical repetitions =
 288 measured requests. Set `MAIN_REPETITIONS` only when the pilot variance or a

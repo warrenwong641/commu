@@ -35,6 +35,114 @@ fi
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
 
+# Resolve the supported service topology once and expose the exact ordered
+# worker-to-GPU and worker-to-port mappings to every launcher.  A topology is
+# intentionally limited to one or two independent single-GPU workers.
+load_worker_topology() {
+  local worker_count="${PARALLEL_WORKERS:-2}"
+  local port_step="${VLLM_PORT_STEP:-1}"
+  local base_port="${VLLM_PORT:-}"
+  local gpu_csv="${CUDA_VISIBLE_DEVICES:-}"
+  local gpu_id worker port
+
+  if [[ ! "${worker_count}" =~ ^[12]$ ]]; then
+    echo "PARALLEL_WORKERS must be 1 or 2; got '${worker_count}'." >&2
+    return 2
+  fi
+  if [[ ! "${base_port}" =~ ^[0-9]+$ ||
+    "${base_port}" -lt 1 || "${base_port}" -gt 65535 ]]; then
+    echo "VLLM_PORT must be an integer from 1 to 65535; got '${base_port:-unset}'." >&2
+    return 2
+  fi
+  if [[ ! "${port_step}" =~ ^[0-9]+$ || "${port_step}" -lt 1 ]]; then
+    echo "VLLM_PORT_STEP must be a positive integer; got '${port_step}'." >&2
+    return 2
+  fi
+  if [[ -z "${gpu_csv}" ]]; then
+    echo "CUDA_VISIBLE_DEVICES must explicitly list one physical GPU per worker." >&2
+    return 2
+  fi
+
+  IFS=',' read -r -a WORKER_GPU_IDS <<<"${gpu_csv}"
+  if [[ "${#WORKER_GPU_IDS[@]}" -ne "${worker_count}" ]]; then
+    echo "CUDA_VISIBLE_DEVICES must list exactly ${worker_count} GPU ID(s); got '${gpu_csv}'." >&2
+    return 2
+  fi
+  for gpu_id in "${WORKER_GPU_IDS[@]}"; do
+    if [[ ! "${gpu_id}" =~ ^[0-9]+$ ]]; then
+      echo "CUDA_VISIBLE_DEVICES entries must be physical GPU indices; got '${gpu_id}'." >&2
+      return 2
+    fi
+  done
+  if [[ "${worker_count}" -eq 2 &&
+    "${WORKER_GPU_IDS[0]}" == "${WORKER_GPU_IDS[1]}" ]]; then
+    echo "Each worker must use a distinct physical GPU." >&2
+    return 2
+  fi
+
+  TOPOLOGY_WORKER_COUNT="${worker_count}"
+  TOPOLOGY_GPU_IDS="$(IFS=,; printf '%s' "${WORKER_GPU_IDS[*]}")"
+  WORKER_VLLM_PORTS=()
+  for ((worker = 0; worker < worker_count; worker++)); do
+    port=$((base_port + worker * port_step))
+    if [[ "${port}" -gt 65535 ]]; then
+      echo "Worker ${worker} vLLM port ${port} exceeds 65535." >&2
+      return 2
+    fi
+    WORKER_VLLM_PORTS+=("${port}")
+  done
+}
+
+load_worker_gpu_identities() {
+  local gpu_id uuid
+  if [[ -z "${TOPOLOGY_WORKER_COUNT:-}" ]]; then
+    load_worker_topology || return
+  fi
+  require_command nvidia-smi
+  WORKER_GPU_UUIDS=()
+  for gpu_id in "${WORKER_GPU_IDS[@]}"; do
+    uuid="$({
+      nvidia-smi -i "${gpu_id}" --query-gpu=uuid --format=csv,noheader,nounits
+    } 2>/dev/null | sed -n '1p')"
+    if [[ ! "${uuid}" =~ ^GPU-[0-9A-Fa-f-]+$ ]]; then
+      echo "Could not resolve a unique UUID for physical GPU ${gpu_id}." >&2
+      return 2
+    fi
+    WORKER_GPU_UUIDS+=("${uuid}")
+  done
+  TOPOLOGY_GPU_UUIDS="$(IFS=,; printf '%s' "${WORKER_GPU_UUIDS[*]}")"
+}
+
+configure_proxy_ports() {
+  local worker_count="$1"
+  case "${worker_count}" in
+    1)
+      EXPECTED_PROXY_TCP_PORTS=(8443)
+      EXPECTED_PROXY_UDP_PORTS=(8444)
+      ;;
+    2)
+      EXPECTED_PROXY_TCP_PORTS=(8443 8543)
+      EXPECTED_PROXY_UDP_PORTS=(8444 8544)
+      ;;
+    *)
+      echo "Recorded proxy worker count must be 1 or 2; got '${worker_count:-missing}'." >&2
+      return 2
+      ;;
+  esac
+}
+
+caddy_config_for_worker_count() {
+  local worker_count="$1"
+  case "${worker_count}" in
+    1) printf '%s\n' "${EXPERIMENT_ROOT}/configs/Caddyfile.single" ;;
+    2) printf '%s\n' "${EXPERIMENT_ROOT}/configs/Caddyfile" ;;
+    *)
+      echo "Cannot select Caddy config for worker count '${worker_count:-missing}'." >&2
+      return 2
+      ;;
+  esac
+}
+
 RUNNER_PYTHON="${RUNNER_PYTHON:-${EXPERIMENT_ROOT}/.venv-runner/bin/python}"
 COMPRESSION_PYTHON="${COMPRESSION_PYTHON:-${EXPERIMENT_ROOT}/.venv-compression/bin/python}"
 if [[ -n "${VLLM_BIN:-}" ]]; then

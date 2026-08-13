@@ -80,8 +80,9 @@ def test_caddy_cleanup_waits_after_kill_and_verifies_listener_closure():
         assert "did not exit" in script
 
     listener = _script("23_server_physical_listener.sh")
-    assert 'grep -E ":(${TLS_PORT}|${W2_TLS})[[:space:]]"' in listener
-    assert 'grep -E ":(${H3_PORT}|${W2_H3})[[:space:]]"' in listener
+    assert 'for port in "${PHYSICAL_TCP_PORTS[@]}"' in listener
+    assert 'for port in "${PHYSICAL_UDP_PORTS[@]}"' in listener
+    assert "load_recorded_listener_topology" in listener
     assert "_discover_physical_ip || true" in listener
 
 

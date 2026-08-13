@@ -9,6 +9,9 @@ set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 source "${SCRIPT_DIR}/protocol_admission.sh"
 
+load_worker_topology
+configure_proxy_ports "${TOPOLOGY_WORKER_COUNT}"
+
 # --- helpers ---------------------------------------------------------------
 die() { printf '%s\n' "$*" >&2; exit 1; }
 require_root() {
@@ -46,7 +49,7 @@ NETWORK_OWNED=0
 CADDY_OWNED=0
 CADDY_PID=""
 CADDY_START_TICKS=""
-CADDY_CONFIG="${EXPERIMENT_ROOT}/configs/Caddyfile"
+CADDY_CONFIG="$(caddy_config_for_worker_count "${TOPOLOGY_WORKER_COUNT}")"
 CADDY_EXE="$(command -v caddy || true)"
 
 write_lifecycle_state() {
@@ -56,6 +59,7 @@ write_lifecycle_state() {
     printf 'namespace=%s\n' "${CLIENT_NETNS:-llm-client}"
     printf 'host_veth=%s\n' "${HOST_VETH:-llmhost0}"
     printf 'caddy_owned=%s\n' "${CADDY_OWNED}"
+    printf 'worker_count=%s\n' "${TOPOLOGY_WORKER_COUNT}"
     printf 'caddy_pid=%s\n' "${CADDY_PID}"
     printf 'caddy_start_ticks=%s\n' "${CADDY_START_TICKS}"
     printf 'caddy_config=%s\n' "${CADDY_CONFIG}"
@@ -106,7 +110,7 @@ wait_for_owned_caddy_exit() {
 }
 
 caddy_listeners_closed() {
-  local tcp_listeners udp_listeners
+  local tcp_listeners udp_listeners port
   if ! command -v ss >/dev/null 2>&1; then
     echo "Cannot verify Caddy listener closure because ss is unavailable." >&2
     return 1
@@ -116,14 +120,18 @@ caddy_listeners_closed() {
     echo "Failed to inspect TCP/UDP listeners after stopping Caddy." >&2
     return 1
   fi
-  if grep -Eq ':(8443|8543)[[:space:]]' <<<"${tcp_listeners}"; then
-    echo "A TCP listener remains on a project Caddy port (8443 or 8543)." >&2
-    return 1
-  fi
-  if grep -Eq ':(8444|8544)[[:space:]]' <<<"${udp_listeners}"; then
-    echo "A UDP listener remains on a project Caddy port (8444 or 8544)." >&2
-    return 1
-  fi
+  for port in "${EXPECTED_PROXY_TCP_PORTS[@]}"; do
+    if grep -Eq ":${port}[[:space:]]" <<<"${tcp_listeners}"; then
+      echo "A TCP listener remains on project Caddy port ${port}." >&2
+      return 1
+    fi
+  done
+  for port in "${EXPECTED_PROXY_UDP_PORTS[@]}"; do
+    if grep -Eq ":${port}[[:space:]]" <<<"${udp_listeners}"; then
+      echo "A UDP listener remains on project Caddy port ${port}." >&2
+      return 1
+    fi
+  done
 }
 
 stop_owned_caddy() {

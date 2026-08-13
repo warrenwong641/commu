@@ -7,8 +7,8 @@ require_value LOCAL_VLLM_API_KEY
 require_command dumpcap
 require_command setsid
 
-PARALLEL_WORKERS="${PARALLEL_WORKERS:-2}"
-VLLM_PORT_STEP="${VLLM_PORT_STEP:-1}"
+load_worker_topology
+PARALLEL_WORKERS="${TOPOLOGY_WORKER_COUNT}"
 
 case "${PROFILE}" in
   pilot)
@@ -76,7 +76,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
-  port=$((VLLM_PORT + worker * VLLM_PORT_STEP))
+  port="${WORKER_VLLM_PORTS[worker]}"
   worker_dir="${RUN_DIR}/worker-${worker}"
   worker_log="${RUN_DIR}/worker-${worker}.log"
   echo "Worker ${worker}: port=${port}, output=${worker_dir}, log=${worker_log}"

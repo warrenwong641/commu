@@ -20,11 +20,16 @@ transport profiles, Caddy terminates TLS 1.3 and forwards the unchanged request 
 vLLM. Port 8443 accepts HTTP/1.1 over TLS/TCP; port 8444 accepts HTTP/3 over QUIC/UDP.
 The cleartext control remains on port 8000.
 
-For the two-GPU local profile, two independent vLLM processes listen on ports
-8000 and 8001. Each runner receives a disjoint deterministic set of complete
-sample blocks, and each dumpcap filter selects only its worker's TCP port. Requests
-remain serial within a worker; concurrency exists only across isolated workers.
-GPU/worker identity is recorded and treated as a blocking factor in analysis.
+The local profile supports one or two independent single-GPU vLLM processes.
+Worker 0 uses the first ordered GPU and port 8000; optional worker 1 uses the
+second GPU and port 8001. Each runner receives a disjoint deterministic set of
+complete sample blocks, and each dumpcap filter selects only its worker's port.
+Requests remain serial within a worker; concurrency exists only across isolated
+workers. Physical GPU index and UUID are recorded as blocking identity.
+
+Worker topology is an immutable run definition. A change in worker count, GPU
+order, GPU UUID, or port mapping must use a fresh run root. Reusing worker shards
+across topologies can change deterministic assignment and invalidate resumption.
 
 ## External API path
 

@@ -23,8 +23,9 @@ def test_secure_proxy_stop_checks_all_expected_listeners_before_state_removal():
         script.index("cleanup_failed_start() {")
     ]
 
-    assert "EXPECTED_PROXY_TCP_PORTS=(8443 8543)" in script
-    assert "EXPECTED_PROXY_UDP_PORTS=(8444 8544)" in script
+    assert 'configure_proxy_ports "${recorded_worker_count}"' in script
+    assert 'echo "worker_count=${TOPOLOGY_WORKER_COUNT}"' in script
+    assert "Caddyfile.single" in _script("lib.sh")
     assert 'tcp_listeners="$(ss -H -ltn 2>/dev/null)"' in script
     assert 'udp_listeners="$(ss -H -lun 2>/dev/null)"' in script
     assert "if ! command -v ss" in script
@@ -89,7 +90,7 @@ def test_dual_vllm_cleanup_tracks_exact_active_children_and_checks_ports():
         "vllm_listeners_closed"
     )
     assert 'pid_active[index]=0' in cleanup_body
-    assert 'worker_ports+=("$((VLLM_PORT + worker * VLLM_PORT_STEP))")' in script
+    assert 'worker_ports=("${WORKER_VLLM_PORTS[@]}")' in script
     assert "pkill" not in script
     assert "nvidia-smi" not in script
     assert 'kill "${pid}"' not in script
@@ -105,7 +106,12 @@ def test_dual_vllm_serve_command_is_text_only():
     assert serve_command.count("--language-model-only") == 1
 
 
-def _proxy_fixture(tmp_path: Path, tcp_listeners: str, ss_status: int = 0):
+def _proxy_fixture(
+    tmp_path: Path,
+    tcp_listeners: str,
+    ss_status: int = 0,
+    worker_count: int = 2,
+):
     bash = shutil.which("bash")
     if os.name == "nt":
         git_bash = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / (
@@ -137,6 +143,15 @@ def _proxy_fixture(tmp_path: Path, tcp_listeners: str, ss_status: int = 0):
                 f'  else printf \'%s/%s\\n\' "{bash_path(tmp_path)}" "$1"; fi',
                 "}",
                 "require_command() { command -v \"$1\" >/dev/null; }",
+                "configure_proxy_ports() {",
+                '  if [[ "$1" -eq 1 ]]; then',
+                "    EXPECTED_PROXY_TCP_PORTS=(8443)",
+                "    EXPECTED_PROXY_UDP_PORTS=(8444)",
+                "  else",
+                "    EXPECTED_PROXY_TCP_PORTS=(8443 8543)",
+                "    EXPECTED_PROXY_UDP_PORTS=(8444 8544)",
+                "  fi",
+                "}",
                 "",
             )
         ),
@@ -170,6 +185,7 @@ def _proxy_fixture(tmp_path: Path, tcp_listeners: str, ss_status: int = 0):
         "\n".join(
             (
                 "status=running",
+                f"worker_count={worker_count}",
                 "caddy_pid=99999999",
                 "caddy_start_ticks=1",
                 f"caddy_config={bash_path(tmp_path)}/Caddyfile",
@@ -224,3 +240,21 @@ def test_secure_proxy_stop_is_fail_closed_in_hermetic_ss_fixture(tmp_path: Path)
     closed_result, removed_state = _proxy_fixture(tmp_path / "closed", "")
     assert closed_result.returncode == 0
     assert not removed_state.exists()
+
+
+def test_single_worker_proxy_stop_uses_recorded_primary_ports_only(tmp_path: Path):
+    secondary_result, secondary_state = _proxy_fixture(
+        tmp_path / "secondary",
+        "LISTEN 0 4096 127.0.0.1:8543 0.0.0.0:*",
+        worker_count=1,
+    )
+    assert secondary_result.returncode == 0
+    assert not secondary_state.exists()
+
+    primary_result, primary_state = _proxy_fixture(
+        tmp_path / "primary",
+        "LISTEN 0 4096 127.0.0.1:8443 0.0.0.0:*",
+        worker_count=1,
+    )
+    assert primary_result.returncode != 0
+    assert primary_state.exists()

@@ -29,6 +29,9 @@ def test_all_protocol_entrypoints_share_one_admission_definition():
         "summary_manifest_sha256",
         "model_revision",
         "model_name",
+        "worker_count",
+        "worker_gpu_ids",
+        "worker_gpu_uuids",
         "network_mtu",
         "caddy_version",
         "protocol_stack_sha256",
@@ -75,11 +78,16 @@ def test_admission_revalidates_immutable_per_pilot_result_and_pcap_evidence():
 
 def test_protocol_pilot_and_matrix_share_redirect_free_caddyfile():
     caddyfile = (ROOT / "configs" / "Caddyfile").read_text(encoding="utf-8")
+    single_caddyfile = (ROOT / "configs" / "Caddyfile.single").read_text(
+        encoding="utf-8"
+    )
     pilots = _script("22_validate_protocol_pilots.sh")
 
     global_options = caddyfile[: caddyfile.index("\n}\n")]
     assert global_options.count("auto_https disable_redirects") == 1
-    assert 'CADDY_CONFIG="${EXPERIMENT_ROOT}/configs/Caddyfile"' in pilots
+    single_global_options = single_caddyfile[: single_caddyfile.index("\n}\n")]
+    assert single_global_options.count("auto_https disable_redirects") == 1
+    assert "caddy_config_for_worker_count" in pilots
     assert 'caddy validate --config "${CADDY_CONFIG}"' in pilots
     assert 'caddy run --config "${CADDY_CONFIG}"' in pilots
     assert ".commu_validation_caddy" not in pilots

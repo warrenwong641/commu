@@ -11,13 +11,8 @@ require_command ss
 # --api-key prevents it from appearing in worker command lines.
 export VLLM_API_KEY="${LOCAL_VLLM_API_KEY}"
 
-PARALLEL_WORKERS="${PARALLEL_WORKERS:-2}"
-VLLM_PORT_STEP="${VLLM_PORT_STEP:-1}"
-IFS=',' read -r -a GPU_IDS <<<"${CUDA_VISIBLE_DEVICES:-0,1}"
-if ((${#GPU_IDS[@]} < PARALLEL_WORKERS)); then
-  echo "CUDA_VISIBLE_DEVICES must list at least ${PARALLEL_WORKERS} GPU IDs." >&2
-  exit 2
-fi
+load_worker_topology
+PARALLEL_WORKERS="${TOPOLOGY_WORKER_COUNT}"
 LOG_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/vllm"
 mkdir -p "${LOG_DIR}"
 
@@ -30,9 +25,7 @@ if [[ -n "${VLLM_MODEL_REVISION:-}" ]]; then
   revision_args=(--revision "${VLLM_MODEL_REVISION}")
 fi
 
-for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
-  worker_ports+=("$((VLLM_PORT + worker * VLLM_PORT_STEP))")
-done
+worker_ports=("${WORKER_VLLM_PORTS[@]}")
 
 register_vllm_child() {
   local pid="$1" ticks
@@ -92,7 +85,7 @@ trap 'exit 143' TERM
 for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
   port="${worker_ports[worker]}"
   log="${LOG_DIR}/gpu-${worker}-port-${port}.log"
-  gpu_id="${GPU_IDS[$worker]}"
+  gpu_id="${WORKER_GPU_IDS[$worker]}"
   echo "Starting worker ${worker}: physical GPU ${gpu_id}, port ${port}, log ${log}"
   (
     trap - INT TERM

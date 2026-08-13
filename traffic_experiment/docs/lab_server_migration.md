@@ -99,7 +99,9 @@ run as the normal lab user.
 
 ## Model and environment validation
 
-Start the two independent inference workers in a persistent terminal:
+Set `PARALLEL_WORKERS=1` with one GPU ID or `PARALLEL_WORKERS=2` with two
+ordered, distinct GPU IDs. Use a new `RUNS_ROOT` whenever this topology changes.
+Then start the configured inference worker(s) in a persistent terminal:
 
 ```bash
 cd /srv/commu/traffic_experiment
@@ -119,9 +121,10 @@ capture interfaces, network parameters, model ID, model revision, and the
 
 Before the final run, verify:
 
-1. Both `/v1/models` endpoints respond on ports 8000 and 8001.
+1. Every configured `/v1/models` endpoint responds (port 8000, plus 8001 only
+   in two-worker mode).
 2. The model revision is a commit SHA rather than a moving branch.
-3. `nvidia-smi` shows one vLLM worker per intended GPU.
+3. `nvidia-smi` shows one vLLM worker per intended GPU, with the audited UUIDs.
 4. Both manifests exist and their SHA-256 values are archived.
 5. At least 100 GB remains for model files and packet captures.
 

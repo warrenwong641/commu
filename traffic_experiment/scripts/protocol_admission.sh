@@ -7,6 +7,7 @@
 protocol_stack_sha256() {
   local -a protocol_files=(
     configs/Caddyfile
+    configs/Caddyfile.single
     scripts/08_run_transport_profile.sh
     scripts/08_run_transport_profile_parallel.sh
     scripts/11_network_condition.sh
@@ -15,6 +16,7 @@ protocol_stack_sha256() {
     scripts/18_run_lab_matrix.sh
     scripts/19_run_lab_sessions.sh
     scripts/22_validate_protocol_pilots.sh
+    scripts/lib.sh
     scripts/protocol_admission.sh
     traffic_measure/backends.py
     traffic_measure/capture.py
@@ -141,6 +143,8 @@ verify_protocol_pilot_reference() {
 
 verify_protocol_admission() {
   local marker
+  load_worker_topology
+  load_worker_gpu_identities
   marker="$(protocol_validation_marker_path)"
   if [[ ! -f "${marker}" || -L "${marker}" ]]; then
     echo "Missing successful protocol-pilot marker: ${marker}" >&2
@@ -162,6 +166,12 @@ verify_protocol_admission() {
   require_protocol_marker_match \
     "${marker}" model_revision "${VLLM_MODEL_REVISION}"
   require_protocol_marker_match "${marker}" model_name "${VLLM_MODEL}"
+  require_protocol_marker_match \
+    "${marker}" worker_count "${TOPOLOGY_WORKER_COUNT}"
+  require_protocol_marker_match \
+    "${marker}" worker_gpu_ids "${TOPOLOGY_GPU_IDS}"
+  require_protocol_marker_match \
+    "${marker}" worker_gpu_uuids "${TOPOLOGY_GPU_UUIDS}"
   require_protocol_marker_match "${marker}" network_mtu "${NETWORK_MTU}"
   require_protocol_marker_match \
     "${marker}" caddy_version "$(caddy version 2>&1)"
@@ -180,6 +190,9 @@ write_protocol_success_marker() {
     echo "Refusing to overwrite protocol-validation marker ${marker}; preserve or move it before revalidation" >&2
     return 1
   fi
+
+  load_worker_topology
+  load_worker_gpu_identities
 
   local marker_dir marker_tmp qa_sha summary_sha caddy_version stack_sha
   local tls_evidence_sha http3_evidence_sha
@@ -217,6 +230,9 @@ write_protocol_success_marker() {
     printf 'summary_manifest_sha256=%s\n' "${summary_sha}"
     printf 'model_revision=%s\n' "${VLLM_MODEL_REVISION}"
     printf 'model_name=%s\n' "${VLLM_MODEL}"
+    printf 'worker_count=%s\n' "${TOPOLOGY_WORKER_COUNT}"
+    printf 'worker_gpu_ids=%s\n' "${TOPOLOGY_GPU_IDS}"
+    printf 'worker_gpu_uuids=%s\n' "${TOPOLOGY_GPU_UUIDS}"
     printf 'network_mtu=%s\n' "${NETWORK_MTU}"
     printf 'caddy_version=%s\n' "${caddy_version}"
     printf 'protocol_stack_sha256=%s\n' "${stack_sha}"
