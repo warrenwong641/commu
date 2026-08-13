@@ -7,7 +7,7 @@ umask 077
 # published SHA-256 before executing it. It never runs code from the source
 # checkout and opens the unprivileged bundle only for a pinned-byte copy.
 
-FIXED_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+FIXED_PATH=/usr/sbin:/usr/bin
 if [[ "${COMMU_PRIVILEGED_PILOT_INSTALL_CLEAN_ENV:-}" != 1 ]]; then
   [[ "${EUID}" -eq 0 ]] || { printf 'ERROR: installer must run as root\n' >&2; exit 2; }
   BOOTSTRAP_SELF="$(/usr/bin/readlink -e -- "$0")" || exit 2
@@ -78,7 +78,7 @@ usage() {
 [[ "${EXPECTED_ARCHIVE_SHA}" =~ ^[0-9a-f]{64}$ ]] || die "bundle SHA-256 must be lowercase hexadecimal"
 [[ "${EXPECTED_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ]] || die "repository SHA must be lowercase hexadecimal"
 
-for trusted_dir in / /home /opt /var /var/lib /run; do
+for trusted_dir in / /home /opt /usr /usr/bin /usr/sbin /var /var/lib /run; do
   [[ -d "${trusted_dir}" && ! -L "${trusted_dir}" &&
     "$(/usr/bin/readlink -e -- "${trusted_dir}")" == "${trusted_dir}" &&
     "$(/usr/bin/stat -c %u -- "${trusted_dir}")" == 0 ]] ||
@@ -442,8 +442,7 @@ RELEASE="${EXTRACT_ROOT}/release"
 REVIEWED_MANIFEST="${RELEASE}/REVIEWED_CODE_FILES.sha256"
 [[ -f "${REVIEWED_MANIFEST}" && ! -L "${REVIEWED_MANIFEST}" ]] ||
   die "release has no reviewed-code manifest"
-[[ "$(/usr/bin/sha256sum -- "${REVIEWED_MANIFEST}" | /usr/bin/awk '{print $1}')" ==
-  "${EXPECTED_REVIEWED_CODE_MANIFEST_SHA256}" ]] ||
+[[ "$(/usr/bin/sha256sum -- "${REVIEWED_MANIFEST}" | /usr/bin/awk '{print $1}')" == "${EXPECTED_REVIEWED_CODE_MANIFEST_SHA256}" ]] ||
   die "release code is not the independently reviewed code set"
 
 /usr/bin/python3 -I - "${RELEASE}" <<'PY'

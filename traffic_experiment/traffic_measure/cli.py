@@ -3,9 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
-
+import sys
 import tempfile
+from pathlib import Path
 
 from .analyze import analyze_results
 from .common import append_jsonl, read_jsonl, sha256_file
@@ -26,6 +26,18 @@ from .vllm_metrics import (
     read_json,
     write_json,
 )
+
+
+CREDENTIAL_ENVIRONMENT_NAMES = (
+    "LOCAL_VLLM_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+)
+
+
+def _remove_credentials_from_environment() -> None:
+    for name in CREDENTIAL_ENVIRONMENT_NAMES:
+        os.environ.pop(name, None)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -85,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
         default="local_vllm",
     )
     run.add_argument("--openrouter-provider")
+    run.add_argument("--api-key-stdin", action="store_true", help=argparse.SUPPRESS)
     run.add_argument("--transport", choices=["http1", "tls13", "http3"], default="http1")
     run.add_argument("--connection-mode", choices=["warm", "cold"], default="warm")
     run.add_argument("--tls-ca-file", type=Path)
@@ -357,9 +370,11 @@ def main() -> int:
         return 0
 
     if args.command == "check":
+        api_key = os.environ.get("LOCAL_VLLM_API_KEY", "")
+        _remove_credentials_from_environment()
         models = health_check(
             args.base_url,
-            os.environ.get("LOCAL_VLLM_API_KEY", ""),
+            api_key,
         )
         print(json.dumps(models, indent=2, ensure_ascii=False))
         return 0
@@ -370,49 +385,57 @@ def main() -> int:
             "openrouter": "https://openrouter.ai/api/v1",
             "gemini": "https://generativelanguage.googleapis.com/v1beta",
         }[args.backend]
-        api_key = {
-            "local_vllm": os.environ.get("LOCAL_VLLM_API_KEY", ""),
-            "openrouter": os.environ.get("OPENROUTER_API_KEY", ""),
-            "gemini": os.environ.get("GEMINI_API_KEY", ""),
-        }[args.backend]
-        results = run_experiment(
-            RunSettings(
-                manifest_path=args.manifest,
-                output_dir=args.output_dir,
-                base_url=base_url,
-                model=args.model,
-                api_key=api_key,
-                sample_limit=args.samples,
-                repetitions=args.repetitions,
-                seed=args.seed,
-                temperature=args.temperature,
-                max_output_tokens=args.max_output_tokens,
-                request_timeout_seconds=args.request_timeout_seconds,
-                observation_seconds=args.observation_seconds,
-                capture_interface=args.capture_interface,
-                capture_filter=args.capture_filter,
-                capture_startup_delay_seconds=args.capture_startup_delay_seconds,
-                capture_stop_on_response=args.capture_stop_on_response,
-                worker_count=args.worker_count,
-                worker_index=args.worker_index,
-                worker_gpu_index=args.worker_gpu_index,
-                worker_gpu_uuid=args.worker_gpu_uuid,
-                topology_worker_index=args.topology_worker_index,
-                no_capture=args.no_capture,
-                no_wait_after_request=args.no_wait_after_request,
-                backend=args.backend,
-                transport=args.transport,
-                connection_mode=args.connection_mode,
-                openrouter_provider=args.openrouter_provider,
-                tls_ca_file=args.tls_ca_file,
-                curl_executable=args.curl_executable,
-                session_id=args.session_id,
-                inter_request_delay_seconds=args.inter_request_delay_seconds,
-                request_start_interval_seconds=args.request_start_interval_seconds,
-                session_budget_seconds=args.session_budget_seconds,
-                condition=args.condition,
-            )
+        if args.api_key_stdin:
+            api_key = sys.stdin.readline()
+            if not api_key.endswith("\n") or sys.stdin.read(1):
+                raise SystemExit("credential input must be exactly one newline-terminated line")
+            api_key = api_key[:-1]
+            if not api_key or "\r" in api_key or "\x00" in api_key:
+                raise SystemExit("credential input is empty or malformed")
+        else:
+            api_key = {
+                "local_vllm": os.environ.get("LOCAL_VLLM_API_KEY", ""),
+                "openrouter": os.environ.get("OPENROUTER_API_KEY", ""),
+                "gemini": os.environ.get("GEMINI_API_KEY", ""),
+            }[args.backend]
+        settings = RunSettings(
+            manifest_path=args.manifest,
+            output_dir=args.output_dir,
+            base_url=base_url,
+            model=args.model,
+            api_key=api_key,
+            sample_limit=args.samples,
+            repetitions=args.repetitions,
+            seed=args.seed,
+            temperature=args.temperature,
+            max_output_tokens=args.max_output_tokens,
+            request_timeout_seconds=args.request_timeout_seconds,
+            observation_seconds=args.observation_seconds,
+            capture_interface=args.capture_interface,
+            capture_filter=args.capture_filter,
+            capture_startup_delay_seconds=args.capture_startup_delay_seconds,
+            capture_stop_on_response=args.capture_stop_on_response,
+            worker_count=args.worker_count,
+            worker_index=args.worker_index,
+            worker_gpu_index=args.worker_gpu_index,
+            worker_gpu_uuid=args.worker_gpu_uuid,
+            topology_worker_index=args.topology_worker_index,
+            no_capture=args.no_capture,
+            no_wait_after_request=args.no_wait_after_request,
+            backend=args.backend,
+            transport=args.transport,
+            connection_mode=args.connection_mode,
+            openrouter_provider=args.openrouter_provider,
+            tls_ca_file=args.tls_ca_file,
+            curl_executable=args.curl_executable,
+            session_id=args.session_id,
+            inter_request_delay_seconds=args.inter_request_delay_seconds,
+            request_start_interval_seconds=args.request_start_interval_seconds,
+            session_budget_seconds=args.session_budget_seconds,
+            condition=args.condition,
         )
+        _remove_credentials_from_environment()
+        results = run_experiment(settings)
         print(f"Results: {results}")
         return 0
 

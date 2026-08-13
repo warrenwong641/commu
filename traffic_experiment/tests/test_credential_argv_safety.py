@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
+import sys
+from io import StringIO
 from pathlib import Path
+
+from traffic_experiment.traffic_measure import cli
 
 
 SCRIPTS_DIR = Path(__file__).parents[1] / "scripts"
@@ -41,6 +46,49 @@ def test_cli_accepts_credentials_only_from_process_environment():
         "GEMINI_API_KEY",
     ):
         assert f'os.environ.get("{variable}", "")' in cli
+
+
+def test_cli_removes_credentials_before_running_children(monkeypatch, tmp_path: Path):
+    secret = "credential-must-not-reach-children"
+    for variable in cli.CREDENTIAL_ENVIRONMENT_NAMES:
+        monkeypatch.setenv(variable, secret)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "traffic-measure",
+            "run",
+            "--manifest",
+            str(tmp_path / "manifest.jsonl"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--samples",
+            "1",
+            "--repetitions",
+            "1",
+            "--api-key-stdin",
+        ],
+    )
+    monkeypatch.setattr(sys, "stdin", StringIO(f"{secret}\n"))
+
+    def fake_run(settings):
+        assert settings.api_key == secret
+        assert all(name not in os.environ for name in cli.CREDENTIAL_ENVIRONMENT_NAMES)
+        return tmp_path / "output" / "results.jsonl"
+
+    monkeypatch.setattr(cli, "run_experiment", fake_run)
+    assert cli.main() == 0
+
+
+def test_protocol_pilot_limits_key_export_to_measurement_process():
+    pilot = (SCRIPTS_DIR / "22_validate_protocol_pilots.sh").read_text(encoding="utf-8")
+    transport = (SCRIPTS_DIR / "08_run_transport_profile.sh").read_text(encoding="utf-8")
+    for script in (pilot, transport):
+        assert "export -n LOCAL_VLLM_API_KEY" in script
+    assert 'LOCAL_VLLM_API_KEY="${LOCAL_VLLM_API_KEY}"' in pilot
+    assert "--api-key-stdin" in transport
+    assert "printf '%s\\n' \"${LOCAL_VLLM_API_KEY}\" |" in transport
+    assert 'LOCAL_VLLM_API_KEY="${LOCAL_VLLM_API_KEY}"' not in transport
 
 
 def test_project_configuration_examples_do_not_store_credential_fields():

@@ -109,6 +109,12 @@ def parse_config(path: Path) -> dict[str, str]:
         raise ConfigError(f"configuration is not a regular non-symlink file: {path}")
     values: dict[str, str] = {}
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        credential_probe = raw.lstrip().lstrip("#").lstrip()
+        credential_name = re.match(r"(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=", credential_probe)
+        if credential_name and credential_name.group(1) in CREDENTIAL_NAMES:
+            raise ConfigError(
+                f"credential-looking assignment is forbidden on line {number}"
+            )
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         match = ASSIGNMENT.fullmatch(raw)
@@ -184,11 +190,16 @@ def validate_release_config(
         "SECURE_PROXY_HOST": "10.200.0.1",
         "CAPTURE_INTERFACE_OVERRIDE": "llmclient0",
         "CONNECTION_MODE": "warm",
+        "OPENROUTER_MODEL": "",
+        "OPENROUTER_PROVIDER": "",
+        "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+        "GEMINI_MODEL": "",
+        "GEMINI_BASE_URL": "https://generativelanguage.googleapis.com/v1beta",
         "RUNS_ROOT": f"{expected_output}/runs",
         "CADDY_RUN_DIR": f"{expected_output}/caddy",
     }
     for key, expected in exact.items():
-        if require(values, key) != expected:
+        if key not in values or values[key] != expected:
             raise ConfigError(f"{key} must equal {expected!r} for the privileged pilot")
     if values.get("LD_LIBRARY_PATH", ""):
         raise ConfigError("LD_LIBRARY_PATH must be absent or blank")

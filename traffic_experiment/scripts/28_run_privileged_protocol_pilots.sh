@@ -18,7 +18,7 @@ EXPECTED_SERVICE_GID=1007
 EXPECTED_SERVICE_STATE=/home/wongshingyin/.config/commu/qwen35-e12240f/service-attempt-5-gpu2-1.state
 EXPECTED_GPU_UUID_PIN=GPU-41d1f86d-0197-51fe-c1ef-ad53c99e3223
 
-FIXED_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+FIXED_PATH=/usr/sbin:/usr/bin
 if [[ "${COMMU_PRIVILEGED_PILOT_CLEAN_ENV:-}" != 1 ]]; then
   [[ "${EUID}" -eq 0 ]] || { printf 'ERROR: runner must run as root\n' >&2; exit 2; }
   SELF="$(/usr/bin/readlink -e -- "$0")" || exit 2
@@ -107,7 +107,7 @@ trusted_root_directory() {
 root_command() {
   local name="$1" path resolved mode
   path="$(command -v "${name}" 2>/dev/null)" || return 1
-  case "${path}" in /usr/bin/*|/usr/sbin/*|/bin/*|/sbin/*) ;; *) return 1 ;; esac
+  case "${path}" in /usr/bin/*|/usr/sbin/*) ;; *) return 1 ;; esac
   resolved="$(/usr/bin/readlink -e -- "${path}")" || return 1
   [[ -f "${resolved}" && "$(/usr/bin/stat -c %u -- "${resolved}")" == 0 ]] || return 1
   mode="$(/usr/bin/stat -c %a -- "${resolved}")"
@@ -430,8 +430,7 @@ cleanup() {
   if [[ "${status}" -ne 0 && "${ADMISSION_PUBLISHED}" -eq 1 &&
     -f "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" &&
     ! -L "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" &&
-    "$(/usr/bin/stat -c %u:%h:%d:%i -- "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK")" ==
-      "0:1:${ADMISSION_MARKER_ID}" ]]; then
+    "$(/usr/bin/stat -c %u:%h:%d:%i -- "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK")" == "0:1:${ADMISSION_MARKER_ID}" ]]; then
     /usr/bin/rm -f -- "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" || true
   fi
   if [[ -n "${ADMISSION_CANDIDATE}" && -f "${ADMISSION_CANDIDATE}" &&
@@ -541,8 +540,7 @@ verify_active_service() {
     "$(process_exe "${api}")" == "$(/usr/bin/readlink -e -- "${EXPECTED_API_PYTHON}")" &&
     "$(process_env_value "${api}" CUDA_VISIBLE_DEVICES)" == "${gpu_index}" &&
     "$(process_env_value "${api}" LD_LIBRARY_PATH)" == "${active_ld}" &&
-    "$(/usr/bin/readlink -e -- "$(process_env_value "${api}" EXPERIMENT_ENV_FILE)")" ==
-      "${ACTIVE_CONFIG_ORIGINAL}" ]] || die "API cwd/argv/environment drifted"
+    "$(/usr/bin/readlink -e -- "$(process_env_value "${api}" EXPERIMENT_ENV_FILE)")" == "${ACTIVE_CONFIG_ORIGINAL}" ]] || die "API cwd/argv/environment drifted"
   port_closed 8001 || die "secondary vLLM port is open in one-worker mode"
 
   engine="$(state_value worker_0_engine_pid)"
@@ -551,6 +549,7 @@ verify_active_service() {
   engine_cwd="$(/usr/bin/readlink -e -- "/proc/${engine}/cwd")" || die "cannot inspect engine cwd"
   process_args "${engine}" engine_args || die "cannot inspect engine argv"
   [[ "${engine_cwd}" == "${EXPECTED_CONTROLLER_CWD}" &&
+    "$(process_exe "${engine}")" == "$(/usr/bin/readlink -e -- "${EXPECTED_API_PYTHON}")" &&
     "${#engine_args[@]}" -eq 1 && "${engine_args[0]}" == 'VLLM::EngineCore' &&
     "$(process_group "${engine}")" == "${api}" && "$(process_session "${engine}")" == "${api}" ]] ||
     die "engine cwd/argv/process group drifted"
@@ -705,7 +704,10 @@ check_idle_resources
 verify_active_service
 verify_locked_identity
 publish_deferred_admission
+verify_active_service
+verify_locked_identity
 verify_admission
+verify_active_service
 verify_locked_identity
 rm -- "${ADMISSION_CANDIDATE}"
 ADMISSION_CANDIDATE=""

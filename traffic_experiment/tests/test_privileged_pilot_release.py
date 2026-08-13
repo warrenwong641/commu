@@ -77,6 +77,14 @@ def test_privileged_config_rejects_shell_secrets_and_unsafe_overrides(tmp_path: 
             'PROFILE="main"',
             'PROFILE="main"\nLOCAL_VLLM_API_KEY="secret"',
         ),
+        "commented credential": (
+            'PROFILE="main"',
+            'PROFILE="main"\n# HF_TOKEN="secret"',
+        ),
+        "external provider": (
+            'OPENROUTER_MODEL=""',
+            'OPENROUTER_MODEL="provider/model"',
+        ),
         "dual worker": ('PARALLEL_WORKERS="1"', 'PARALLEL_WORKERS="2"'),
         "external output": (
             'RUNS_ROOT="/var/lib/commu-protocol-pilots/@REPOSITORY_SHA@/runs"',
@@ -175,6 +183,10 @@ def test_root_runner_has_clean_environment_lock_and_fail_closed_inventory() -> N
     assert "EXPECTED_API_VLLM" in text
     assert "process_exe" in text
     assert '"$(process_exe "${controller}")" == "${EXPECTED_CONTROLLER_EXE}"' in text
+    assert '"$(process_exe "${engine}")" == "$(/usr/bin/readlink -e -- "${EXPECTED_API_PYTHON}")"' in text
+    publish = text.index("publish_deferred_admission\n")
+    assert text.rfind("verify_active_service\n", 0, publish) != -1
+    assert text.index("verify_active_service\n", publish) != -1
 
 
 def test_pilot_entrypoint_no_longer_advertises_matrix_and_ip_inventory_fails_closed() -> None:

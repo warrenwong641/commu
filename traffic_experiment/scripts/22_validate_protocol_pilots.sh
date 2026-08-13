@@ -6,7 +6,11 @@
 # through lib.sh.  Append-only; never regenerates manifests or deletes partial
 # runs.  Stops after both validations pass — does NOT launch the full matrix.
 set -euo pipefail
+# Keep the credential available as a shell value, but do not let setup,
+# capture, proxy, or inspection subprocesses inherit it.
+export -n LOCAL_VLLM_API_KEY 2>/dev/null || true
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+export -n LOCAL_VLLM_API_KEY
 source "${SCRIPT_DIR}/protocol_admission.sh"
 
 load_worker_topology
@@ -440,6 +444,7 @@ run_or_validate_strict() {
     CAPTURE_INTERFACE_OVERRIDE="${CLIENT_VETH:-llmclient0}" \
     CAPTURE_FILTER_OVERRIDE="${capture_filter}" \
     PILOT_WORKER_INDEX="${worker_index}" \
+    LOCAL_VLLM_API_KEY="${LOCAL_VLLM_API_KEY}" \
     bash "${SCRIPT_DIR}/08_run_transport_profile.sh" \
     2>&1 | tee "${console_log}"
 
