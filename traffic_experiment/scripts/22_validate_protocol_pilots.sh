@@ -9,6 +9,10 @@ set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 source "${SCRIPT_DIR}/protocol_admission.sh"
 
+load_worker_topology
+load_worker_gpu_identities
+configure_proxy_ports "${TOPOLOGY_WORKER_COUNT}"
+
 # --- helpers ---------------------------------------------------------------
 die() { printf '%s\n' "$*" >&2; exit 1; }
 require_root() {
@@ -46,7 +50,7 @@ NETWORK_OWNED=0
 CADDY_OWNED=0
 CADDY_PID=""
 CADDY_START_TICKS=""
-CADDY_CONFIG="${EXPERIMENT_ROOT}/configs/Caddyfile"
+CADDY_CONFIG="$(caddy_config_for_worker_count "${TOPOLOGY_WORKER_COUNT}")"
 CADDY_EXE="$(command -v caddy || true)"
 
 write_lifecycle_state() {
@@ -56,6 +60,7 @@ write_lifecycle_state() {
     printf 'namespace=%s\n' "${CLIENT_NETNS:-llm-client}"
     printf 'host_veth=%s\n' "${HOST_VETH:-llmhost0}"
     printf 'caddy_owned=%s\n' "${CADDY_OWNED}"
+    printf 'worker_count=%s\n' "${TOPOLOGY_WORKER_COUNT}"
     printf 'caddy_pid=%s\n' "${CADDY_PID}"
     printf 'caddy_start_ticks=%s\n' "${CADDY_START_TICKS}"
     printf 'caddy_config=%s\n' "${CADDY_CONFIG}"
@@ -106,7 +111,7 @@ wait_for_owned_caddy_exit() {
 }
 
 caddy_listeners_closed() {
-  local tcp_listeners udp_listeners
+  local tcp_listeners udp_listeners port
   if ! command -v ss >/dev/null 2>&1; then
     echo "Cannot verify Caddy listener closure because ss is unavailable." >&2
     return 1
@@ -116,14 +121,18 @@ caddy_listeners_closed() {
     echo "Failed to inspect TCP/UDP listeners after stopping Caddy." >&2
     return 1
   fi
-  if grep -Eq ':(8443|8543)[[:space:]]' <<<"${tcp_listeners}"; then
-    echo "A TCP listener remains on a project Caddy port (8443 or 8543)." >&2
-    return 1
-  fi
-  if grep -Eq ':(8444|8544)[[:space:]]' <<<"${udp_listeners}"; then
-    echo "A UDP listener remains on a project Caddy port (8444 or 8544)." >&2
-    return 1
-  fi
+  for port in "${EXPECTED_PROXY_TCP_PORTS[@]}"; do
+    if grep -Eq ":${port}[[:space:]]" <<<"${tcp_listeners}"; then
+      echo "A TCP listener remains on project Caddy port ${port}." >&2
+      return 1
+    fi
+  done
+  for port in "${EXPECTED_PROXY_UDP_PORTS[@]}"; do
+    if grep -Eq ":${port}[[:space:]]" <<<"${udp_listeners}"; then
+      echo "A UDP listener remains on project Caddy port ${port}." >&2
+      return 1
+    fi
+  done
 }
 
 stop_owned_caddy() {
@@ -358,9 +367,9 @@ echo "Caddy started with auto_https disabled."
 # protocol stack, capture configuration, and generation definition is reusable.
 LAST_PILOT_EVIDENCE_MARKER=""
 run_or_validate_strict() {
-  local transport="$1" port="$2" label="$3"
+  local transport="$1" port="$2" label="$3" worker_index="${4:-0}"
   local capture_filter base_prefix existing_marker pcap
-  capture_filter="$(protocol_pilot_capture_filter "${transport}")"
+  capture_filter="$(protocol_pilot_capture_filter "${transport}" "${worker_index}")"
   base_prefix="${VALIDATION_ROOT}/${label}"
   existing_marker=""
 
@@ -376,7 +385,8 @@ run_or_validate_strict() {
       if [[ -e "${marker_candidate}" || -L "${marker_candidate}" ]]; then
         if ! pcap="$(
           protocol_pilot_evidence verify \
-            "${marker_candidate}" "${transport}" "${results_candidate}"
+            "${marker_candidate}" "${transport}" "${results_candidate}" \
+            "${worker_index}"
         )"; then
           die "${label}: immutable pilot evidence is invalid at ${marker_candidate}"
         fi
@@ -414,6 +424,7 @@ run_or_validate_strict() {
     SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-10.200.0.1}" \
     CAPTURE_INTERFACE_OVERRIDE="${CLIENT_VETH:-llmclient0}" \
     CAPTURE_FILTER_OVERRIDE="${capture_filter}" \
+    PILOT_WORKER_INDEX="${worker_index}" \
     bash "${SCRIPT_DIR}/08_run_transport_profile.sh" \
     2>&1 | tee "${console_log}"
 
@@ -433,14 +444,17 @@ run_or_validate_strict() {
   evidence_marker="$(dirname -- "${results_json}")/PILOT_EVIDENCE_OK.json"
   pcap="$(
     protocol_pilot_evidence check \
-      "${evidence_marker}" "${transport}" "${results_json}"
+      "${evidence_marker}" "${transport}" "${results_json}" \
+      "${worker_index}"
   )"
   echo "Validating: ${pcap}"
   validate_pcap "${pcap}" "${transport}" "${port}"
   protocol_pilot_evidence mark \
-    "${evidence_marker}" "${transport}" "${results_json}" >/dev/null
+    "${evidence_marker}" "${transport}" "${results_json}" \
+    "${worker_index}" >/dev/null
   protocol_pilot_evidence verify \
-    "${evidence_marker}" "${transport}" "${results_json}" >/dev/null
+    "${evidence_marker}" "${transport}" "${results_json}" \
+    "${worker_index}" >/dev/null
   LAST_PILOT_EVIDENCE_MARKER="${evidence_marker}"
 }
 
@@ -460,13 +474,33 @@ echo "============================================="
 run_or_validate_strict http3 8444 http3
 HTTP3_PILOT_EVIDENCE_MARKER="${LAST_PILOT_EVIDENCE_MARKER}"
 
+WORKER_1_TLS_PILOT_EVIDENCE_MARKER=""
+WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER=""
+if [[ "${TOPOLOGY_WORKER_COUNT}" -eq 2 ]]; then
+  echo ""
+  echo "============================================="
+  echo "  Worker 1 TLS 1.3 validation"
+  echo "============================================="
+  run_or_validate_strict tls13 8543 worker-1-tls 1
+  WORKER_1_TLS_PILOT_EVIDENCE_MARKER="${LAST_PILOT_EVIDENCE_MARKER}"
+
+  echo ""
+  echo "============================================="
+  echo "  Worker 1 HTTP/3 validation"
+  echo "============================================="
+  run_or_validate_strict http3 8544 worker-1-http3 1
+  WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER="${LAST_PILOT_EVIDENCE_MARKER}"
+fi
+
 # 7. Report
 cleanup_resources
 trap - EXIT
 write_protocol_success_marker \
   "${PROTOCOL_MARKER}" \
   "${TLS_PILOT_EVIDENCE_MARKER}" \
-  "${HTTP3_PILOT_EVIDENCE_MARKER}"
+  "${HTTP3_PILOT_EVIDENCE_MARKER}" \
+  "${WORKER_1_TLS_PILOT_EVIDENCE_MARKER}" \
+  "${WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER}"
 echo ""
 echo "============================================="
 echo "  PROTOCOL VALIDATION COMPLETE"

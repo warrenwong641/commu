@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+source "${SCRIPT_DIR}/worker_topology.sh"
 
 require_value CAPTURE_INTERFACE
 require_value LOCAL_VLLM_API_KEY
@@ -9,10 +10,8 @@ require_command tshark
 require_command setsid
 
 PARALLEL_WORKERS="${PARALLEL_WORKERS:-2}"
-if [[ "${PARALLEL_WORKERS}" -ne 2 ]]; then
-  echo "The secure proxy currently defines exactly two isolated workers." >&2
-  exit 2
-fi
+VLLM_PORT_STEP="${VLLM_PORT_STEP:-1}"
+load_measured_worker_topology
 
 TRANSPORT="${TRANSPORT:-tls13}"
 SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-localhost}"
@@ -32,12 +31,12 @@ if [[ -n "${CLIENT_NETNS:-}" ]]; then
 fi
 case "${TRANSPORT}" in
   tls13)
-    PORTS=(8443 8543)
+    PORTS=("${WORKER_TLS_PORTS[@]}")
     FILTER_PROTOCOL=tcp
     require_command curl
     ;;
   http3)
-    PORTS=(8444 8544)
+    PORTS=("${WORKER_HTTP3_PORTS[@]}")
     FILTER_PROTOCOL=udp
     if ! "${RUNNER_PYTHON}" -c 'import aioquic' >/dev/null 2>&1; then
       echo "aioquic is absent; rerun 01_setup_runner.sh." >&2
@@ -75,7 +74,14 @@ if [[ "${CAPTURE_STOP_ON_RESPONSE:-false}" == "true" ]]; then
   CAPTURE_COMPLETION_ARGS=(--capture-stop-on-response)
 fi
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH_EFFECTIVE}")"
-RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")/local_vllm_${TRANSPORT}_${PROFILE}"
+OUTPUT_ROOT="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")"
+ensure_worker_topology "${OUTPUT_ROOT}"
+RUN_DIR="${OUTPUT_ROOT}/local_vllm_${TRANSPORT}_${PROFILE}"
+RESULTS="${RUN_DIR}/results.jsonl"
+if [[ -L "${RUN_DIR}" || -L "${RESULTS}" ]]; then
+  echo "Refusing symlinked run directory or merged results path under ${RUN_DIR}." >&2
+  exit 2
+fi
 mkdir -p "${RUN_DIR}"
 LAUNCHER_STATE="${RUN_DIR}/launcher.state"
 LAUNCHER_START_TICKS="$(process_start_ticks "$$")"
@@ -164,10 +170,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 write_launcher_state
 
-for worker in 0 1; do
+for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
   port="${PORTS[$worker]}"
   worker_dir="${RUN_DIR}/worker-${worker}"
   worker_log="${RUN_DIR}/worker-${worker}.log"
+  if [[ -L "${worker_dir}" || -L "${worker_log}" ||
+    -L "${worker_dir}/results.jsonl" || -L "${worker_dir}/captures" ]]; then
+    echo "Refusing symlinked worker output for worker ${worker}." >&2
+    exit 2
+  fi
   echo "Worker ${worker}: secure port=${port}, output=${worker_dir}"
   (
     trap - INT TERM
@@ -187,8 +198,11 @@ for worker in 0 1; do
       --capture-interface "${CAPTURE_INTERFACE_EFFECTIVE}" \
       --capture-filter "${FILTER_PROTOCOL} port ${port}" \
       "${CAPTURE_COMPLETION_ARGS[@]}" \
-      --worker-count 2 \
+      --worker-count "${PARALLEL_WORKERS}" \
       --worker-index "${worker}" \
+      --worker-gpu-index "${WORKER_GPU_INDEXES[worker]}" \
+      --worker-gpu-uuid "${WORKER_GPU_UUIDS[worker]}" \
+      --topology-worker-index "${worker}" \
       --transport "${TRANSPORT}" \
       --connection-mode "${CONNECTION_MODE}" \
       --tls-ca-file "${CA_FILE}"
@@ -208,8 +222,7 @@ if [[ "${failed}" -ne 0 ]]; then
   exit 1
 fi
 
-RESULTS="${RUN_DIR}/results.jsonl"
-"${RUNNER_PYTHON}" - "${RUN_DIR}" "${RESULTS}" <<'PY'
+"${RUNNER_PYTHON}" - "${RUN_DIR}" "${RESULTS}" "${OUTPUT_ROOT}/worker-topology.json" <<'PY'
 import json
 import fcntl
 import hashlib
@@ -219,6 +232,10 @@ from pathlib import Path
 
 run_dir = Path(sys.argv[1])
 output = Path(sys.argv[2])
+topology_path = Path(sys.argv[3])
+topology = json.loads(topology_path.read_text(encoding="utf-8"))
+worker_count = int(topology["worker_count"])
+workers = topology["workers"]
 
 
 def canonical(row):
@@ -244,6 +261,21 @@ def register(row, source, seen_attempts, assignments):
         return False
     trial = (str(row["request_id"]), int(row["repetition"]))
     worker = int(row["worker_index"])
+    if int(row["worker_count"]) != worker_count:
+        raise SystemExit(f"{source}: worker_count does not match topology")
+    if worker < 0 or worker >= worker_count:
+        raise SystemExit(f"{source}: worker_index is outside topology")
+    expected = workers[worker]
+    if int(row["worker_gpu_index"]) != int(expected["gpu_index"]):
+        raise SystemExit(f"{source}: worker GPU index does not match topology")
+    if str(row["worker_gpu_uuid"]) != str(expected["gpu_uuid"]):
+        raise SystemExit(f"{source}: worker GPU UUID does not match topology")
+    if int(row["topology_worker_index"]) != worker:
+        raise SystemExit(f"{source}: topology worker index does not match")
+    transport = str(row["transport"])
+    expected_port = int(expected["secure_ports"][transport])
+    if int(row["backend_port"]) != expected_port:
+        raise SystemExit(f"{source}: backend port does not match topology")
     assigned = assignments.setdefault(trial, worker)
     if assigned != worker:
         raise SystemExit(f"trial assigned to multiple workers: {trial}")
@@ -268,7 +300,7 @@ with output.open("a+", encoding="utf-8", newline="\n") as stream:
         )
 
     new_rows = []
-    for worker in range(2):
+    for worker in range(worker_count):
         path = run_dir / f"worker-{worker}" / "results.jsonl"
         if not path.exists():
             raise SystemExit(f"missing worker results: {path}")

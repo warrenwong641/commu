@@ -2,12 +2,16 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 source "${SCRIPT_DIR}/protocol_admission.sh"
+source "${SCRIPT_DIR}/worker_topology.sh"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root so the controlled network can be configured." >&2
   exit 2
 fi
 require_value LOCAL_VLLM_API_KEY
+load_measured_worker_topology
+RUNS_ROOT_ABS="$(absolute_from_experiment "${RUNS_ROOT}")"
+ensure_worker_topology "${RUNS_ROOT_ABS}"
 
 SESSION_PROFILE="${SESSION_PROFILE:-closed_loop_30s}"
 NETWORKS="${LAB_SESSION_NETWORKS:-baseline rtt realistic}"
@@ -18,7 +22,7 @@ NETNS="${CLIENT_NETNS:-llm-client}"
 HOST_IF="${HOST_VETH:-llmhost0}"
 CLIENT_IF="${CLIENT_VETH:-llmclient0}"
 PROXY_HOST="${SECURE_PROXY_HOST:-10.200.0.1}"
-LIFECYCLE_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/.lifecycle"
+LIFECYCLE_DIR="${RUNS_ROOT_ABS}/.lifecycle"
 mkdir -p "${LIFECYCLE_DIR}"
 LIFECYCLE_STATE="${LIFECYCLE_DIR}/lab-sessions-$$.state"
 CADDY_STATE_FILE="${LIFECYCLE_DIR}/lab-sessions-$$.caddy.state"

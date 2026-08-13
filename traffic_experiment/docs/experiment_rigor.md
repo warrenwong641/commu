@@ -39,7 +39,7 @@ guidance, and preregistered design.
 - iperf3 uplink/downlink throughput checked for every network condition
   (baseline, RTT, realistic) before LLM captures.  Calibration stored
   separately by condition; never mixed with experiment PCAPs.
-- Capture overhead calibrated under same two-worker load.
+- Capture overhead calibrated under the same recorded one- or two-worker load.
 - Clock source (perf_counter / UTC), tool versions (tshark, dumpcap, vLLM,
   Caddy, kernel), and full command lines archived.
 

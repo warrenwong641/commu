@@ -2,6 +2,9 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
+load_worker_topology
+load_worker_gpu_identities
+
 required=(ip ss tc ethtool iperf3 dumpcap tshark curl nvidia-smi caddy sha256sum)
 missing=()
 for command_name in "${required[@]}"; do
@@ -85,6 +88,15 @@ REPORT="${AUDIT_DIR}/preflight-${STAMP}.txt"
   echo "max_output_tokens=${MAX_OUTPUT_TOKENS}"
   echo "model=${VLLM_MODEL}"
   echo "model_revision=${VLLM_MODEL_REVISION}"
+  echo "worker_count=${TOPOLOGY_WORKER_COUNT}"
+  echo "worker_gpu_ids=${TOPOLOGY_GPU_IDS}"
+  echo "worker_gpu_uuids=${TOPOLOGY_GPU_UUIDS}"
+  echo "worker_topology:"
+  for ((worker = 0; worker < TOPOLOGY_WORKER_COUNT; worker++)); do
+    printf '  worker=%s physical_gpu=%s uuid=%s vllm_port=%s\n' \
+      "${worker}" "${WORKER_GPU_IDS[worker]}" "${WORKER_GPU_UUIDS[worker]}" \
+      "${WORKER_VLLM_PORTS[worker]}"
+  done
   echo "manifest_sha256:"
   printf '  %s  %s\n' "${QA_MANIFEST_ACTUAL_SHA}" "${QA_MANIFEST_ABS}"
   printf '  %s  %s\n' "${SUMMARY_MANIFEST_ACTUAL_SHA}" "${SUMMARY_MANIFEST_ABS}"

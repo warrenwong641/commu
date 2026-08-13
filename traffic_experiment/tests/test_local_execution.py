@@ -399,12 +399,16 @@ def test_runner_against_mock_streaming_server(tmp_path):
                 capture_interface="",
                 capture_filter="",
                 capture_startup_delay_seconds=0,
+                worker_gpu_index=7,
+                worker_gpu_uuid="GPU-test-uuid",
                 no_capture=True,
                 no_wait_after_request=True,
             )
         )
         result = read_jsonl(results_path)[0]
         assert result["completed"] is True
+        assert result["worker_gpu_index"] == 7
+        assert result["worker_gpu_uuid"] == "GPU-test-uuid"
         assert result["capture_may_be_truncated"] is None
         assert result["response_text"] == "Taipei"
         assert result["finish_reason"] == "stop"

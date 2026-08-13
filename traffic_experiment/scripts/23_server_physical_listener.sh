@@ -13,6 +13,9 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
+load_worker_topology
+LISTENER_WORKER_COUNT="${TOPOLOGY_WORKER_COUNT}"
+
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
 ACTION="${1:-start}"
@@ -28,7 +31,32 @@ case "${LISTENER_PROFILE}" in
   *) die "LISTENER_PROFILE must be high_ports or standard_https" ;;
 esac
 
-STATE_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/physical_validation/server/${LISTENER_PROFILE}"
+configure_physical_listener_ports() {
+  local worker_count="$1"
+  case "${worker_count}" in
+    1)
+      PHYSICAL_TCP_PORTS=("${TLS_PORT}")
+      PHYSICAL_UDP_PORTS=("${H3_PORT}")
+      ;;
+    2)
+      PHYSICAL_TCP_PORTS=("${TLS_PORT}" "${W2_TLS}")
+      PHYSICAL_UDP_PORTS=("${H3_PORT}" "${W2_H3}")
+      ;;
+    *) die "Recorded physical-listener worker count must be 1 or 2" ;;
+  esac
+  LISTENER_WORKER_COUNT="${worker_count}"
+}
+
+configure_physical_listener_ports "${LISTENER_WORKER_COUNT}"
+
+# Service ownership must remain discoverable when an experiment switches to a
+# fresh immutable RUNS_ROOT. Keep physical-listener state in a stable runtime
+# root unless an operator explicitly provides another stable absolute path.
+PHYSICAL_LISTENER_STATE_ROOT="${PHYSICAL_LISTENER_STATE_ROOT:-${EXPERIMENT_ROOT}/runs/service_state/physical_listener}"
+if [[ "${PHYSICAL_LISTENER_STATE_ROOT}" != /* ]]; then
+  PHYSICAL_LISTENER_STATE_ROOT="$(absolute_from_experiment "${PHYSICAL_LISTENER_STATE_ROOT}")"
+fi
+STATE_DIR="${PHYSICAL_LISTENER_STATE_ROOT}/${LISTENER_PROFILE}"
 mkdir -p "${STATE_DIR}"
 PID_FILE="${STATE_DIR}/caddy.pid"
 STATE_FILE="${STATE_DIR}/listener_state"
@@ -37,33 +65,18 @@ CADDY_EXE="$(command -v caddy || true)"
 START_IN_PROGRESS=0
 
 _caddyfile() {
-  # When TLS_PORT == H3_PORT (standard_https on 443), Caddy requires a
-  # single non-duplicated server entry with both protocols listed.
-  # When ports differ (high_ports), separate entries are fine.
-  if [[ "${TLS_PORT}" == "${H3_PORT}" ]]; then
-    # Shared port: single servers entry with h1+h3, single site block.
-    # Caddy serves HTTP/1.1 over TCP and HTTP/3 over UDP from one site.
-    cat <<CEOF
-{
-  auto_https disable_redirects
-  servers :${TLS_PORT} {
-    protocols h1 h3
-  }
+  local secondary_servers="" secondary_sites=""
+  if [[ "${LISTENER_WORKER_COUNT}" -eq 2 ]]; then
+    secondary_servers="$(cat <<CEOF
   servers :${W2_TLS} {
     protocols h1
   }
   servers :${W2_H3} {
     protocols h3
   }
-}
-
-https://${PHYS_IP}:${TLS_PORT} {
-  tls internal {
-    protocols tls1.3
-    curves x25519
-  }
-  reverse_proxy ${VLLM_HOST:-127.0.0.1}:${VLLM_PORT:-8000}
-}
+CEOF
+)"
+    secondary_sites="$(cat <<CEOF
 https://${PHYS_IP}:${W2_TLS} {
   tls internal {
     protocols tls1.3
@@ -79,6 +92,32 @@ https://${PHYS_IP}:${W2_H3} {
   reverse_proxy ${VLLM_HOST:-127.0.0.1}:${VLLM_SECONDARY_PORT:-8001}
 }
 CEOF
+)"
+  fi
+  # When TLS_PORT == H3_PORT (standard_https on 443), Caddy requires a
+  # single non-duplicated server entry with both protocols listed.
+  # When ports differ (high_ports), separate entries are fine.
+  if [[ "${TLS_PORT}" == "${H3_PORT}" ]]; then
+    # Shared port: single servers entry with h1+h3, single site block.
+    # Caddy serves HTTP/1.1 over TCP and HTTP/3 over UDP from one site.
+    cat <<CEOF
+{
+  auto_https disable_redirects
+  servers :${TLS_PORT} {
+    protocols h1 h3
+  }
+${secondary_servers}
+}
+
+https://${PHYS_IP}:${TLS_PORT} {
+  tls internal {
+    protocols tls1.3
+    curves x25519
+  }
+  reverse_proxy ${VLLM_HOST:-127.0.0.1}:${VLLM_PORT:-8000}
+}
+${secondary_sites}
+CEOF
   else
     cat <<CEOF
 {
@@ -89,12 +128,7 @@ CEOF
   servers :${H3_PORT} {
     protocols h3
   }
-  servers :${W2_TLS} {
-    protocols h1
-  }
-  servers :${W2_H3} {
-    protocols h3
-  }
+${secondary_servers}
 }
 
 https://${PHYS_IP}:${TLS_PORT} {
@@ -111,20 +145,7 @@ https://${PHYS_IP}:${H3_PORT} {
   }
   reverse_proxy ${VLLM_HOST:-127.0.0.1}:${VLLM_PORT:-8000}
 }
-https://${PHYS_IP}:${W2_TLS} {
-  tls internal {
-    protocols tls1.3
-    curves x25519
-  }
-  reverse_proxy ${VLLM_HOST:-127.0.0.1}:${VLLM_SECONDARY_PORT:-8001}
-}
-https://${PHYS_IP}:${W2_H3} {
-  tls internal {
-    protocols tls1.3
-    curves x25519
-  }
-  reverse_proxy ${VLLM_HOST:-127.0.0.1}:${VLLM_SECONDARY_PORT:-8001}
-}
+${secondary_sites}
 CEOF
   fi
 }
@@ -140,6 +161,14 @@ _state_value() {
   local key="$1"
   [[ -f "${STATE_FILE}" ]] || return 0
   awk -F= -v key="${key}" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "${STATE_FILE}"
+}
+
+load_recorded_listener_topology() {
+  local recorded_worker_count
+  recorded_worker_count="$(_state_value worker_count)"
+  # Listener state created before this field existed was always dual-worker.
+  recorded_worker_count="${recorded_worker_count:-2}"
+  configure_physical_listener_ports "${recorded_worker_count}"
 }
 
 _process_start_ticks() {
@@ -192,7 +221,7 @@ _wait_for_verified_caddy_exit() {
 }
 
 _listener_ports_closed() {
-  local tcp_listeners udp_listeners
+  local tcp_listeners udp_listeners port
   if ! command -v ss >/dev/null 2>&1; then
     echo "Cannot verify listener closure because ss is unavailable." >&2
     return 1
@@ -202,14 +231,18 @@ _listener_ports_closed() {
     echo "Failed to inspect TCP/UDP listeners after stopping Caddy." >&2
     return 1
   fi
-  if grep -Eq ":(${TLS_PORT}|${W2_TLS})[[:space:]]" <<<"${tcp_listeners}"; then
-    echo "A TCP listener remains on ${TLS_PORT} or ${W2_TLS}." >&2
-    return 1
-  fi
-  if grep -Eq ":(${H3_PORT}|${W2_H3})[[:space:]]" <<<"${udp_listeners}"; then
-    echo "A UDP listener remains on ${H3_PORT} or ${W2_H3}." >&2
-    return 1
-  fi
+  for port in "${PHYSICAL_TCP_PORTS[@]}"; do
+    if grep -Eq ":${port}[[:space:]]" <<<"${tcp_listeners}"; then
+      echo "A TCP listener remains on project port ${port}." >&2
+      return 1
+    fi
+  done
+  for port in "${PHYSICAL_UDP_PORTS[@]}"; do
+    if grep -Eq ":${port}[[:space:]]" <<<"${udp_listeners}"; then
+      echo "A UDP listener remains on project port ${port}." >&2
+      return 1
+    fi
+  done
 }
 
 _stop_verified_caddy() {
@@ -265,7 +298,10 @@ status_listener() {
     high_ports) TLS_PORT=8443; H3_PORT=8444; W2_TLS=8543; W2_H3=8544 ;;
     standard_https) TLS_PORT=443; H3_PORT=443; W2_TLS=8543; W2_H3=8544 ;;
   esac
-  STATE_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/physical_validation/server/${LISTENER_PROFILE}"
+  STATE_DIR="${PHYSICAL_LISTENER_STATE_ROOT}/${LISTENER_PROFILE}"
+  if [[ -f "${STATE_FILE}" ]]; then
+    load_recorded_listener_topology
+  fi
   PHYS_IP="$(_state_value physical_ip)"
   if [[ -z "${PHYS_IP}" ]]; then
     PHYS_IP="$(_discover_physical_ip || true)"
@@ -274,6 +310,7 @@ status_listener() {
   echo "Profile:      ${LISTENER_PROFILE}"
   echo "Physical IP:  ${PHYS_IP}"
   echo "State dir:    ${STATE_DIR}"
+  echo "Workers:      ${LISTENER_WORKER_COUNT}"
   local pid expected_ticks expected_config expected_exe
   pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   expected_ticks="$(_state_value caddy_start_ticks)"
@@ -288,10 +325,12 @@ status_listener() {
   fi
   echo ""
   echo "Listeners:"
-  ss -ltnp 2>/dev/null |
-    grep -E ":(${TLS_PORT}|${W2_TLS})[[:space:]]" || true
-  ss -lunp 2>/dev/null |
-    grep -E ":(${H3_PORT}|${W2_H3})[[:space:]]" || true
+  for port in "${PHYSICAL_TCP_PORTS[@]}"; do
+    ss -ltnp 2>/dev/null | grep -E ":${port}[[:space:]]" || true
+  done
+  for port in "${PHYSICAL_UDP_PORTS[@]}"; do
+    ss -lunp 2>/dev/null | grep -E ":${port}[[:space:]]" || true
+  done
   echo ""
   echo "CA certificate:"
   local ca
@@ -309,7 +348,11 @@ start_listener() {
   if [[ -z "${PHYS_IP}" ]]; then
     die "Could not determine IPv4 on ${PHYS_IF}"
   fi
-  local recorded_pid recorded_ticks recorded_config recorded_exe
+  local recorded_pid recorded_ticks recorded_config recorded_exe current_worker_count
+  current_worker_count="${TOPOLOGY_WORKER_COUNT}"
+  if [[ -f "${STATE_FILE}" ]]; then
+    load_recorded_listener_topology
+  fi
   recorded_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   recorded_ticks="$(_state_value caddy_start_ticks)"
   recorded_config="$(_state_value caddy_config)"
@@ -326,9 +369,19 @@ start_listener() {
     if [[ ! "${recorded_pid}" =~ ^[0-9]+$ ]]; then
       die "Refusing to replace malformed PID metadata in ${PID_FILE}; inspect it explicitly"
     fi
+    if ! _listener_ports_closed; then
+      die "Recorded Caddy PID is dead but its recorded listener closure is unverified; preserving state"
+    fi
     echo "Removing stale listener metadata for dead PID ${recorded_pid:-unknown}." >&2
     rm -f "${PID_FILE}" "${STATE_FILE}"
+  elif [[ -f "${STATE_FILE}" ]]; then
+    if ! _listener_ports_closed; then
+      die "Listener state exists without a PID and recorded ports remain open; preserving state"
+    fi
+    echo "Removing stale listener state after verified recorded-port closure." >&2
+    rm -f "${STATE_FILE}"
   fi
+  configure_physical_listener_ports "${current_worker_count}"
   local caddyfile
   caddyfile="${STATE_DIR}/Caddyfile"
   _caddyfile >"${caddyfile}"
@@ -337,6 +390,7 @@ start_listener() {
   caddy validate --config "${caddyfile}" --adapter caddyfile
   {
     echo "status=starting"
+    echo "worker_count=${LISTENER_WORKER_COUNT}"
     echo "physical_ip=${PHYS_IP}"
     echo "tls_port=${TLS_PORT}"
     echo "h3_port=${H3_PORT}"
@@ -353,6 +407,7 @@ start_listener() {
   echo "${caddy_pid}" >"${PID_FILE}"
   {
     echo "status=starting"
+    echo "worker_count=${LISTENER_WORKER_COUNT}"
     echo "physical_ip=${PHYS_IP}"
     echo "tls_port=${TLS_PORT}"
     echo "h3_port=${H3_PORT}"
@@ -379,6 +434,7 @@ start_listener() {
 
   {
     echo "status=running"
+    echo "worker_count=${LISTENER_WORKER_COUNT}"
     echo "physical_ip=${PHYS_IP}"
     echo "tls_port=${TLS_PORT}"
     echo "h3_port=${H3_PORT}"
@@ -400,6 +456,9 @@ start_listener() {
 }
 
 stop_listener() {
+  if [[ -f "${STATE_FILE}" ]]; then
+    load_recorded_listener_topology
+  fi
   if [[ -f "${PID_FILE}" ]]; then
     local pid expected_ticks expected_config expected_exe
     pid="$(cat "${PID_FILE}" 2>/dev/null || true)"

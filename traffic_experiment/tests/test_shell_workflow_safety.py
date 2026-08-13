@@ -80,8 +80,17 @@ def test_caddy_cleanup_waits_after_kill_and_verifies_listener_closure():
         assert "did not exit" in script
 
     listener = _script("23_server_physical_listener.sh")
-    assert 'grep -E ":(${TLS_PORT}|${W2_TLS})[[:space:]]"' in listener
-    assert 'grep -E ":(${H3_PORT}|${W2_H3})[[:space:]]"' in listener
+    assert 'for port in "${PHYSICAL_TCP_PORTS[@]}"' in listener
+    assert 'for port in "${PHYSICAL_UDP_PORTS[@]}"' in listener
+    assert "load_recorded_listener_topology" in listener
+    start_body = listener[
+        listener.index("start_listener() {") : listener.index("stop_listener() {")
+    ]
+    assert start_body.index("load_recorded_listener_topology") < start_body.index(
+        'rm -f "${PID_FILE}" "${STATE_FILE}"'
+    )
+    assert start_body.count("_listener_ports_closed") == 2
+    assert "state exists without a PID" in start_body
     assert "_discover_physical_ip || true" in listener
 
 
@@ -436,6 +445,40 @@ def test_parallel_aggregation_is_append_only_and_attempt_safe():
     assert "Refusing legacy bare PID file" in pipeline
     assert "launcher_pid_matches" in pipeline
     assert "process_start_ticks" in pipeline
+
+
+def test_secure_parallel_launcher_uses_frozen_dynamic_worker_topology():
+    launcher = _script("08_run_transport_profile_parallel.sh")
+    matrix = _script("18_run_lab_matrix.sh")
+    helper = _script("worker_topology.sh")
+
+    assert 'source "${SCRIPT_DIR}/worker_topology.sh"' in launcher
+    assert 'for ((worker=0; worker<PARALLEL_WORKERS; worker++))' in launcher
+    assert "for worker in 0 1" not in launcher
+    assert '--worker-count "${PARALLEL_WORKERS}"' in launcher
+    assert '--worker-gpu-index "${WORKER_GPU_INDEXES[worker]}"' in launcher
+    assert '--worker-gpu-uuid "${WORKER_GPU_UUIDS[worker]}"' in launcher
+    assert "for worker in range(worker_count)" in launcher
+    assert "worker GPU UUID does not match topology" in launcher
+    assert "backend port does not match topology" in launcher
+    assert launcher.index('ensure_worker_topology "${OUTPUT_ROOT}"') < launcher.index(
+        'mkdir -p "${RUN_DIR}"'
+    )
+
+    assert 'load_measured_worker_topology()' in helper
+    assert 'declare -F load_worker_topology' in helper
+    assert 'selectors=("${WORKER_GPU_IDS[@]}")' in helper
+    assert 'discovered_uuids=("${WORKER_GPU_UUIDS[@]}")' in helper
+    assert 'tls_ports=("${EXPECTED_PROXY_TCP_PORTS[@]}")' in helper
+    assert 'http3_ports=("${EXPECTED_PROXY_UDP_PORTS[@]}")' in helper
+    assert 'PARALLEL_WORKERS must be 1 or 2' in helper
+    assert "--query-gpu=index,uuid" in helper
+    assert '--model "${VLLM_MODEL}"' in helper
+    assert '--served-model-name "${VLLM_SERVED_MODEL_NAME}"' in helper
+    assert '--model-revision "${VLLM_MODEL_REVISION:-}"' in helper
+    assert matrix.index('ensure_worker_topology "${RUNS_ROOT_ABS}"') < matrix.index(
+        'mkdir -p "${LIFECYCLE_DIR}"'
+    )
 
 
 def test_network_partial_cleanup_never_bypasses_recorded_identity():

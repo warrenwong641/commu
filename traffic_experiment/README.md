@@ -71,9 +71,12 @@ the weighted average is 5,250 input tokens per call.
   condition order identical across backends.
 - Pin the OpenRouter model and provider; disable provider fallback.
 - Use a stable Gemini model identifier rather than a `latest` alias.
-- Run requests serially within each measurement worker. A two-GPU local run uses
-  one server and TCP port per GPU, disjoint sample blocks, and port-specific
-  captures so concurrent traffic remains attributable.
+- Run requests serially within each measurement worker. The local topology may
+  use one worker/GPU or two; each worker has its own server port, deterministic
+  sample block, and port-specific capture so concurrent traffic is attributable.
+- Treat topology as immutable measurement input. Changing worker count, ordered
+  GPU mapping, or GPU UUIDs requires a new `RUNS_ROOT`; never resume or merge the
+  old worker shards under a new topology.
 - Keep compression outside the measurement window and reuse the same compressed
   prompt for repetitions.
 - Verify the recorded negotiated HTTP version: `1.1` for the TLS/TCP profile and

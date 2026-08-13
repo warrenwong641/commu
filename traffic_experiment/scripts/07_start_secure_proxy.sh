@@ -6,7 +6,7 @@ ACTION="${1:-start}"
 VLLM_SECONDARY_PORT="${VLLM_SECONDARY_PORT:-$((VLLM_PORT + 1))}"
 SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-localhost}"
 export VLLM_HOST VLLM_PORT VLLM_SECONDARY_PORT SECURE_PROXY_HOST
-CADDYFILE="${EXPERIMENT_ROOT}/configs/Caddyfile"
+CADDYFILE=""
 CADDY_RUN_DIR="$(absolute_from_experiment "${CADDY_RUN_DIR:-runs/caddy}")"
 mkdir -p "${CADDY_RUN_DIR}"
 export XDG_DATA_HOME="${CADDY_RUN_DIR}/data"
@@ -15,8 +15,27 @@ CADDY_STATE_FILE="$(absolute_from_experiment "${CADDY_STATE_FILE:-${CADDY_RUN_DI
 CADDY_LOG_FILE="${CADDY_LOG_FILE:-${CADDY_STATE_FILE}.log}"
 CADDY_EXE="$(command -v caddy || true)"
 START_IN_PROGRESS=0
-EXPECTED_PROXY_TCP_PORTS=(8443 8543)
-EXPECTED_PROXY_UDP_PORTS=(8444 8544)
+EXPECTED_PROXY_TCP_PORTS=()
+EXPECTED_PROXY_UDP_PORTS=()
+
+load_current_proxy_topology() {
+  load_worker_topology
+  configure_proxy_ports "${TOPOLOGY_WORKER_COUNT}"
+  CADDYFILE="$(caddy_config_for_worker_count "${TOPOLOGY_WORKER_COUNT}")"
+  if [[ ! -f "${CADDYFILE}" ]]; then
+    echo "Missing Caddy configuration for ${TOPOLOGY_WORKER_COUNT} worker(s): ${CADDYFILE}" >&2
+    return 2
+  fi
+}
+
+load_recorded_proxy_topology() {
+  local recorded_worker_count
+  recorded_worker_count="$(state_value worker_count)"
+  # State created before switchable topologies was always the two-worker form.
+  recorded_worker_count="${recorded_worker_count:-2}"
+  configure_proxy_ports "${recorded_worker_count}"
+  RECORDED_PROXY_WORKER_COUNT="${recorded_worker_count}"
+}
 
 refuse_unsafe_artifact_target() {
   local label="$1" path="$2"
@@ -102,6 +121,7 @@ stop_recorded_caddy() {
   [[ -e "${CADDY_STATE_FILE}" || -L "${CADDY_STATE_FILE}" ]] || return 0
   refuse_unsafe_artifact_target "proxy state" "${CADDY_STATE_FILE}" || return 1
   local pid expected_ticks expected_config expected_exe
+  load_recorded_proxy_topology || return 1
   pid="$(state_value caddy_pid)"
   expected_ticks="$(state_value caddy_start_ticks)"
   expected_config="$(state_value caddy_config)"
@@ -171,6 +191,7 @@ cleanup_failed_start() {
 trap cleanup_failed_start EXIT
 
 start_proxy() {
+  load_current_proxy_topology
   prepare_proxy_artifacts
   require_command caddy
   CADDY_EXE="$(command -v caddy)"
@@ -178,12 +199,16 @@ start_proxy() {
     local recorded_pid
     recorded_pid="$(state_value caddy_pid)"
     if [[ "${recorded_pid}" =~ ^[0-9]+$ ]] && ! kill -0 "${recorded_pid}" 2>/dev/null; then
+      local current_worker_count
+      current_worker_count="${TOPOLOGY_WORKER_COUNT}"
+      load_recorded_proxy_topology >/dev/null || return 1
       if [[ -e "/proc/${recorded_pid}/stat" ]] ||
         ! proxy_listener_ports_closed; then
         echo "Refusing to replace stale proxy state until process absence and listener closure are verified." >&2
         return 1
       fi
       rm -f "${CADDY_STATE_FILE}"
+      configure_proxy_ports "${current_worker_count}"
     else
       echo "Refusing to replace existing proxy state at ${CADDY_STATE_FILE}." >&2
       echo "Inspect it and run '$0 stop' with the same CADDY_STATE_FILE." >&2
@@ -194,6 +219,7 @@ start_proxy() {
   caddy validate --config "${CADDYFILE}" --adapter caddyfile
   {
     echo "status=starting"
+    echo "worker_count=${TOPOLOGY_WORKER_COUNT}"
     echo "caddy_config=${CADDYFILE}"
     echo "caddy_exe=${CADDY_EXE}"
     echo "secure_proxy_host=${SECURE_PROXY_HOST}"
@@ -206,6 +232,7 @@ start_proxy() {
   caddy_start_ticks="$(process_start_ticks "${caddy_pid}")"
   {
     echo "status=starting"
+    echo "worker_count=${TOPOLOGY_WORKER_COUNT}"
     echo "caddy_pid=${caddy_pid}"
     echo "caddy_start_ticks=${caddy_start_ticks}"
     echo "caddy_config=${CADDYFILE}"
@@ -220,6 +247,7 @@ start_proxy() {
   fi
   {
     echo "status=running"
+    echo "worker_count=${TOPOLOGY_WORKER_COUNT}"
     echo "caddy_pid=${caddy_pid}"
     echo "caddy_start_ticks=${caddy_start_ticks}"
     echo "caddy_config=${CADDYFILE}"
@@ -231,8 +259,10 @@ start_proxy() {
 
   local ca_file
   ca_file="${XDG_DATA_HOME}/caddy/pki/authorities/local/root.crt"
-  echo "GPU 0 proxy: TLS 1.3/H1 on TCP 8443; HTTP/3 on UDP 8444."
-  echo "GPU 1 proxy: TLS 1.3/H1 on TCP 8543; HTTP/3 on UDP 8544."
+  echo "Worker 0 proxy: TLS 1.3/H1 on TCP 8443; HTTP/3 on UDP 8444."
+  if [[ "${TOPOLOGY_WORKER_COUNT}" -eq 2 ]]; then
+    echo "Worker 1 proxy: TLS 1.3/H1 on TCP 8543; HTTP/3 on UDP 8544."
+  fi
   echo "Secure proxy host: ${SECURE_PROXY_HOST}"
   echo "CA certificate: ${ca_file}"
   echo "Proxy state: ${CADDY_STATE_FILE}"
@@ -246,12 +276,13 @@ status_proxy() {
   fi
   refuse_unsafe_artifact_target "proxy state" "${CADDY_STATE_FILE}" || return 1
   local pid expected_ticks expected_config expected_exe
+  load_recorded_proxy_topology || return 1
   pid="$(state_value caddy_pid)"
   expected_ticks="$(state_value caddy_start_ticks)"
   expected_config="$(state_value caddy_config)"
   expected_exe="$(state_value caddy_exe)"
   if caddy_pid_matches "${pid}" "${expected_ticks}" "${expected_config}" "${expected_exe}"; then
-    echo "Caddy proxy PID ${pid} is running with verified ownership."
+    echo "Caddy proxy PID ${pid} is running with verified ownership (${RECORDED_PROXY_WORKER_COUNT} worker(s))."
   else
     echo "Caddy proxy state is stale or does not match PID ${pid:-unknown}." >&2
     return 1

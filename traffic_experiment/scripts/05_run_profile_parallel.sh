@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+source "${SCRIPT_DIR}/worker_topology.sh"
 
 require_value CAPTURE_INTERFACE
 require_value LOCAL_VLLM_API_KEY
 require_command dumpcap
 require_command setsid
 
-PARALLEL_WORKERS="${PARALLEL_WORKERS:-2}"
-VLLM_PORT_STEP="${VLLM_PORT_STEP:-1}"
+load_worker_topology
+PARALLEL_WORKERS="${TOPOLOGY_WORKER_COUNT}"
+load_measured_worker_topology
 
 case "${PROFILE}" in
   pilot)
@@ -33,6 +35,7 @@ REPETITIONS="${REPETITIONS_OVERRIDE:-${REPETITIONS}}"
 
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH}")"
 RUNS_ABS="$(absolute_from_experiment "${RUNS_ROOT}")"
+ensure_worker_topology "${RUNS_ABS}"
 RUN_DIR="${RUNS_ABS}/local_vllm_${PROFILE}"
 mkdir -p "${RUN_DIR}"
 
@@ -76,7 +79,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
-  port=$((VLLM_PORT + worker * VLLM_PORT_STEP))
+  port="${WORKER_VLLM_PORTS[worker]}"
   worker_dir="${RUN_DIR}/worker-${worker}"
   worker_log="${RUN_DIR}/worker-${worker}.log"
   echo "Worker ${worker}: port=${port}, output=${worker_dir}, log=${worker_log}"
@@ -96,7 +99,10 @@ for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
       --capture-interface "${CAPTURE_INTERFACE}" \
       --capture-filter "tcp port ${port}" \
       --worker-count "${PARALLEL_WORKERS}" \
-      --worker-index "${worker}"
+      --worker-index "${worker}" \
+      --worker-gpu-index "${WORKER_GPU_INDEXES[worker]}" \
+      --worker-gpu-uuid "${WORKER_GPU_UUIDS[worker]}" \
+      --topology-worker-index "${worker}"
   ) >"${worker_log}" 2>&1 &
   register_child "$!"
 done
@@ -114,7 +120,8 @@ if [[ "${failed}" -ne 0 ]]; then
 fi
 
 RESULTS="${RUN_DIR}/results.jsonl"
-"${RUNNER_PYTHON}" - "${RUN_DIR}" "${RESULTS}" "${PARALLEL_WORKERS}" <<'PY'
+"${RUNNER_PYTHON}" - \
+  "${RUN_DIR}" "${RESULTS}" "${RUNS_ABS}/worker-topology.json" <<'PY'
 import json
 import fcntl
 import hashlib
@@ -124,7 +131,9 @@ from pathlib import Path
 
 run_dir = Path(sys.argv[1])
 output = Path(sys.argv[2])
-worker_count = int(sys.argv[3])
+topology = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+worker_count = int(topology["worker_count"])
+workers = topology["workers"]
 
 
 def canonical(row):
@@ -150,6 +159,19 @@ def register(row, source, seen_attempts, assignments):
         return False
     trial = (str(row["request_id"]), int(row["repetition"]))
     worker = int(row["worker_index"])
+    if int(row["worker_count"]) != worker_count:
+        raise SystemExit(f"{source}: worker_count does not match topology")
+    if worker < 0 or worker >= worker_count:
+        raise SystemExit(f"{source}: worker_index is outside topology")
+    expected = workers[worker]
+    if int(row["worker_gpu_index"]) != int(expected["gpu_index"]):
+        raise SystemExit(f"{source}: worker GPU index does not match topology")
+    if str(row["worker_gpu_uuid"]) != str(expected["gpu_uuid"]):
+        raise SystemExit(f"{source}: worker GPU UUID does not match topology")
+    if int(row["topology_worker_index"]) != worker:
+        raise SystemExit(f"{source}: topology worker index does not match")
+    if int(row["backend_port"]) != int(expected["vllm_port"]):
+        raise SystemExit(f"{source}: backend port does not match topology")
     assigned = assignments.setdefault(trial, worker)
     if assigned != worker:
         raise SystemExit(f"trial assigned to multiple workers: {trial}")

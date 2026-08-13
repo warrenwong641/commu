@@ -23,10 +23,10 @@ if ! dumpcap -D | grep -F -- "${CAPTURE_INTERFACE}" >/dev/null; then
   exit 2
 fi
 
-PARALLEL_WORKERS="${PARALLEL_WORKERS:-2}"
-VLLM_PORT_STEP="${VLLM_PORT_STEP:-1}"
+load_worker_topology
+PARALLEL_WORKERS="${TOPOLOGY_WORKER_COUNT}"
 for ((worker=0; worker<PARALLEL_WORKERS; worker++)); do
-  port=$((VLLM_PORT + worker * VLLM_PORT_STEP))
+  port="${WORKER_VLLM_PORTS[worker]}"
   echo "Checking worker ${worker} on port ${port}"
   "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli check \
     --base-url "http://${VLLM_HOST}:${port}/v1"

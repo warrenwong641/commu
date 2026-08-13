@@ -14,7 +14,7 @@ from .backends import build_backend_request
 from .common import read_jsonl, sha256_file, sha256_json, utc_now
 
 
-SCHEMA = "commu-protocol-pilot-evidence-v1"
+SCHEMA = "commu-protocol-pilot-evidence-v2"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -53,6 +53,10 @@ def validate_result_evidence(
     capture_filter: str,
     seed: int,
     max_output_tokens: int,
+    backend_port: int,
+    worker_gpu_index: int,
+    worker_gpu_uuid: str,
+    topology_worker_index: int,
 ) -> dict[str, Any]:
     if results_path.is_symlink():
         raise ValueError(f"results evidence must not be a symlink: {results_path}")
@@ -89,8 +93,7 @@ def validate_result_evidence(
         "model_version": row.get("model_version") == model,
         "manifest_sha256": row.get("manifest_sha256") == manifest_sha256,
         "backend_ip": row.get("backend_ip") == backend_ip,
-        "backend_port": row.get("backend_port")
-        == (8444 if transport == "http3" else 8443),
+        "backend_port": row.get("backend_port") == backend_port,
         "connection_mode": row.get("connection_mode") == "warm",
         "finish_reason": row.get("finish_reason") == "stop",
         "negotiated_http_version": (
@@ -106,6 +109,11 @@ def validate_result_evidence(
         "repetition": row.get("repetition") == 1,
         "worker_count": row.get("worker_count") == 1,
         "worker_index": row.get("worker_index") == 0,
+        "worker_gpu_index": row.get("worker_gpu_index") == worker_gpu_index,
+        "worker_gpu_uuid": row.get("worker_gpu_uuid") == worker_gpu_uuid,
+        "topology_worker_index": (
+            row.get("topology_worker_index") == topology_worker_index
+        ),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
@@ -218,7 +226,10 @@ def validate_result_evidence(
         "protocol_stack_sha256": protocol_stack_sha256,
         "network_mtu": network_mtu,
         "backend_ip": backend_ip,
-        "backend_port": 8444 if transport == "http3" else 8443,
+        "backend_port": backend_port,
+        "topology_worker_index": topology_worker_index,
+        "worker_gpu_index": worker_gpu_index,
+        "worker_gpu_uuid": worker_gpu_uuid,
         "capture_interface": capture_interface,
         "capture_filter": capture_filter,
         "condition": "no_compression",
@@ -316,6 +327,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture-filter", required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--max-output-tokens", type=int, required=True)
+    parser.add_argument("--backend-port", type=int, required=True)
+    parser.add_argument("--worker-gpu-index", type=int, required=True)
+    parser.add_argument("--worker-gpu-uuid", required=True)
+    parser.add_argument("--topology-worker-index", type=int, required=True)
     return parser
 
 
@@ -347,6 +362,10 @@ def main() -> int:
             capture_filter=args.capture_filter,
             seed=args.seed,
             max_output_tokens=args.max_output_tokens,
+            backend_port=args.backend_port,
+            worker_gpu_index=args.worker_gpu_index,
+            worker_gpu_uuid=args.worker_gpu_uuid,
+            topology_worker_index=args.topology_worker_index,
         )
         if args.action == "mark":
             write_evidence_marker(args.marker, evidence)

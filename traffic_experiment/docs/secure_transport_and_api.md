@@ -13,13 +13,14 @@ compression, LongLLMLingua 2x, and LongLLMLingua 4x.
 
 Run `scripts/00_install_caddy.sh` to install the pinned, checksum-verified Caddy
 binary inside the experiment directory, then run `scripts/07_start_secure_proxy.sh`.
-The script validates `configs/Caddyfile`, starts Caddy in the background, and prints
-the local CA path. The shared Caddyfile disables automatic redirect listeners, so
-the experiment never claims TCP port 80. Keep vLLM on port 8000.
+The script selects and validates the one- or two-worker Caddy config, starts
+Caddy in the background, and prints the local CA path. Both configs disable
+automatic redirect listeners, so the experiment never claims TCP port 80.
+Keep the primary vLLM worker on port 8000.
 
 - TCP 8443: TLS 1.3 plus HTTP/1.1.
 - UDP 8444: TLS 1.3 as used by QUIC plus HTTP/3 only.
-- TCP/UDP 8543/8544: identical transports routed only to the second vLLM worker.
+- TCP/UDP 8543/8544: created only in two-worker mode and routed only to worker 1.
 
 The runner uses aioquic for an HTTP/3-only client, so there is no TCP fallback.
 Run `TRANSPORT=tls13 scripts/08_run_transport_profile.sh` and then
@@ -32,9 +33,11 @@ directory and set `PROTOCOL_VALIDATION_ROOT` to a new direct child of the run ro
 named `protocol_validation-<generation>`. Admission then reads the marker from
 that isolated generation; it never reuses evidence created by a different stack.
 
-For the two-GPU pilot, use `scripts/08_run_transport_profile_parallel.sh`.
-It assigns disjoint complete sample blocks to ports 8000 and 8001 through separate
-secure listeners, merges the 72 rows, and runs tshark analysis automatically.
+For the switchable local pilot, use
+`scripts/08_run_transport_profile_parallel.sh`. It assigns disjoint complete
+sample blocks to the configured one or two workers, uses only their secure
+listeners, merges the rows, and runs tshark analysis automatically. A topology
+change requires a fresh run root and new protocol-pilot admission evidence.
 
 After starting the TLS QA pilot, `scripts/10_run_local_transport_pipeline.sh`
 can supervise it, validate all captures, then run the HTTP/3 QA pilot and the
