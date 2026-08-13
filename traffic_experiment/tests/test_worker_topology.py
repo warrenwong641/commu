@@ -31,7 +31,13 @@ def _bash_path(path: Path) -> str:
     return value
 
 
-def _resolve(tmp_path: Path, workers: str, gpus: str, port: str = "8000"):
+def _resolve(
+    tmp_path: Path,
+    workers: str,
+    gpus: str,
+    port: str = "8000",
+    secondary_port: str = "",
+):
     env_file = tmp_path / "server.env"
     env_file.write_text(
         "\n".join(
@@ -40,6 +46,7 @@ def _resolve(tmp_path: Path, workers: str, gpus: str, port: str = "8000"):
                 f'CUDA_VISIBLE_DEVICES="{gpus}"',
                 f'VLLM_PORT="{port}"',
                 'VLLM_PORT_STEP="1"',
+                f'VLLM_SECONDARY_PORT="{secondary_port}"',
                 "",
             )
         ),
@@ -80,6 +87,7 @@ def test_worker_topology_accepts_one_or_two_exact_gpu_mappings(
         ("2", "2", "8000"),
         ("2", "2,2", "8000"),
         ("1", "GPU-abc", "8000"),
+        ("1", "02", "8000"),
         ("2", "2,1", "65535"),
     ),
 )
@@ -90,6 +98,12 @@ def test_worker_topology_rejects_ambiguous_or_unsafe_mappings(
     assert completed.returncode == 2
 
 
+def test_worker_topology_rejects_secondary_backend_port_drift(tmp_path: Path):
+    completed = _resolve(tmp_path, "2", "2,1", secondary_port="9001")
+    assert completed.returncode == 2
+    assert "VLLM_SECONDARY_PORT" in completed.stderr
+
+
 def test_single_caddy_config_has_only_primary_listener_and_backend():
     single = (ROOT / "configs" / "Caddyfile.single").read_text(encoding="utf-8")
     dual = (ROOT / "configs" / "Caddyfile").read_text(encoding="utf-8")
@@ -98,6 +112,66 @@ def test_single_caddy_config_has_only_primary_listener_and_backend():
     assert ":8543" not in single and ":8544" not in single
     assert "VLLM_SECONDARY_PORT" not in single
     assert ":8543" in dual and ":8544" in dual
+
+
+def test_measured_topology_consumes_integrated_lib_port_and_uuid_arrays(
+    tmp_path: Path,
+):
+    env_file = tmp_path / "server.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                'PARALLEL_WORKERS="2"',
+                'CUDA_VISIBLE_DEVICES="2,1"',
+                'VLLM_PORT="8000"',
+                'VLLM_SECONDARY_PORT="8001"',
+                'VLLM_PORT_STEP="1"',
+                'VLLM_MODEL="Qwen/Qwen3.5-9B"',
+                'VLLM_SERVED_MODEL_NAME="Qwen/Qwen3.5-9B"',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_nvidia_smi = bin_dir / "nvidia-smi"
+    fake_nvidia_smi.write_bytes(
+        "\n".join(
+            (
+                "#!/usr/bin/env bash",
+                'case "$*" in',
+                '  *"-i 2"*) echo "GPU-2222" ;;',
+                '  *"-i 1"*) echo "GPU-1111" ;;',
+                "  *) exit 2 ;;",
+                "esac",
+                "",
+            )
+        ).encode("utf-8"),
+    )
+    fake_nvidia_smi.chmod(0o755)
+    worker_lib = ROOT / "scripts" / "worker_topology.sh"
+    command = (
+        f'export PATH="{_bash_path(bin_dir)}:$PATH"; '
+        f'export EXPERIMENT_ENV_FILE="{_bash_path(env_file)}"; '
+        f'source "{_bash_path(LIB)}"; '
+        f'source "{_bash_path(worker_lib)}"; '
+        "load_measured_worker_topology; "
+        "printf '%s|%s|%s|%s\\n' "
+        '"$(IFS=,; printf \'%s\' "${WORKER_GPU_INDEXES[*]}")" '
+        '"$(IFS=,; printf \'%s\' "${WORKER_GPU_UUIDS[*]}")" '
+        '"$(IFS=,; printf \'%s\' "${WORKER_TLS_PORTS[*]}")" '
+        '"$(IFS=,; printf \'%s\' "${WORKER_HTTP3_PORTS[*]}")"'
+    )
+    completed = subprocess.run(
+        [_bash(), "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "2,1|GPU-2222,GPU-1111|8443,8543|8444,8544"
 
 
 from traffic_experiment.traffic_measure.cli import _parser

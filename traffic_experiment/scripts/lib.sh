@@ -49,12 +49,12 @@ load_worker_topology() {
     echo "PARALLEL_WORKERS must be 1 or 2; got '${worker_count}'." >&2
     return 2
   fi
-  if [[ ! "${base_port}" =~ ^[0-9]+$ ||
+  if [[ ! "${base_port}" =~ ^[1-9][0-9]*$ ||
     "${base_port}" -lt 1 || "${base_port}" -gt 65535 ]]; then
     echo "VLLM_PORT must be an integer from 1 to 65535; got '${base_port:-unset}'." >&2
     return 2
   fi
-  if [[ ! "${port_step}" =~ ^[0-9]+$ || "${port_step}" -lt 1 ]]; then
+  if [[ ! "${port_step}" =~ ^[1-9][0-9]*$ ]]; then
     echo "VLLM_PORT_STEP must be a positive integer; got '${port_step}'." >&2
     return 2
   fi
@@ -69,7 +69,7 @@ load_worker_topology() {
     return 2
   fi
   for gpu_id in "${WORKER_GPU_IDS[@]}"; do
-    if [[ ! "${gpu_id}" =~ ^[0-9]+$ ]]; then
+    if [[ ! "${gpu_id}" =~ ^(0|[1-9][0-9]*)$ ]]; then
       echo "CUDA_VISIBLE_DEVICES entries must be physical GPU indices; got '${gpu_id}'." >&2
       return 2
     fi
@@ -91,6 +91,15 @@ load_worker_topology() {
     fi
     WORKER_VLLM_PORTS+=("${port}")
   done
+  if [[ "${worker_count}" -eq 2 ]]; then
+    if [[ -n "${VLLM_SECONDARY_PORT:-}" &&
+      "${VLLM_SECONDARY_PORT}" != "${WORKER_VLLM_PORTS[1]}" ]]; then
+      echo "VLLM_SECONDARY_PORT must equal computed worker-1 port ${WORKER_VLLM_PORTS[1]}; got '${VLLM_SECONDARY_PORT}'." >&2
+      return 2
+    fi
+    VLLM_SECONDARY_PORT="${WORKER_VLLM_PORTS[1]}"
+    export VLLM_SECONDARY_PORT
+  fi
 }
 
 load_worker_gpu_identities() {

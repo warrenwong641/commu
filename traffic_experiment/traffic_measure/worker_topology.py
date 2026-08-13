@@ -138,15 +138,20 @@ def ensure_worker_topology(output_root: Path, topology: dict[str, Any]) -> Path:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        # Make the inode read-only before publishing it through the hard link.
-        # A crash or concurrent verifier can therefore never observe a
-        # writable marker at the final path.
-        os.chmod(temporary, 0o444)
+        # On the Linux measurement host, make the inode read-only before
+        # publishing it through the hard link. A crash or concurrent verifier
+        # can therefore never observe a writable marker at the final path.
+        # Windows cannot unlink a read-only hard link, so local Windows tests
+        # publish, unlink the temporary name, then apply read-only mode.
+        if os.name != "nt":
+            os.chmod(temporary, 0o444)
         try:
             os.link(temporary, marker)
         except FileExistsError:
             return ensure_worker_topology(root, topology)
         temporary.unlink()
+        if os.name == "nt":
+            os.chmod(marker, 0o444)
         if os.name != "nt":
             directory_fd = os.open(root, os.O_RDONLY)
             try:
