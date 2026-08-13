@@ -41,6 +41,8 @@ TLS records, and server-side behavior are not controlled by the researcher.
   pilot and acceptance gate.
 - `docs/privileged_protocol_pilots.md`: hash-verified, root-owned release path
   for the namespace TLS/HTTP/3 pilots without executing the mutable checkout.
+- docs/privileged_full_matrix.md: separately scoped, hash-verified one-GPU
+  full-matrix release, supervisor, resume, and sealing policy.
 - `docs/cost_time_estimates.md`: formulas and numerical estimates.
 - `docs/local_server_handoff.md`: copy-to-server installation and run commands.
 - `docs/lab_server_migration.md`: final lab deployment, network controls, and
@@ -109,6 +111,11 @@ the weighted average is 5,250 input tokens per call.
 - `scripts/24_create_client_bundle.sh`: credential-free physical-client bundle.
 - `scripts/25_physical_firewall.sh`: narrow apply/status/cleanup lifecycle for
   project-owned firewall rules.
+- scripts/29_create_privileged_matrix_bundle.sh: credential-free one-GPU
+  matrix bundle builder.
+- scripts/30_install_privileged_matrix_release.sh: authenticated root
+  installer for the separate matrix release.
+- scripts/31_run_privileged_matrix.sh: fixed 2,808-call root supervisor.
 - `scripts/discover_capture_interface.sh`: capture-interface discovery.
 - `scripts/run_physical_client.sh`: physical-client pilot runner.
 
