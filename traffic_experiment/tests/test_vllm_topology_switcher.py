@@ -131,22 +131,65 @@ def test_configs_freeze_before_key_recovery_and_are_never_sourced():
 def test_unused_frozen_configs_are_cleaned_without_deleting_live_config():
     text = source()
     cleanup = text[
-        text.index("remove_unused_frozen_config() {") :
+        text.index("is_managed_frozen_config() {") :
         text.index("validate_controller() {")
     ]
     assert '"${path}" != "${KEEP_FROZEN}"' in cleanup
-    assert '"${STATE_DIR}"/.previous.*.env|"${STATE_DIR}"/.target.*.env' in cleanup
+    assert '"${parent}" == "${STATE_DIR}"' in cleanup
+    assert '"${name}" =~ ^\\.(previous|target)\\.[A-Za-z0-9]{6}\\.env$' in cleanup
+    assert 'is_managed_frozen_config "${path}"' in cleanup
     assert '[[ -f "${path}" && ! -L "${path}"' in cleanup
     assert 'rm -- "${path}"' in cleanup
     assert 'trap cleanup_switcher_exit EXIT' in text
+    assert 'remove_unused_frozen_config "${REPLACED_FROZEN}"' in cleanup
 
     switch = text[text.index('stop_controller "${OLD_C}"') :]
+    replaced = switch.index('REPLACED_FROZEN="${PREV_ORIGINAL}"')
     target_keep = switch.index('KEEP_FROZEN="${TARGET_FROZEN}"')
     target_start = switch.index('start_service "${TARGET_PATH}"')
     rollback_keep = switch.index('KEEP_FROZEN="${PREV_FROZEN}"')
     rollback_start = switch.index('start_service "${PREV_PATH}"')
-    assert target_keep < target_start < rollback_keep < rollback_start
+    assert replaced < target_keep < target_start < rollback_keep < rollback_start
     assert switch.count('KEEP_FROZEN=""') >= 4
+
+
+def test_replaced_active_frozen_config_is_registered_only_after_exact_stop():
+    text = source()
+    switch = text[text.index('OLD_C="${VC}"') :]
+    stop = switch.index('stop_controller "${OLD_C}"')
+    register = switch.index('REPLACED_FROZEN="${PREV_ORIGINAL}"')
+    start = switch.index('start_service "${TARGET_PATH}"')
+    assert stop < register < start
+    assert 'if is_managed_frozen_config "${PREV_ORIGINAL}"' in switch[stop:register]
+
+
+def test_state_directory_is_derived_from_canonical_state_path():
+    text = source()
+    initialization = text[
+        text.index('[[ -n "${STATE_FILE}"') :
+        text.index('for c in awk curl git')
+    ]
+    canonicalize = initialization.index(
+        'STATE_FILE="$(canonical_regular "${STATE_FILE}")"'
+    )
+    derive_directory = initialization.index(
+        'STATE_DIR="$(dirname -- "${STATE_FILE}")"'
+    )
+    assert canonicalize < derive_directory
+    assert initialization.count('STATE_DIR="$(dirname -- "${STATE_FILE}")"') == 1
+
+
+def test_managed_frozen_config_match_requires_direct_parent_and_exact_name():
+    text = source()
+    helper = text[
+        text.index("is_managed_frozen_config() {") :
+        text.index("remove_unused_frozen_config() {")
+    ]
+    assert 'parent="$(dirname -- "${path}")"' in helper
+    assert 'name="$(basename -- "${path}")"' in helper
+    assert '"${parent}" == "${STATE_DIR}"' in helper
+    assert '"${name}" =~ ^\\.(previous|target)\\.[A-Za-z0-9]{6}\\.env$' in helper
+    assert '"${STATE_DIR}"/.target.*.env' not in helper
 
 
 def test_stop_is_exact_and_gpu_engines_are_never_signalled():

@@ -18,6 +18,7 @@ TIMEOUT="${VLLM_SWITCH_TIMEOUT_SECONDS:-300}"
 PREV_FROZEN=""
 TARGET_FROZEN=""
 KEEP_FROZEN=""
+REPLACED_FROZEN=""
 LOCK_DIR=""
 
 usage() {
@@ -118,14 +119,22 @@ load_cfg() { local p="$1" v src; for v in PATH SHA WORKERS GPU_CSV HOST PORT STE
 
 freeze_config() { local source="$1" hash="$2" label="$3" tmp; tmp="$(mktemp "${STATE_DIR}/.${label}.XXXXXX.env")" || return 1; cp -- "${source}" "${tmp}" || { rm -f -- "${tmp}"; return 1; }; chmod 400 "${tmp}" || { rm -f -- "${tmp}"; return 1; }; [[ "$(sha256_file "${source}")" == "${hash}" && "$(sha256_file "${tmp}")" == "${hash}" ]] || { rm -f -- "${tmp}"; return 1; }; sync -f "${tmp}" || { rm -f -- "${tmp}"; return 1; }; printf '%s\n' "${tmp}"; }
 
+is_managed_frozen_config() {
+  local path="$1" parent name
+  parent="$(dirname -- "${path}")" || return 1
+  name="$(basename -- "${path}")" || return 1
+  [[ "${parent}" == "${STATE_DIR}" &&
+    "${name}" =~ ^\.(previous|target)\.[A-Za-z0-9]{6}\.env$ ]]
+}
+
 remove_unused_frozen_config() {
   local path="$1"
   [[ -n "${path}" && "${path}" != "${KEEP_FROZEN}" ]] || return 0
   [[ ! -e "${path}" && ! -L "${path}" ]] && return 0
-  case "${path}" in
-    "${STATE_DIR}"/.previous.*.env|"${STATE_DIR}"/.target.*.env) ;;
-    *) printf 'Preserving unexpected frozen-config path: %s\n' "${path}" >&2; return 1 ;;
-  esac
+  is_managed_frozen_config "${path}" || {
+    printf 'Preserving unexpected frozen-config path: %s\n' "${path}" >&2
+    return 1
+  }
   [[ -f "${path}" && ! -L "${path}" &&
     "$(stat -c %u -- "${path}")" == "$(id -u)" &&
     "$(stat -c %h -- "${path}")" == 1 ]] || {
@@ -140,6 +149,7 @@ cleanup_switcher_exit() {
   trap - EXIT
   remove_unused_frozen_config "${PREV_FROZEN}" || true
   remove_unused_frozen_config "${TARGET_FROZEN}" || true
+  remove_unused_frozen_config "${REPLACED_FROZEN}" || true
   [[ -z "${LOCK_DIR}" ]] || rmdir -- "${LOCK_DIR}" 2>/dev/null || true
   exit "${status}"
 }
@@ -168,7 +178,7 @@ write_state() { local config="$1" result="$2" tmp i repo; tmp="$(mktemp "${STATE
 prepare_new_log() { local parent; parent="$(dirname -- "$1")"; [[ "$1" = /* && -d "${parent}" && ! -L "${parent}" && "$(stat -c %u -- "${parent}")" == "$(id -u)" && ! -e "$1" && ! -L "$1" ]] || return 1; (set -o noclobber; : >"$1") 2>/dev/null || return 1; [[ -f "$1" && ! -L "$1" && "$(stat -c %u -- "$1")" == "$(id -u)" && "$(stat -c %h -- "$1")" == 1 ]] || return 1; chmod 600 "$1"; }
 
 if [[ "${ACTION}" == validate-config ]]; then [[ -n "${TARGET_ENV}" ]] || die "--target-env required"; parse_config "${TARGET_ENV}" false; printf 'VLLM_TOPOLOGY_CONFIG_OK workers=%s gpu_indices=%s ports=' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; (IFS=,; printf '%s\n' "${CFG_PORTS[*]}"); exit 0; fi
-[[ -n "${STATE_FILE}" && "${STATE_FILE}" = /* ]] || die "absolute --state required"; STATE_DIR="$(dirname -- "${STATE_FILE}")"; [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" && "$(stat -c %u -- "${STATE_DIR}")" == "$(id -u)" ]] || die "state directory must be real and user-owned"; STATE_FILE="$(canonical_regular "${STATE_FILE}")" || die "state must be an existing regular non-symlink file"; [[ "$(stat -c %u -- "${STATE_FILE}")" == "$(id -u)" && "$(stat -c %h -- "${STATE_FILE}")" == 1 ]] || die "state must be singly-linked and user-owned"
+[[ -n "${STATE_FILE}" && "${STATE_FILE}" = /* ]] || die "absolute --state required"; STATE_FILE="$(canonical_regular "${STATE_FILE}")" || die "state must be an existing regular non-symlink file"; STATE_DIR="$(dirname -- "${STATE_FILE}")"; [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" && "$(stat -c %u -- "${STATE_DIR}")" == "$(id -u)" ]] || die "state directory must be real and user-owned"; [[ "$(stat -c %u -- "${STATE_FILE}")" == "$(id -u)" && "$(stat -c %h -- "${STATE_FILE}")" == 1 ]] || die "state must be singly-linked and user-owned"
 for c in awk curl git mktemp nvidia-smi nohup readlink setsid sha256sum ss stat sync; do command -v "${c}" >/dev/null || die "missing command: ${c}"; done
 LOCK_DIR="${STATE_FILE}.lock.d"; mkdir -- "${LOCK_DIR}" 2>/dev/null || die "another operation holds the state lock"; [[ ! -L "${LOCK_DIR}" && "$(stat -c %F -- "${LOCK_DIR}")" == directory && "$(stat -c %u -- "${LOCK_DIR}")" == "$(id -u)" ]] || die "unsafe lock"; trap cleanup_switcher_exit EXIT
 verify_state || die "state/live identity verification failed; nothing signalled"
@@ -184,6 +194,9 @@ audit_target_gpus || die "target GPU occupancy changed before cutover"
 OLD_C="${VC}"; OLD_T="${VT}"; OLD_CONFIG="${PREV_ORIGINAL}"; OLD_UID="${PREV_UID}"; OLD_AP=("${VAP[@]}"); OLD_AT=("${VAT[@]}"); OLD_EP=("${VEP[@]}"); OLD_ET=("${VET[@]}")
 if [[ -z "${LOG_FILE}" ]]; then LOG_FILE="${STATE_DIR}/vllm-switch-$(date -u +%Y%m%dT%H%M%SZ).log"; fi; prepare_new_log "${LOG_FILE}" || die "log must be a new user-owned regular file"
 stop_controller "${OLD_C}" "${OLD_T}" "${OLD_CONFIG}" "${OLD_UID}" || die "old service did not stop completely; state preserved"
+if is_managed_frozen_config "${PREV_ORIGINAL}"; then
+  REPLACED_FROZEN="${PREV_ORIGINAL}"
+fi
 load_cfg TARGET; target_ok=false; target_launched=false
 if configured_gpus_empty; then
   KEEP_FROZEN="${TARGET_FROZEN}"
