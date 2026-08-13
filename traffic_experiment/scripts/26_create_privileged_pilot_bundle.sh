@@ -120,7 +120,11 @@ trap cleanup EXIT
 RELEASE_ROOT="${BUILD_ROOT}/release"
 mkdir -p "${RELEASE_ROOT}/repository" "${RELEASE_ROOT}/config" "${RELEASE_ROOT}/policy"
 
-git -C "${REPOSITORY_ROOT}" archive --format=tar "${REPOSITORY_SHA}" |
+# Do not let a builder's global core.autocrlf/core.eol settings rewrite the
+# committed bytes. The reviewed-code digest must be identical on Linux and on
+# Git for Windows for the same Git tree.
+git -c core.autocrlf=false -c core.eol=lf \
+  -C "${REPOSITORY_ROOT}" archive --format=tar "${REPOSITORY_SHA}" |
   tar -xf - -C "${RELEASE_ROOT}/repository"
 
 # This manifest is the independently attestable reviewed-code anchor. The
@@ -133,7 +137,7 @@ git -C "${REPOSITORY_ROOT}" archive --format=tar "${REPOSITORY_SHA}" |
   find repository -type f \
     ! -path 'repository/traffic_experiment/artifacts/*' \
     ! -path 'repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh' \
-    -print0 | LC_ALL=C sort -z | xargs -0 sha256sum -- \
+    -print0 | LC_ALL=C sort -z | xargs -0 sha256sum --text -- \
     >REVIEWED_CODE_FILES.sha256
 )
 
@@ -240,7 +244,7 @@ EOF
   cd "${RELEASE_ROOT}"
   find . -type f ! -name RELEASE_FILES.sha256 -print0 |
     LC_ALL=C sort -z |
-    xargs -0 sha256sum -- >RELEASE_FILES.sha256
+    xargs -0 sha256sum --text -- >RELEASE_FILES.sha256
   sha256sum --check --strict --quiet RELEASE_FILES.sha256
 )
 

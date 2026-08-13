@@ -116,7 +116,9 @@ def test_privileged_config_rejects_shell_secrets_and_unsafe_overrides(tmp_path: 
 def test_release_builder_is_credential_free_and_binds_runtime_and_caddy() -> None:
     text = BUILDER.read_text(encoding="utf-8")
     assert '[[ "${EUID}" -ne 0 ]]' in text
-    assert "git -C \"${REPOSITORY_ROOT}\" archive" in text
+    assert "git -c core.autocrlf=false -c core.eol=lf" in text
+    assert '-C "${REPOSITORY_ROOT}" archive' in text
+    assert "xargs -0 sha256sum --text --" in text
     assert 'cp -aL -- "${RUNNER_WHEELHOUSE}"' in text
     assert "wheelhouse filenames/coverage differ" in text
     assert 'cp -- "${CADDY_BIN}"' in text
@@ -124,6 +126,32 @@ def test_release_builder_is_credential_free_and_binds_runtime_and_caddy() -> Non
     assert "RELEASE_FILES.sha256" in text
     assert "LOCAL_VLLM_API_KEY" not in text
     assert "18_run_lab_matrix" not in text
+
+
+def test_review_archive_is_independent_of_ambient_git_line_endings() -> None:
+    def archive_digest(autocrlf: str, eol: str) -> bytes:
+        archive = subprocess.check_output(
+            [
+                "git",
+                "-c",
+                f"core.autocrlf={autocrlf}",
+                "-c",
+                f"core.eol={eol}",
+                # These are the builder's final, authoritative overrides.
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "core.eol=lf",
+                "-C",
+                str(ROOT),
+                "archive",
+                "--format=tar",
+                "HEAD",
+            ]
+        )
+        return hashlib.sha256(archive).digest()
+
+    assert archive_digest("true", "crlf") == archive_digest("false", "lf")
 
 
 def test_installer_pins_bundle_rejects_links_and_hardens_before_execution() -> None:
