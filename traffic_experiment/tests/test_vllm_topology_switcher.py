@@ -167,7 +167,7 @@ def test_state_directory_is_derived_from_canonical_state_path():
     text = source()
     initialization = text[
         text.index('[[ -n "${STATE_FILE}"') :
-        text.index('for c in awk curl git')
+        text.index('GLOBAL_LOCK_FILE="/run/lock/commu-protocol-pilots/')
     ]
     canonicalize = initialization.index(
         'STATE_FILE="$(canonical_regular "${STATE_FILE}")"'

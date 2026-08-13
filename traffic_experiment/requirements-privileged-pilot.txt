@@ -1,0 +1,5 @@
+# Runtime roots for the privileged, protocol-pilots-only release.
+# Compile for CPython 3.12 / x86_64 Linux with wheels only; see the lock header.
+aioquic==1.3.0
+httpx==0.28.1
+PyYAML==6.0.3
