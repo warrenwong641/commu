@@ -138,7 +138,21 @@ for worker 0, while only the two-worker profile uses port 8001. Use a distinct
 `RUNS_ROOT` for each topology so results produced with different worker/GPU
 blocking factors cannot be resumed or merged together.
 
-After the initial service has a reviewed active-state record, switch it with:
+Start from `server.vllm-single.env.example` or
+`server.vllm-dual.env.example`; do not pass the broader `server.env.example`
+directly to the switcher because that general-purpose example contains inline
+comments. Validate each populated profile before the maintenance window:
+
+```bash
+bash scripts/24_switch_vllm_topology.sh validate-config \
+  --target-env /absolute/path/to/profile.env
+```
+
+The switcher deliberately does not adopt an arbitrary unrecorded process. The
+initial service must already have a reviewed, user-owned active-state record.
+It accepts the exact legacy `commu-vllm-service-state-v1` record used by the
+lab deployment, derives the missing live identities, and publishes v2 state
+after the first successful switch. Switch it with:
 
 ```bash
 bash scripts/24_switch_vllm_topology.sh check \
@@ -170,8 +184,12 @@ the API key is recovered.
 
 Treat a topology change as a service maintenance event. Finish or explicitly
 stop the current measured run first, then create a fresh run root after the
-switch. Do not change the target environment file while a switch is in
-progress.
+switch. Before switching, stop any recorded topology-dependent Caddy process
+with `scripts/07_start_secure_proxy.sh stop` and
+`scripts/23_server_physical_listener.sh stop`; verify their recorded ports are
+closed. After the vLLM switch succeeds, restart only the proxy/listener profile
+needed for the new topology and run its status check. Do not change the target
+environment file while a switch is in progress.
 
 Worker order follows `CUDA_VISIBLE_DEVICES`: worker 0 uses port 8000, and the
 optional worker 1 uses port 8001.

@@ -10,6 +10,10 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "24_switch_vllm_topology.sh"
+PROFILE_EXAMPLES = (
+    ROOT / "server.vllm-single.env.example",
+    ROOT / "server.vllm-dual.env.example",
+)
 
 
 def source() -> str:
@@ -61,6 +65,12 @@ def test_accepts_exact_topologies(tmp_path: Path, workers: int, gpus: str, ports
     result = validate(config(tmp_path, workers, gpus))
     assert result.returncode == 0, result.stderr
     assert f"workers={workers}" in result.stdout and f"gpu_indices={gpus}" in result.stdout and ports in result.stdout
+
+
+@pytest.mark.parametrize("example", PROFILE_EXAMPLES)
+def test_switch_profile_examples_are_parser_compatible(example: Path):
+    result = validate(example)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(("workers", "gpus", "message"), (
