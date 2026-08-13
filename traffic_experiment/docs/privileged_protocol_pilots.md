@@ -112,8 +112,10 @@ bash traffic_experiment/scripts/26_create_privileged_pilot_bundle.sh \
 ```
 
 The builder refuses tracked or staged changes, validates the manifest hashes,
-verifies exact CPython-3.12/Linux wheel bytes, rejects links, and prints the
-repository and bundle SHA values. It never reads the vLLM API key.
+forces Git archive and checksum text modes so the reviewed-code manifest does
+not depend on a builder's `core.autocrlf`/`core.eol` settings, verifies exact
+CPython-3.12/Linux wheel bytes, rejects links, and prints the repository and
+bundle SHA values. It never reads the vLLM API key.
 
 ## Install and run with sudo
 
