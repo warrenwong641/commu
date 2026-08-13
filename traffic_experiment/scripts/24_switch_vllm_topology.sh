@@ -84,6 +84,11 @@ parse_config() {
     fi
     [[ -z "${PARSED[${name}]+x}" ]] || die "duplicate config assignment: ${name}"
     case "${name}" in LOCAL_VLLM_API_KEY|VLLM_API_KEY|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|OPENROUTER_API_KEY|GEMINI_API_KEY) die "credential assignment found in config" ;; esac
+    case "${name}" in
+      LOCOMO_DATA_DIR|CAPTURE_INTERFACE|VLLM_HOST|VLLM_PORT|VLLM_SECONDARY_PORT|VLLM_MODEL|VLLM_SERVED_MODEL_NAME|VLLM_MODEL_REVISION|CUDA_VISIBLE_DEVICES|PARALLEL_WORKERS|VLLM_PORT_STEP|TENSOR_PARALLEL_SIZE|MAX_MODEL_LEN|GPU_MEMORY_UTILIZATION|VLLM_BIN|LD_LIBRARY_PATH|RUNNER_PYTHON|COMPRESSOR_MODEL|COMPRESSOR_DEVICE|MANIFEST_PATH|SUMMARY_MANIFEST_PATH|MANIFEST_SHA256|SUMMARY_MANIFEST_SHA256|RUNS_ROOT|RANDOM_SEED|MAX_OUTPUT_TOKENS|SUMMARY_MAX_OUTPUT_TOKENS|REQUEST_TIMEOUT_SECONDS|MAIN_REPETITIONS|PROFILE|OBSERVATION_SECONDS|SUMMARY_OBSERVATION_SECONDS|CAPTURE_STOP_ON_RESPONSE|CAPTURE_STARTUP_DELAY_SECONDS|CLIENT_NETNS|HOST_VETH|CLIENT_VETH|HOST_VETH_CIDR|CLIENT_VETH_CIDR|SECURE_PROXY_HOST|CAPTURE_INTERFACE_OVERRIDE|CADDY_RUN_DIR|NETWORK_MTU|NETWORK_RTT_MS|NETWORK_UPLINK_MBIT|NETWORK_DOWNLINK_MBIT|NETWORK_QUEUE_PACKETS|LAB_NETWORKS|LINK_CALIBRATION_SECONDS|LAB_QA_SAMPLES|LAB_SUMMARY_SAMPLES|LAB_REPETITIONS|LAB_TRANSPORTS|LAB_WORKLOADS|CONNECTION_MODE|SESSION_TURNS|SESSION_START_INTERVAL_SECONDS|SESSION_BUDGET_SECONDS|SESSION_SEGMENT_SECONDS|SESSION_CONDITION|OPENROUTER_MODEL|OPENROUTER_PROVIDER|OPENROUTER_BASE_URL|GEMINI_MODEL|GEMINI_BASE_URL) ;;
+      *) die "unknown config assignment: ${name}" ;;
+    esac
+    [[ -z "${was_export}" || "${name}" == LD_LIBRARY_PATH ]] || die "only LD_LIBRARY_PATH may use export"
     PARSED["${name}"]="${value}"
     [[ -z "${was_export}" ]] || EXPORTED["${name}"]=true
   done <"${path}"
@@ -148,11 +153,24 @@ audit_target_gpus || die "target GPU occupancy changed before cutover"
 OLD_C="${VC}"; OLD_T="${VT}"; OLD_CONFIG="${PREV_ORIGINAL}"; OLD_UID="${PREV_UID}"; OLD_AP=("${VAP[@]}"); OLD_AT=("${VAT[@]}"); OLD_EP=("${VEP[@]}"); OLD_ET=("${VET[@]}")
 if [[ -z "${LOG_FILE}" ]]; then LOG_FILE="${STATE_DIR}/vllm-switch-$(date -u +%Y%m%dT%H%M%SZ).log"; fi; prepare_new_log "${LOG_FILE}" || die "log must be a new user-owned regular file"
 stop_controller "${OLD_C}" "${OLD_T}" "${OLD_CONFIG}" "${OLD_UID}" || die "old service did not stop completely; state preserved"
-load_cfg TARGET; target_ok=false; start_service "${TARGET_PATH}" "${TARGET_SHA}" "${VKEY}" "${LOG_FILE}" && wait_ready "${TARGET_PATH}" "${VKEY}" && target_ok=true
+load_cfg TARGET; target_ok=false; target_launched=false
+if configured_gpus_empty; then
+  if start_service "${TARGET_PATH}" "${TARGET_SHA}" "${VKEY}" "${LOG_FILE}"; then
+    target_launched=true
+    wait_ready "${TARGET_PATH}" "${VKEY}" && target_ok=true
+  elif [[ -n "${START_PID}" ]]; then
+    target_launched=true
+  fi
+else
+  printf 'Target GPU occupancy changed after old-service shutdown; target start refused.\n' >&2
+fi
 if [[ "${target_ok}" == true ]] && write_state "${TARGET_PATH}" switched; then unset VKEY; printf 'VLLM_TOPOLOGY_SWITCH_OK workers=%s gpu_indices=%s\n' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; exit 0; fi
 printf 'Target startup or state publication failed; rolling back. Diagnostics: %s\n' "${LOG_FILE}" >&2
-if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)"; then stop_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)" || die "verified target could not be fully stopped"; else for p in 8000 8001; do port_closed "${p}" || die "unowned listener remains; rollback refused"; done; configured_gpus_empty || die "target GPU process remains; rollback refused"; fi
-load_cfg PREV; RLOG="${LOG_FILE}.rollback"; prepare_new_log "${RLOG}" || die "could not create rollback log"
+if [[ "${target_launched}" == true ]]; then
+  if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)"; then stop_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)" || die "verified target could not be fully stopped"; else for p in 8000 8001; do port_closed "${p}" || die "unowned listener remains; rollback refused"; done; configured_gpus_empty || die "target GPU process remains; rollback refused"; fi
+fi
+load_cfg PREV; configured_gpus_empty || die "previous topology GPUs are no longer free; rollback start refused"
+RLOG="${LOG_FILE}.rollback"; prepare_new_log "${RLOG}" || die "could not create rollback log"
 if start_service "${PREV_PATH}" "${PREV_SHA}" "${VKEY}" "${RLOG}" && wait_ready "${PREV_PATH}" "${VKEY}"; then
   if write_state "${PREV_PATH}" rolled_back; then unset VKEY; printf 'ERROR: target failed; previous topology restored\n' >&2; exit 1; fi
   # Publication is part of the transaction: never leave an unrecorded service.

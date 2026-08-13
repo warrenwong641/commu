@@ -83,6 +83,24 @@ def test_parser_is_inert_and_credentials_are_rejected(tmp_path: Path):
     assert "forbidden" not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(
+    "assignment",
+    (
+        'LD_PRELOAD="/tmp/hostile.so"',
+        'PATH="/tmp/hostile"',
+        'BASH_ENV="/tmp/hostile.sh"',
+        'PYTHONPATH="/tmp/hostile"',
+        'export RUNNER_PYTHON="/tmp/python"',
+    ),
+)
+def test_parser_rejects_unknown_or_unapproved_export_assignments(
+    tmp_path: Path, assignment: str
+):
+    result = validate(config(tmp_path, 1, "2", assignment))
+    assert result.returncode == 2
+    assert "unknown config assignment" in result.stderr or "only LD_LIBRARY_PATH" in result.stderr
+
+
 def test_configs_freeze_before_key_recovery_and_are_never_sourced():
     text = source()
     switch = text[text.rindex('[[ -n "${TARGET_ENV}" ]] || die "--target-env required"') :]
@@ -111,6 +129,18 @@ def test_ss_target_gpu_and_identity_checks_fail_closed():
     assert '[[ "${allowed}" == true ]] || return 1' in text
     assert 'identity_gone "${VAP[i]}" "${VAT[i]}" || return 1' in text
     assert 'identity_gone "${VEP[i]}" "${VET[i]}" || return 1' in text
+
+
+def test_target_gpu_is_reaudited_after_stop_immediately_before_start():
+    text = source()
+    stop_index = text.index('stop_controller "${OLD_C}"')
+    empty_index = text.index("if configured_gpus_empty; then", stop_index)
+    start_index = text.index('start_service "${TARGET_PATH}"', empty_index)
+    assert stop_index < empty_index < start_index
+    between = text[empty_index:start_index]
+    assert "configured_gpus_empty" in between
+    assert "target start refused" in text
+    assert 'load_cfg PREV; configured_gpus_empty || die "previous topology GPUs are no longer free; rollback start refused"' in text
 
 
 def test_state_publication_is_durable_and_transactional():
