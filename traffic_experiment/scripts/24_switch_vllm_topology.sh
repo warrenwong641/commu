@@ -60,6 +60,7 @@ arg_pair() { local key="$1" value="$2"; shift 2; local -a args=("$@"); local i; 
 controller_launcher_matches() { local pid="$1"; shift; local arg candidate cwd; cwd="$(readlink -e -- "/proc/${pid}/cwd")" || return 1; for arg in "$@"; do [[ "$(basename -- "${arg}")" == "$(basename -- "${LAUNCHER}")" ]] || continue; if [[ "${arg}" = /* ]]; then candidate="$(readlink -e -- "${arg}" 2>/dev/null)"; else candidate="$(readlink -e -- "${cwd}/${arg}" 2>/dev/null)"; fi; [[ "${candidate}" == "${LAUNCHER}" ]] && return 0; done; return 1; }
 is_descendant() { local pid="$1" root="$2" parent steps=0; while [[ "${pid}" =~ ^[0-9]+$ && "${pid}" -gt 1 && "${steps}" -lt 128 ]]; do [[ "${pid}" == "${root}" ]] && return 0; parent="$(proc_ppid "${pid}" 2>/dev/null || true)"; [[ "${parent}" =~ ^[0-9]+$ && "${parent}" != "${pid}" ]] || return 1; pid="${parent}"; ((steps+=1)); done; return 1; }
 identity_gone() { [[ ! -r "/proc/$1/stat" || "$(proc_ticks "$1" 2>/dev/null)" != "$2" || "$(proc_state "$1" 2>/dev/null)" == Z ]]; }
+captured_start_gone() { local pid="$1" ticks="$2"; [[ -n "${pid}" ]] || return 0; if [[ -n "${ticks}" ]]; then identity_gone "${pid}" "${ticks}"; else [[ ! -r "/proc/${pid}/stat" ]] && ! kill -0 "${pid}" 2>/dev/null; fi; }
 
 ss_rows() { local output; output="$(ss "$@" 2>/dev/null)" || return 1; printf '%s' "${output}"; }
 port_closed() { local rows; rows="$(ss_rows -H -ltn "sport = :$1")" || return 1; [[ -z "${rows}" ]]; }
@@ -167,7 +168,7 @@ fi
 if [[ "${target_ok}" == true ]] && write_state "${TARGET_PATH}" switched; then unset VKEY; printf 'VLLM_TOPOLOGY_SWITCH_OK workers=%s gpu_indices=%s\n' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; exit 0; fi
 printf 'Target startup or state publication failed; rolling back. Diagnostics: %s\n' "${LOG_FILE}" >&2
 if [[ "${target_launched}" == true ]]; then
-  if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)"; then stop_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)" || die "verified target could not be fully stopped"; else for p in 8000 8001; do port_closed "${p}" || die "unowned listener remains; rollback refused"; done; configured_gpus_empty || die "target GPU process remains; rollback refused"; fi
+  if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)"; then stop_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)" || die "verified target could not be fully stopped"; else captured_start_gone "${START_PID}" "${START_TICKS}" || die "captured target controller identity is still live but unverifiable; rollback refused"; for p in 8000 8001; do port_closed "${p}" || die "unowned listener remains; rollback refused"; done; configured_gpus_empty || die "target GPU process remains; rollback refused"; fi
 fi
 load_cfg PREV; configured_gpus_empty || die "previous topology GPUs are no longer free; rollback start refused"
 RLOG="${LOG_FILE}.rollback"; prepare_new_log "${RLOG}" || die "could not create rollback log"
@@ -179,6 +180,7 @@ fi
 if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${PREV_PATH}" "$(id -u)"; then
   stop_controller "${START_PID}" "${START_TICKS}" "${PREV_PATH}" "$(id -u)" || die "failed rollback could not be stopped"
 else
+  captured_start_gone "${START_PID}" "${START_TICKS}" || die "captured rollback controller identity is still live but unverifiable"
   for p in 8000 8001; do port_closed "${p}" || die "failed rollback left an unowned listener"; done
   configured_gpus_empty || die "failed rollback left a GPU process"
 fi

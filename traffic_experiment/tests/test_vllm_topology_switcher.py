@@ -153,6 +153,22 @@ def test_target_gpu_is_reaudited_after_stop_immediately_before_start():
     assert 'load_cfg PREV; configured_gpus_empty || die "previous topology GPUs are no longer free; rollback start refused"' in text
 
 
+def test_unverifiable_captured_controller_must_be_gone_before_fallback_cleanup():
+    text = source()
+    helper = text[text.index("captured_start_gone() {") : text.index("ss_rows() {")]
+    assert 'identity_gone "${pid}" "${ticks}"' in helper
+    assert '[[ ! -r "/proc/${pid}/stat" ]] && ! kill -0 "${pid}"' in helper
+    assert text.count('captured_start_gone "${START_PID}" "${START_TICKS}" || die') == 2
+    target_gate = text.index(
+        'captured_start_gone "${START_PID}" "${START_TICKS}" || die "captured target controller identity is still live but unverifiable; rollback refused"'
+    )
+    target_port_fallback = text.index(
+        'for p in 8000 8001; do port_closed "${p}" || die "unowned listener remains; rollback refused"',
+        target_gate,
+    )
+    assert target_gate < target_port_fallback
+
+
 def test_state_publication_is_durable_and_transactional():
     text = source()
     writer = text[text.index("write_state() {") : text.index("prepare_new_log() {")]
