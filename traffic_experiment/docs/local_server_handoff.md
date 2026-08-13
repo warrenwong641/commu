@@ -127,6 +127,46 @@ Then start one server per selected GPU and port:
 Worker 0 uses port 8000; optional worker 1 uses port 8001. Always use a fresh
 `RUNS_ROOT` when changing worker count or GPU mapping.
 
+### Transactional one/two-GPU switching
+
+For a long-lived user-owned service, keep separate credential-free environment
+files for each immutable topology. A one-worker file must set
+`PARALLEL_WORKERS=1` and exactly one physical GPU in
+`CUDA_VISIBLE_DEVICES`; a two-worker file must set `PARALLEL_WORKERS=2` and
+exactly two distinct GPUs in worker order. Both profiles use loopback port 8000
+for worker 0, while only the two-worker profile uses port 8001. Use a distinct
+`RUNS_ROOT` for each topology so results produced with different worker/GPU
+blocking factors cannot be resumed or merged together.
+
+After the initial service has a reviewed active-state record, switch it with:
+
+```bash
+bash scripts/24_switch_vllm_topology.sh check \
+  --state /absolute/path/to/active-vllm.state
+
+bash scripts/24_switch_vllm_topology.sh switch \
+  --state /absolute/path/to/active-vllm.state \
+  --target-env /absolute/path/to/one-gpu.env \
+  --log /absolute/path/to/vllm-one-gpu.log
+```
+
+The launcher operates as the same Unix user as vLLM and does not require
+`sudo`. It verifies the recorded controller PID/start time/configuration,
+process ancestry and sessions, loopback listener ownership, GPU index/UUID,
+and authenticated `/v1/models` health before replacing state. It extracts the
+existing API key only from the verified controller environment, keeps it in
+memory, and never writes or prints it. If the target cannot pass the health
+gate, it stops only the newly verified controller and automatically restarts
+the previous configuration. It never signals GPU engine PIDs directly.
+
+Treat a topology change as a service maintenance event. Finish or explicitly
+stop the current measured run first, then create a fresh run root after the
+switch. Do not change the target environment file while a switch is in
+progress.
+
+Worker order follows `CUDA_VISIBLE_DEVICES`: worker 0 uses port 8000, and the
+optional worker 1 uses port 8001.
+
 ## Run a pilot
 
 In terminal 2:
