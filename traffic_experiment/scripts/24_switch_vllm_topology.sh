@@ -15,6 +15,10 @@ STATE_FILE="${VLLM_ACTIVE_STATE_FILE:-}"
 TARGET_ENV="${VLLM_TARGET_ENV_FILE:-}"
 LOG_FILE="${VLLM_SWITCH_LOG_FILE:-}"
 TIMEOUT="${VLLM_SWITCH_TIMEOUT_SECONDS:-300}"
+PREV_FROZEN=""
+TARGET_FROZEN=""
+KEEP_FROZEN=""
+LOCK_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -114,6 +118,32 @@ load_cfg() { local p="$1" v src; for v in PATH SHA WORKERS GPU_CSV HOST PORT STE
 
 freeze_config() { local source="$1" hash="$2" label="$3" tmp; tmp="$(mktemp "${STATE_DIR}/.${label}.XXXXXX.env")" || return 1; cp -- "${source}" "${tmp}" || { rm -f -- "${tmp}"; return 1; }; chmod 400 "${tmp}" || { rm -f -- "${tmp}"; return 1; }; [[ "$(sha256_file "${source}")" == "${hash}" && "$(sha256_file "${tmp}")" == "${hash}" ]] || { rm -f -- "${tmp}"; return 1; }; sync -f "${tmp}" || { rm -f -- "${tmp}"; return 1; }; printf '%s\n' "${tmp}"; }
 
+remove_unused_frozen_config() {
+  local path="$1"
+  [[ -n "${path}" && "${path}" != "${KEEP_FROZEN}" ]] || return 0
+  [[ ! -e "${path}" && ! -L "${path}" ]] && return 0
+  case "${path}" in
+    "${STATE_DIR}"/.previous.*.env|"${STATE_DIR}"/.target.*.env) ;;
+    *) printf 'Preserving unexpected frozen-config path: %s\n' "${path}" >&2; return 1 ;;
+  esac
+  [[ -f "${path}" && ! -L "${path}" &&
+    "$(stat -c %u -- "${path}")" == "$(id -u)" &&
+    "$(stat -c %h -- "${path}")" == 1 ]] || {
+    printf 'Preserving unsafe frozen-config path: %s\n' "${path}" >&2
+    return 1
+  }
+  rm -- "${path}"
+}
+
+cleanup_switcher_exit() {
+  local status=$?
+  trap - EXIT
+  remove_unused_frozen_config "${PREV_FROZEN}" || true
+  remove_unused_frozen_config "${TARGET_FROZEN}" || true
+  [[ -z "${LOCK_DIR}" ]] || rmdir -- "${LOCK_DIR}" 2>/dev/null || true
+  exit "${status}"
+}
+
 validate_controller() { local pid="$1" ticks="$2" config="$3" uid="$4" args=(); [[ "$(proc_ticks "${pid}" 2>/dev/null)" == "${ticks}" && "$(proc_state "${pid}" 2>/dev/null)" != Z && "$(proc_uid "${pid}")" == "${uid}" && "${uid}" == "$(id -u)" ]] || return 1; proc_args "${pid}" args || return 1; controller_launcher_matches "${pid}" "${args[@]}" || return 1; [[ "$(readlink -e -- "$(proc_env_value "${pid}" EXPERIMENT_ENV_FILE)" 2>/dev/null)" == "${config}" ]]; }
 verify_api_argv_env() { local pid="$1" worker="$2" args=(); proc_args "${pid}" args || return 1; arg_present "${CFG_BIN}" "${args[@]}" || return 1; arg_present serve "${args[@]}" || return 1; arg_present "${CFG_MODEL}" "${args[@]}" || return 1; arg_pair --host "${CFG_HOST}" "${args[@]}" && arg_pair --port "${CFG_PORTS[worker]}" "${args[@]}" && arg_pair --served-model-name "${CFG_SERVED}" "${args[@]}" && arg_pair --tensor-parallel-size "${CFG_TP}" "${args[@]}" && arg_pair --max-model-len "${CFG_MAXLEN}" "${args[@]}" && arg_pair --gpu-memory-utilization "${CFG_UTIL}" "${args[@]}" && arg_present --language-model-only "${args[@]}" || return 1; [[ -z "${CFG_REVISION}" ]] || arg_pair --revision "${CFG_REVISION}" "${args[@]}" || return 1; [[ "$(proc_env_value "${pid}" CUDA_VISIBLE_DEVICES)" == "${CFG_GPUS[worker]}" && "$(proc_env_value "${pid}" LD_LIBRARY_PATH)" == "${CFG_LD}" ]]; }
 gpu_engine_pid() { local uuid="$1" root="$2" rows u p found=""; rows="$(nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits 2>/dev/null)" || return 1; while IFS=, read -r u p; do u="${u//[[:space:]]/}"; p="${p//[[:space:]]/}"; [[ "${u}" == "${uuid}" && "${p}" =~ ^[0-9]+$ ]] || continue; is_descendant "${p}" "${root}" || continue; [[ -z "${found}" ]] || return 1; found="${p}"; done <<<"${rows}"; [[ -n "${found}" ]] || return 1; printf '%s\n' "${found}"; }
@@ -140,14 +170,14 @@ prepare_new_log() { local parent; parent="$(dirname -- "$1")"; [[ "$1" = /* && -
 if [[ "${ACTION}" == validate-config ]]; then [[ -n "${TARGET_ENV}" ]] || die "--target-env required"; parse_config "${TARGET_ENV}" false; printf 'VLLM_TOPOLOGY_CONFIG_OK workers=%s gpu_indices=%s ports=' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; (IFS=,; printf '%s\n' "${CFG_PORTS[*]}"); exit 0; fi
 [[ -n "${STATE_FILE}" && "${STATE_FILE}" = /* ]] || die "absolute --state required"; STATE_DIR="$(dirname -- "${STATE_FILE}")"; [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" && "$(stat -c %u -- "${STATE_DIR}")" == "$(id -u)" ]] || die "state directory must be real and user-owned"; STATE_FILE="$(canonical_regular "${STATE_FILE}")" || die "state must be an existing regular non-symlink file"; [[ "$(stat -c %u -- "${STATE_FILE}")" == "$(id -u)" && "$(stat -c %h -- "${STATE_FILE}")" == 1 ]] || die "state must be singly-linked and user-owned"
 for c in awk curl git mktemp nvidia-smi nohup readlink setsid sha256sum ss stat sync; do command -v "${c}" >/dev/null || die "missing command: ${c}"; done
-LOCK_DIR="${STATE_FILE}.lock.d"; mkdir -- "${LOCK_DIR}" 2>/dev/null || die "another operation holds the state lock"; [[ ! -L "${LOCK_DIR}" && "$(stat -c %F -- "${LOCK_DIR}")" == directory && "$(stat -c %u -- "${LOCK_DIR}")" == "$(id -u)" ]] || die "unsafe lock"; trap 'rmdir -- "${LOCK_DIR}" 2>/dev/null || true' EXIT
+LOCK_DIR="${STATE_FILE}.lock.d"; mkdir -- "${LOCK_DIR}" 2>/dev/null || die "another operation holds the state lock"; [[ ! -L "${LOCK_DIR}" && "$(stat -c %F -- "${LOCK_DIR}")" == directory && "$(stat -c %u -- "${LOCK_DIR}")" == "$(id -u)" ]] || die "unsafe lock"; trap cleanup_switcher_exit EXIT
 verify_state || die "state/live identity verification failed; nothing signalled"
 if [[ "${ACTION}" == check ]]; then VKEY="$(proc_env_value "${VC}" LOCAL_VLLM_API_KEY)"; health_all "${VKEY}" || die "authenticated health failed"; printf 'VLLM_TOPOLOGY_OK workers=%s gpu_indices=%s\n' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; exit 0; fi
 [[ -n "${TARGET_ENV}" ]] || die "--target-env required"; parse_config "${TARGET_ENV}"; save_cfg TARGET
 # Both inputs are now inertly parsed. Freeze them before the credential is read.
 PREV_FROZEN="$(freeze_config "${PREV_PATH}" "${PREV_SHA}" previous)" || die "could not freeze previous config"; TARGET_FROZEN="$(freeze_config "${TARGET_PATH}" "${TARGET_SHA}" target)" || die "could not freeze target config"
-load_cfg PREV; PREV_ORIGINAL="${PREV_PATH}"; PREV_ORIGINAL_SHA="${PREV_SHA}"; PREV_PATH="${PREV_FROZEN}"; PREV_SHA="$(sha256_file "${PREV_FROZEN}")"; save_cfg PREV
-load_cfg TARGET; TARGET_PATH="${TARGET_FROZEN}"; TARGET_SHA="$(sha256_file "${TARGET_FROZEN}")"; save_cfg TARGET
+load_cfg PREV; PREV_ORIGINAL="${CFG_PATH}"; PREV_ORIGINAL_SHA="${CFG_SHA}"; CFG_PATH="${PREV_FROZEN}"; CFG_SHA="$(sha256_file "${PREV_FROZEN}")"; save_cfg PREV
+load_cfg TARGET; CFG_PATH="${TARGET_FROZEN}"; CFG_SHA="$(sha256_file "${TARGET_FROZEN}")"; save_cfg TARGET
 load_cfg PREV; audit_target_gpus || die "target GPU has an unrelated compute process"
 VKEY="$(proc_env_value "${VC}" LOCAL_VLLM_API_KEY)"; health_all "${VKEY}" || die "credential recovery/authenticated health failed"
 audit_target_gpus || die "target GPU occupancy changed before cutover"
@@ -156,6 +186,7 @@ if [[ -z "${LOG_FILE}" ]]; then LOG_FILE="${STATE_DIR}/vllm-switch-$(date -u +%Y
 stop_controller "${OLD_C}" "${OLD_T}" "${OLD_CONFIG}" "${OLD_UID}" || die "old service did not stop completely; state preserved"
 load_cfg TARGET; target_ok=false; target_launched=false
 if configured_gpus_empty; then
+  KEEP_FROZEN="${TARGET_FROZEN}"
   if start_service "${TARGET_PATH}" "${TARGET_SHA}" "${VKEY}" "${LOG_FILE}"; then
     target_launched=true
     wait_ready "${TARGET_PATH}" "${VKEY}" && target_ok=true
@@ -168,20 +199,32 @@ fi
 if [[ "${target_ok}" == true ]] && write_state "${TARGET_PATH}" switched; then unset VKEY; printf 'VLLM_TOPOLOGY_SWITCH_OK workers=%s gpu_indices=%s\n' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; exit 0; fi
 printf 'Target startup or state publication failed; rolling back. Diagnostics: %s\n' "${LOG_FILE}" >&2
 if [[ "${target_launched}" == true ]]; then
-  if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)"; then stop_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)" || die "verified target could not be fully stopped"; else captured_start_gone "${START_PID}" "${START_TICKS}" || die "captured target controller identity is still live but unverifiable; rollback refused"; for p in 8000 8001; do port_closed "${p}" || die "unowned listener remains; rollback refused"; done; configured_gpus_empty || die "target GPU process remains; rollback refused"; fi
+  if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)"; then
+    stop_controller "${START_PID}" "${START_TICKS}" "${TARGET_PATH}" "$(id -u)" || die "verified target could not be fully stopped"
+    KEEP_FROZEN=""
+  else
+    captured_start_gone "${START_PID}" "${START_TICKS}" || die "captured target controller identity is still live but unverifiable; rollback refused"
+    for p in 8000 8001; do port_closed "${p}" || die "unowned listener remains; rollback refused"; done
+    configured_gpus_empty || die "target GPU process remains; rollback refused"
+    KEEP_FROZEN=""
+  fi
 fi
 load_cfg PREV; configured_gpus_empty || die "previous topology GPUs are no longer free; rollback start refused"
 RLOG="${LOG_FILE}.rollback"; prepare_new_log "${RLOG}" || die "could not create rollback log"
+KEEP_FROZEN="${PREV_FROZEN}"
 if start_service "${PREV_PATH}" "${PREV_SHA}" "${VKEY}" "${RLOG}" && wait_ready "${PREV_PATH}" "${VKEY}"; then
   if write_state "${PREV_PATH}" rolled_back; then unset VKEY; printf 'ERROR: target failed; previous topology restored\n' >&2; exit 1; fi
   # Publication is part of the transaction: never leave an unrecorded service.
   stop_controller "${START_PID}" "${START_TICKS}" "${PREV_PATH}" "$(id -u)" || die "rollback state publication failed and rollback could not be stopped"
+  KEEP_FROZEN=""
 fi
 if [[ -n "${START_PID}" && -n "${START_TICKS}" ]] && validate_controller "${START_PID}" "${START_TICKS}" "${PREV_PATH}" "$(id -u)"; then
   stop_controller "${START_PID}" "${START_TICKS}" "${PREV_PATH}" "$(id -u)" || die "failed rollback could not be stopped"
+  KEEP_FROZEN=""
 else
   captured_start_gone "${START_PID}" "${START_TICKS}" || die "captured rollback controller identity is still live but unverifiable"
   for p in 8000 8001; do port_closed "${p}" || die "failed rollback left an unowned listener"; done
   configured_gpus_empty || die "failed rollback left a GPU process"
+  KEEP_FROZEN=""
 fi
 unset VKEY; die "target and rollback failed; no healthy unrecorded service was intentionally left running"
