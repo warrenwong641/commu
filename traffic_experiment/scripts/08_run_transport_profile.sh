@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export -n LOCAL_VLLM_API_KEY 2>/dev/null || true
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+export -n LOCAL_VLLM_API_KEY
 source "${SCRIPT_DIR}/worker_topology.sh"
 
 require_value CAPTURE_INTERFACE
@@ -79,7 +81,9 @@ ensure_worker_topology "${OUTPUT_ROOT}"
 RUN_DIR="${OUTPUT_ROOT}/local_vllm_${TRANSPORT}_${PROFILE}"
 mkdir -p "${RUN_DIR}"
 
+printf '%s\n' "${LOCAL_VLLM_API_KEY}" |
 "${RUN_PREFIX[@]}" "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli run \
+  --api-key-stdin \
   --manifest "${MANIFEST_ABS}" \
   --output-dir "${RUN_DIR}" \
   --backend local_vllm \

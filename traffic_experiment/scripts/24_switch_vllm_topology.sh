@@ -20,6 +20,7 @@ TARGET_FROZEN=""
 KEEP_FROZEN=""
 REPLACED_FROZEN=""
 LOCK_DIR=""
+GLOBAL_LOCK_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -179,7 +180,16 @@ prepare_new_log() { local parent; parent="$(dirname -- "$1")"; [[ "$1" = /* && -
 
 if [[ "${ACTION}" == validate-config ]]; then [[ -n "${TARGET_ENV}" ]] || die "--target-env required"; parse_config "${TARGET_ENV}" false; printf 'VLLM_TOPOLOGY_CONFIG_OK workers=%s gpu_indices=%s ports=' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; (IFS=,; printf '%s\n' "${CFG_PORTS[*]}"); exit 0; fi
 [[ -n "${STATE_FILE}" && "${STATE_FILE}" = /* ]] || die "absolute --state required"; STATE_FILE="$(canonical_regular "${STATE_FILE}")" || die "state must be an existing regular non-symlink file"; STATE_DIR="$(dirname -- "${STATE_FILE}")"; [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" && "$(stat -c %u -- "${STATE_DIR}")" == "$(id -u)" ]] || die "state directory must be real and user-owned"; [[ "$(stat -c %u -- "${STATE_FILE}")" == "$(id -u)" && "$(stat -c %h -- "${STATE_FILE}")" == 1 ]] || die "state must be singly-linked and user-owned"
-for c in awk curl git mktemp nvidia-smi nohup readlink setsid sha256sum ss stat sync; do command -v "${c}" >/dev/null || die "missing command: ${c}"; done
+for c in awk curl flock git mktemp nvidia-smi nohup readlink setsid sha256sum ss stat sync; do command -v "${c}" >/dev/null || die "missing command: ${c}"; done
+GLOBAL_LOCK_FILE="/run/lock/commu-protocol-pilots/vllm-topology-$(id -u).lock"
+[[ -f "${GLOBAL_LOCK_FILE}" && ! -L "${GLOBAL_LOCK_FILE}" &&
+    "$(stat -c %u -- "${GLOBAL_LOCK_FILE}")" == 0 &&
+    "$(stat -c %g -- "${GLOBAL_LOCK_FILE}")" == "$(id -g)" &&
+    "$(stat -c %a -- "${GLOBAL_LOCK_FILE}")" == 660 &&
+    "$(stat -c %h -- "${GLOBAL_LOCK_FILE}")" == 1 ]] ||
+  die "missing or unsafe shared topology lock: ask an administrator to install the privileged-pilot lock first"
+exec 8<>"${GLOBAL_LOCK_FILE}" || die "cannot open shared topology lock"
+flock -n 8 || die "another operation holds the shared topology lock"
 LOCK_DIR="${STATE_FILE}.lock.d"; mkdir -- "${LOCK_DIR}" 2>/dev/null || die "another operation holds the state lock"; [[ ! -L "${LOCK_DIR}" && "$(stat -c %F -- "${LOCK_DIR}")" == directory && "$(stat -c %u -- "${LOCK_DIR}")" == "$(id -u)" ]] || die "unsafe lock"; trap cleanup_switcher_exit EXIT
 verify_state || die "state/live identity verification failed; nothing signalled"
 if [[ "${ACTION}" == check ]]; then VKEY="$(proc_env_value "${VC}" LOCAL_VLLM_API_KEY)"; health_all "${VKEY}" || die "authenticated health failed"; printf 'VLLM_TOPOLOGY_OK workers=%s gpu_indices=%s\n' "${CFG_WORKERS}" "${CFG_GPU_CSV}"; exit 0; fi

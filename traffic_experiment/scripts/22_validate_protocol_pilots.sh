@@ -6,7 +6,11 @@
 # through lib.sh.  Append-only; never regenerates manifests or deletes partial
 # runs.  Stops after both validations pass — does NOT launch the full matrix.
 set -euo pipefail
+# Keep the credential available as a shell value, but do not let setup,
+# capture, proxy, or inspection subprocesses inherit it.
+export -n LOCAL_VLLM_API_KEY 2>/dev/null || true
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+export -n LOCAL_VLLM_API_KEY
 source "${SCRIPT_DIR}/protocol_admission.sh"
 
 load_worker_topology
@@ -17,8 +21,22 @@ configure_proxy_ports "${TOPOLOGY_WORKER_COUNT}"
 die() { printf '%s\n' "$*" >&2; exit 1; }
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    die "This script requires root; preserve PATH and LOCAL_VLLM_API_KEY with sudo"
+    die "This script requires root; use the documented privileged pilot release"
   fi
+}
+
+inventory_network_resources() {
+  local links netns
+  if ! links="$(ip -o link show 2>/dev/null)"; then
+    die "Failed to inventory network links"
+  fi
+  if ! netns="$(ip netns list 2>/dev/null)"; then
+    die "Failed to inventory network namespaces"
+  fi
+  LINK_INVENTORY="$(
+    awk -F': ' '{name=$2; sub(/@.*/, "", name); print name}' <<<"${links}"
+  )"
+  NETNS_INVENTORY="$(awk '{print $1}' <<<"${netns}")"
 }
 _safe_dir() {
   # Return a directory path that does not collide with existing partial runs.
@@ -320,8 +338,9 @@ EXPERIMENT_ENV_FILE="${ENV_FILE}" bash "${SCRIPT_DIR}/17_lab_preflight.sh" || di
 
 # 2. Apply the exact full-matrix baseline topology.
 echo "=== Network: baseline apply ==="
-if ip link show dev "${HOST_VETH:-llmhost0}" >/dev/null 2>&1 ||
-  ip netns list | awk '{print $1}' | grep -Fxq "${CLIENT_NETNS:-llm-client}"; then
+inventory_network_resources
+if grep -Fxq "${HOST_VETH:-llmhost0}" <<<"${LINK_INVENTORY}" ||
+  grep -Fxq "${CLIENT_NETNS:-llm-client}" <<<"${NETNS_INVENTORY}"; then
   die "Refusing to replace existing ${HOST_VETH:-llmhost0} or ${CLIENT_NETNS:-llm-client}; inspect and remove it explicitly"
 fi
 CLIENT_NETNS="${CLIENT_NETNS:-llm-client}" \
@@ -425,6 +444,7 @@ run_or_validate_strict() {
     CAPTURE_INTERFACE_OVERRIDE="${CLIENT_VETH:-llmclient0}" \
     CAPTURE_FILTER_OVERRIDE="${capture_filter}" \
     PILOT_WORKER_INDEX="${worker_index}" \
+    LOCAL_VLLM_API_KEY="${LOCAL_VLLM_API_KEY}" \
     bash "${SCRIPT_DIR}/08_run_transport_profile.sh" \
     2>&1 | tee "${console_log}"
 
@@ -495,19 +515,49 @@ fi
 # 7. Report
 cleanup_resources
 trap - EXIT
-write_protocol_success_marker \
-  "${PROTOCOL_MARKER}" \
-  "${TLS_PILOT_EVIDENCE_MARKER}" \
-  "${HTTP3_PILOT_EVIDENCE_MARKER}" \
-  "${WORKER_1_TLS_PILOT_EVIDENCE_MARKER}" \
-  "${WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER}"
+if [[ "${DEFER_PROTOCOL_ADMISSION_PUBLICATION:-false}" == true ]]; then
+  [[ -n "${PROTOCOL_ADMISSION_CANDIDATE:-}" ]] ||
+    die "Deferred admission requires PROTOCOL_ADMISSION_CANDIDATE"
+  candidate_parent="$(dirname -- "${PROTOCOL_ADMISSION_CANDIDATE}")"
+  [[ "${candidate_parent}" == "${VALIDATION_ROOT}" &&
+    "$(basename -- "${PROTOCOL_ADMISSION_CANDIDATE}")" =~ ^\.admission-candidate-[0-9]+$ &&
+    ! -e "${PROTOCOL_ADMISSION_CANDIDATE}" &&
+    ! -L "${PROTOCOL_ADMISSION_CANDIDATE}" ]] ||
+    die "Unsafe or existing deferred-admission candidate path"
+  candidate_tmp="$(mktemp "${VALIDATION_ROOT}/.admission-candidate.tmp.XXXXXX")"
+  {
+    printf 'schema=commu-protocol-admission-candidate-v1\n'
+    printf 'tls_pilot_marker=%s\n' "${TLS_PILOT_EVIDENCE_MARKER}"
+    printf 'http3_pilot_marker=%s\n' "${HTTP3_PILOT_EVIDENCE_MARKER}"
+    printf 'worker_1_tls_pilot_marker=%s\n' "${WORKER_1_TLS_PILOT_EVIDENCE_MARKER}"
+    printf 'worker_1_http3_pilot_marker=%s\n' "${WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER}"
+  } >"${candidate_tmp}"
+  chmod 0444 "${candidate_tmp}"
+  if ! ln "${candidate_tmp}" "${PROTOCOL_ADMISSION_CANDIDATE}" 2>/dev/null; then
+    rm -f -- "${candidate_tmp}"
+    die "Refusing to overwrite deferred-admission candidate"
+  fi
+  rm -f -- "${candidate_tmp}"
+else
+  write_protocol_success_marker \
+    "${PROTOCOL_MARKER}" \
+    "${TLS_PILOT_EVIDENCE_MARKER}" \
+    "${HTTP3_PILOT_EVIDENCE_MARKER}" \
+    "${WORKER_1_TLS_PILOT_EVIDENCE_MARKER}" \
+    "${WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER}"
+fi
 echo ""
 echo "============================================="
-echo "  PROTOCOL VALIDATION COMPLETE"
+echo "  PROTOCOL PILOT EVIDENCE COMPLETE"
 echo "============================================="
 echo "Results:   ${VALIDATION_ROOT}/"
 echo ""
 echo "Both protocol pilots passed validation."
-echo "Admission marker: ${PROTOCOL_MARKER}"
-echo "Full matrix is now gated on this immutable success marker."
-echo "Run: sudo --preserve-env=PATH,LOCAL_VLLM_API_KEY EXPERIMENT_ENV_FILE=\$PWD/server.lab.env bash scripts/18_run_lab_matrix.sh"
+if [[ "${DEFER_PROTOCOL_ADMISSION_PUBLICATION:-false}" == true ]]; then
+  echo "Admission publication deferred to the privileged parent."
+  echo "Candidate: ${PROTOCOL_ADMISSION_CANDIDATE}"
+else
+  echo "Admission marker: ${PROTOCOL_MARKER}"
+  echo "Full matrix is now gated on this immutable success marker."
+fi
+echo "Matrix execution remains a separate, explicitly authorized workflow."

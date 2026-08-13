@@ -39,6 +39,8 @@ TLS records, and server-side behavior are not controlled by the researcher.
   multiple-comparison requirements.
 - `docs/physical_client_validation.md`: separate physical-interface TLS/HTTP/3
   pilot and acceptance gate.
+- `docs/privileged_protocol_pilots.md`: hash-verified, root-owned release path
+  for the namespace TLS/HTTP/3 pilots without executing the mutable checkout.
 - `docs/cost_time_estimates.md`: formulas and numerical estimates.
 - `docs/local_server_handoff.md`: copy-to-server installation and run commands.
 - `docs/lab_server_migration.md`: final lab deployment, network controls, and
