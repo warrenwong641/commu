@@ -35,7 +35,7 @@ load_measured_worker_topology() {
       discovered_uuids=("${WORKER_GPU_UUIDS[@]}")
     fi
     if declare -F configure_proxy_ports >/dev/null; then
-      configure_proxy_ports
+      configure_proxy_ports "${TOPOLOGY_WORKER_COUNT}"
       tls_ports=("${EXPECTED_PROXY_TCP_PORTS[@]}")
       http3_ports=("${EXPECTED_PROXY_UDP_PORTS[@]}")
     fi
