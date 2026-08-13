@@ -37,7 +37,7 @@ def test_all_protocol_entrypoints_share_one_admission_definition():
         "protocol_stack_sha256",
     ):
         assert f'require_protocol_marker_match "${{marker}}" {key}' in admission
-    assert "schema=commu-protocol-admission-v1" in admission
+    assert "schema=commu-protocol-admission-v2" in admission
     assert "write_protocol_success_marker" in admission
 
 

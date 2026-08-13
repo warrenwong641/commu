@@ -14,7 +14,7 @@ from .backends import build_backend_request
 from .common import read_jsonl, sha256_file, sha256_json, utc_now
 
 
-SCHEMA = "commu-protocol-pilot-evidence-v1"
+SCHEMA = "commu-protocol-pilot-evidence-v2"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 

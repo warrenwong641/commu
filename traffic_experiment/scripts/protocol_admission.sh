@@ -187,7 +187,7 @@ verify_protocol_admission() {
     return 1
   fi
   require_protocol_marker_match \
-    "${marker}" schema commu-protocol-admission-v1
+    "${marker}" schema commu-protocol-admission-v2
   require_protocol_marker_match "${marker}" status success
   require_protocol_marker_match \
     "${marker}" qa_manifest_sha256 "${MANIFEST_SHA256,,}"
@@ -275,7 +275,7 @@ write_protocol_success_marker() {
   fi
 
   if ! {
-    printf 'schema=commu-protocol-admission-v1\n'
+    printf 'schema=commu-protocol-admission-v2\n'
     printf 'status=success\n'
     printf 'qa_manifest_sha256=%s\n' "${qa_sha}"
     printf 'summary_manifest_sha256=%s\n' "${summary_sha}"
