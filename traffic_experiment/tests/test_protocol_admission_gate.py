@@ -50,12 +50,14 @@ def test_protocol_digest_binds_per_request_and_warm_session_paths():
         "scripts/18_run_lab_matrix.sh",
         "scripts/19_run_lab_sessions.sh",
         "scripts/22_validate_protocol_pilots.sh",
+        "scripts/worker_topology.sh",
         "scripts/protocol_admission.sh",
         "traffic_measure/runner.py",
         "traffic_measure/http3_client.py",
         "traffic_measure/pilot_evidence.py",
         "traffic_measure/session_timeline.py",
         "traffic_measure/vllm_metrics.py",
+        "traffic_measure/worker_topology.py",
     ):
         assert path in admission
 
@@ -64,13 +66,17 @@ def test_admission_revalidates_immutable_per_pilot_result_and_pcap_evidence():
     admission = _script("protocol_admission.sh")
     pilots = _script("22_validate_protocol_pilots.sh")
 
-    assert 'http3) printf \'(udp port 8444 or tcp port 8444)' in admission
+    assert "protocol_pilot_port()" in admission
+    assert "EXPECTED_PROXY_TCP_PORTS[worker_index]" in admission
+    assert "EXPECTED_PROXY_UDP_PORTS[worker_index]" in admission
     assert "verify_protocol_pilot_reference" in admission
     assert "tls_pilot_marker_sha256" in admission
     assert "http3_pilot_marker_sha256" in admission
     assert "protocol_pilot_evidence verify" in admission
     assert "run_or_validate_strict tls13 8443 tls" in pilots
     assert "run_or_validate_strict http3 8444 http3" in pilots
+    assert "run_or_validate_strict tls13 8543 worker-1-tls 1" in pilots
+    assert "run_or_validate_strict http3 8544 worker-1-http3 1" in pilots
     assert "run_or_validate()" not in pilots
     assert "CAPTURE_FILTER_OVERRIDE" in pilots
     assert "PILOT_EVIDENCE_OK.json" in pilots

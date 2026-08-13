@@ -341,7 +341,11 @@ start_listener() {
   if [[ -z "${PHYS_IP}" ]]; then
     die "Could not determine IPv4 on ${PHYS_IF}"
   fi
-  local recorded_pid recorded_ticks recorded_config recorded_exe
+  local recorded_pid recorded_ticks recorded_config recorded_exe current_worker_count
+  current_worker_count="${TOPOLOGY_WORKER_COUNT}"
+  if [[ -f "${STATE_FILE}" ]]; then
+    load_recorded_listener_topology
+  fi
   recorded_pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
   recorded_ticks="$(_state_value caddy_start_ticks)"
   recorded_config="$(_state_value caddy_config)"
@@ -358,9 +362,19 @@ start_listener() {
     if [[ ! "${recorded_pid}" =~ ^[0-9]+$ ]]; then
       die "Refusing to replace malformed PID metadata in ${PID_FILE}; inspect it explicitly"
     fi
+    if ! _listener_ports_closed; then
+      die "Recorded Caddy PID is dead but its recorded listener closure is unverified; preserving state"
+    fi
     echo "Removing stale listener metadata for dead PID ${recorded_pid:-unknown}." >&2
     rm -f "${PID_FILE}" "${STATE_FILE}"
+  elif [[ -f "${STATE_FILE}" ]]; then
+    if ! _listener_ports_closed; then
+      die "Listener state exists without a PID and recorded ports remain open; preserving state"
+    fi
+    echo "Removing stale listener state after verified recorded-port closure." >&2
+    rm -f "${STATE_FILE}"
   fi
+  configure_physical_listener_ports "${current_worker_count}"
   local caddyfile
   caddyfile="${STATE_DIR}/Caddyfile"
   _caddyfile >"${caddyfile}"

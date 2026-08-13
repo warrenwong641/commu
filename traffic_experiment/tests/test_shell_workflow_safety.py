@@ -83,6 +83,14 @@ def test_caddy_cleanup_waits_after_kill_and_verifies_listener_closure():
     assert 'for port in "${PHYSICAL_TCP_PORTS[@]}"' in listener
     assert 'for port in "${PHYSICAL_UDP_PORTS[@]}"' in listener
     assert "load_recorded_listener_topology" in listener
+    start_body = listener[
+        listener.index("start_listener() {") : listener.index("stop_listener() {")
+    ]
+    assert start_body.index("load_recorded_listener_topology") < start_body.index(
+        'rm -f "${PID_FILE}" "${STATE_FILE}"'
+    )
+    assert start_body.count("_listener_ports_closed") == 2
+    assert "state exists without a PID" in start_body
     assert "_discover_physical_ip || true" in listener
 
 

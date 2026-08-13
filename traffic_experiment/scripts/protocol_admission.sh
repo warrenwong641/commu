@@ -18,6 +18,7 @@ protocol_stack_sha256() {
     scripts/22_validate_protocol_pilots.sh
     scripts/lib.sh
     scripts/protocol_admission.sh
+    scripts/worker_topology.sh
     traffic_measure/backends.py
     traffic_measure/capture.py
     traffic_measure/cli.py
@@ -26,6 +27,7 @@ protocol_stack_sha256() {
     traffic_measure/runner.py
     traffic_measure/session_timeline.py
     traffic_measure/vllm_metrics.py
+    traffic_measure/worker_topology.py
   )
   (
     cd "${EXPERIMENT_ROOT}"
@@ -84,10 +86,30 @@ protocol_validation_marker_path() {
 }
 
 protocol_pilot_capture_filter() {
-  local transport="$1"
+  local transport="$1" worker_index="${2:-0}" port
+  port="$(protocol_pilot_port "${transport}" "${worker_index}")" || return
   case "${transport}" in
-    tls13) printf 'tcp port 8443\n' ;;
-    http3) printf '(udp port 8444 or tcp port 8444)\n' ;;
+    tls13) printf 'tcp port %s\n' "${port}" ;;
+    http3) printf '(udp port %s or tcp port %s)\n' "${port}" "${port}" ;;
+    *)
+      echo "Unsupported protocol-pilot transport: ${transport}" >&2
+      return 2
+      ;;
+  esac
+}
+
+protocol_pilot_port() {
+  local transport="$1" worker_index="${2:-0}"
+  load_worker_topology
+  configure_proxy_ports "${TOPOLOGY_WORKER_COUNT}"
+  if [[ ! "${worker_index}" =~ ^[01]$ ||
+    "${worker_index}" -ge "${TOPOLOGY_WORKER_COUNT}" ]]; then
+    echo "Protocol-pilot worker ${worker_index} is not configured." >&2
+    return 2
+  fi
+  case "${transport}" in
+    tls13) printf '%s\n' "${EXPECTED_PROXY_TCP_PORTS[worker_index]}" ;;
+    http3) printf '%s\n' "${EXPECTED_PROXY_UDP_PORTS[worker_index]}" ;;
     *)
       echo "Unsupported protocol-pilot transport: ${transport}" >&2
       return 2
@@ -98,6 +120,10 @@ protocol_pilot_capture_filter() {
 protocol_pilot_evidence() {
   local action="$1" marker="$2" transport="$3"
   local results="${4:-}"
+  local worker_index="${5:-0}" backend_port
+  load_worker_topology
+  load_worker_gpu_identities
+  backend_port="$(protocol_pilot_port "${transport}" "${worker_index}")" || return
   local -a results_args=()
   if [[ -n "${results}" ]]; then
     results_args=(--results "${results}")
@@ -115,13 +141,17 @@ protocol_pilot_evidence() {
     --network-mtu "${NETWORK_MTU}" \
     --backend-ip "${SECURE_PROXY_HOST}" \
     --capture-interface "${CLIENT_VETH:-llmclient0}" \
-    --capture-filter "$(protocol_pilot_capture_filter "${transport}")" \
+    --capture-filter "$(protocol_pilot_capture_filter "${transport}" "${worker_index}")" \
     --seed "${RANDOM_SEED}" \
-    --max-output-tokens 4096
+    --max-output-tokens 4096 \
+    --backend-port "${backend_port}" \
+    --worker-gpu-index "${WORKER_GPU_IDS[worker_index]}" \
+    --worker-gpu-uuid "${WORKER_GPU_UUIDS[worker_index]}" \
+    --topology-worker-index "${worker_index}"
 }
 
 verify_protocol_pilot_reference() {
-  local marker="$1" field_prefix="$2" transport="$3"
+  local marker="$1" field_prefix="$2" transport="$3" worker_index="${4:-0}"
   local evidence_marker expected_sha actual_sha
   evidence_marker="$(protocol_marker_value "${marker}" "${field_prefix}_marker")"
   expected_sha="$(
@@ -137,7 +167,7 @@ verify_protocol_pilot_reference() {
     echo "Protocol marker ${field_prefix} evidence hash no longer matches." >&2
     return 1
   fi
-  protocol_pilot_evidence verify "${evidence_marker}" "${transport}" \
+  protocol_pilot_evidence verify "${evidence_marker}" "${transport}" "" "${worker_index}" \
     >/dev/null
 }
 
@@ -179,6 +209,12 @@ verify_protocol_admission() {
     "${marker}" protocol_stack_sha256 "$(protocol_stack_sha256)"
   verify_protocol_pilot_reference "${marker}" tls_pilot tls13
   verify_protocol_pilot_reference "${marker}" http3_pilot http3
+  if [[ "${TOPOLOGY_WORKER_COUNT}" -eq 2 ]]; then
+    verify_protocol_pilot_reference \
+      "${marker}" worker_1_tls_pilot tls13 1
+    verify_protocol_pilot_reference \
+      "${marker}" worker_1_http3_pilot http3 1
+  fi
   echo "Protocol-pilot admission verified: ${marker}"
 }
 
@@ -186,6 +222,8 @@ write_protocol_success_marker() {
   local marker="${1:-$(protocol_validation_marker_path)}"
   local tls_evidence_marker="${2:?TLS pilot evidence marker is required}"
   local http3_evidence_marker="${3:?HTTP/3 pilot evidence marker is required}"
+  local worker_1_tls_evidence_marker="${4:-}"
+  local worker_1_http3_evidence_marker="${5:-}"
   if [[ -e "${marker}" || -L "${marker}" ]]; then
     echo "Refusing to overwrite protocol-validation marker ${marker}; preserve or move it before revalidation" >&2
     return 1
@@ -196,6 +234,7 @@ write_protocol_success_marker() {
 
   local marker_dir marker_tmp qa_sha summary_sha caddy_version stack_sha
   local tls_evidence_sha http3_evidence_sha
+  local worker_1_tls_evidence_sha="" worker_1_http3_evidence_sha=""
   marker_dir="$(dirname -- "${marker}")"
   mkdir -p "${marker_dir}"
   marker_tmp="$(mktemp "${marker_dir}/.protocol-validation.XXXXXX")"
@@ -222,6 +261,23 @@ write_protocol_success_marker() {
     rm -f -- "${marker_tmp}"
     return 1
   fi
+  if [[ "${TOPOLOGY_WORKER_COUNT}" -eq 2 ]]; then
+    if [[ -z "${worker_1_tls_evidence_marker}" ||
+      -z "${worker_1_http3_evidence_marker}" ]] ||
+      ! protocol_pilot_evidence verify \
+        "${worker_1_tls_evidence_marker}" tls13 "" 1 >/dev/null ||
+      ! protocol_pilot_evidence verify \
+        "${worker_1_http3_evidence_marker}" http3 "" 1 >/dev/null ||
+      ! worker_1_tls_evidence_sha="$(
+        sha256sum "${worker_1_tls_evidence_marker}" | awk '{print $1}'
+      )" ||
+      ! worker_1_http3_evidence_sha="$(
+        sha256sum "${worker_1_http3_evidence_marker}" | awk '{print $1}'
+      )"; then
+      rm -f -- "${marker_tmp}"
+      return 1
+    fi
+  fi
 
   if ! {
     printf 'schema=commu-protocol-admission-v1\n'
@@ -240,6 +296,16 @@ write_protocol_success_marker() {
     printf 'tls_pilot_marker_sha256=%s\n' "${tls_evidence_sha}"
     printf 'http3_pilot_marker=%s\n' "${http3_evidence_marker}"
     printf 'http3_pilot_marker_sha256=%s\n' "${http3_evidence_sha}"
+    if [[ "${TOPOLOGY_WORKER_COUNT}" -eq 2 ]]; then
+      printf 'worker_1_tls_pilot_marker=%s\n' \
+        "${worker_1_tls_evidence_marker}"
+      printf 'worker_1_tls_pilot_marker_sha256=%s\n' \
+        "${worker_1_tls_evidence_sha}"
+      printf 'worker_1_http3_pilot_marker=%s\n' \
+        "${worker_1_http3_evidence_marker}"
+      printf 'worker_1_http3_pilot_marker_sha256=%s\n' \
+        "${worker_1_http3_evidence_sha}"
+    fi
     printf 'validated_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } >"${marker_tmp}"; then
     rm -f -- "${marker_tmp}"

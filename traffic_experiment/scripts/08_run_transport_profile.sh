@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+source "${SCRIPT_DIR}/worker_topology.sh"
 
 require_value CAPTURE_INTERFACE
 require_value LOCAL_VLLM_API_KEY
 require_command dumpcap
+load_measured_worker_topology
+PILOT_WORKER_INDEX="${PILOT_WORKER_INDEX:-0}"
+if [[ ! "${PILOT_WORKER_INDEX}" =~ ^[01]$ ||
+  "${PILOT_WORKER_INDEX}" -ge "${PARALLEL_WORKERS}" ]]; then
+  echo "PILOT_WORKER_INDEX must select a configured worker." >&2
+  exit 2
+fi
 
 TRANSPORT="${TRANSPORT:-tls13}"
 SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-localhost}"
@@ -24,11 +32,11 @@ if [[ -n "${CLIENT_NETNS:-}" ]]; then
 fi
 case "${TRANSPORT}" in
   tls13)
-    PORT=8443
+    PORT="${WORKER_TLS_PORTS[PILOT_WORKER_INDEX]}"
     require_command curl
     ;;
   http3)
-    PORT=8444
+    PORT="${WORKER_HTTP3_PORTS[PILOT_WORKER_INDEX]}"
     if ! "${RUNNER_PYTHON}" -c 'import aioquic' >/dev/null 2>&1; then
       echo "aioquic is absent; rerun 01_setup_runner.sh." >&2
       exit 2
@@ -66,7 +74,9 @@ if [[ "${CAPTURE_STOP_ON_RESPONSE:-false}" == "true" ]]; then
   CAPTURE_COMPLETION_ARGS=(--capture-stop-on-response)
 fi
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH_EFFECTIVE}")"
-RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")/local_vllm_${TRANSPORT}_${PROFILE}"
+OUTPUT_ROOT="$(absolute_from_experiment "${RUNS_ROOT_EFFECTIVE}")"
+ensure_worker_topology "${OUTPUT_ROOT}"
+RUN_DIR="${OUTPUT_ROOT}/local_vllm_${TRANSPORT}_${PROFILE}"
 mkdir -p "${RUN_DIR}"
 
 "${RUN_PREFIX[@]}" "${RUNNER_PYTHON}" -m traffic_experiment.traffic_measure.cli run \
@@ -84,6 +94,8 @@ mkdir -p "${RUN_DIR}"
   --capture-interface "${CAPTURE_INTERFACE_EFFECTIVE}" \
   --capture-filter "${CAPTURE_FILTER_EFFECTIVE}" \
   "${CAPTURE_COMPLETION_ARGS[@]}" \
+  --worker-gpu-index "${WORKER_GPU_INDEXES[PILOT_WORKER_INDEX]}" \
+  --worker-gpu-uuid "${WORKER_GPU_UUIDS[PILOT_WORKER_INDEX]}" \
   --transport "${TRANSPORT}" \
   ${CONDITION_OVERRIDE:+--condition "${CONDITION_OVERRIDE}"} \
   --connection-mode "${CONNECTION_MODE}" \

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+source "${SCRIPT_DIR}/worker_topology.sh"
 
 require_value CAPTURE_INTERFACE
 require_value LOCAL_VLLM_API_KEY
 require_command dumpcap
+load_measured_worker_topology
 
 TRANSPORT="${TRANSPORT:-tls13}"
 SESSION_TURNS="${SESSION_TURNS:-2}"
@@ -28,7 +30,9 @@ if [[ -n "${CLIENT_NETNS:-}" ]]; then
   RUN_PREFIX=(ip netns exec "${CLIENT_NETNS}")
 fi
 MANIFEST_ABS="$(absolute_from_experiment "${MANIFEST_PATH}")"
-RUN_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/sessions/${SESSION_ID}_${TRANSPORT}"
+RUNS_ROOT_ABS="$(absolute_from_experiment "${RUNS_ROOT}")"
+ensure_worker_topology "${RUNS_ROOT_ABS}"
+RUN_DIR="${RUNS_ROOT_ABS}/sessions/${SESSION_ID}_${TRANSPORT}"
 COMPLETE_MARKER="${RUN_DIR}/SESSION_COMPLETE"
 if [[ -f "${COMPLETE_MARKER}" ]]; then
   echo "Warm session already complete; skipping ${RUN_DIR}"
@@ -111,6 +115,8 @@ sleep "${CAPTURE_STARTUP_DELAY_SECONDS:-1}"
   --session-budget-seconds "${SESSION_BUDGET_SECONDS}" \
   --no-capture \
   --no-wait-after-request \
+  --worker-gpu-index "${WORKER_GPU_INDEXES[0]}" \
+  --worker-gpu-uuid "${WORKER_GPU_UUIDS[0]}" \
   "${TLS_ARGS[@]}"
 
 cleanup

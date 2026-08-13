@@ -10,6 +10,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 source "${SCRIPT_DIR}/protocol_admission.sh"
 
 load_worker_topology
+load_worker_gpu_identities
 configure_proxy_ports "${TOPOLOGY_WORKER_COUNT}"
 
 # --- helpers ---------------------------------------------------------------
@@ -366,9 +367,9 @@ echo "Caddy started with auto_https disabled."
 # protocol stack, capture configuration, and generation definition is reusable.
 LAST_PILOT_EVIDENCE_MARKER=""
 run_or_validate_strict() {
-  local transport="$1" port="$2" label="$3"
+  local transport="$1" port="$2" label="$3" worker_index="${4:-0}"
   local capture_filter base_prefix existing_marker pcap
-  capture_filter="$(protocol_pilot_capture_filter "${transport}")"
+  capture_filter="$(protocol_pilot_capture_filter "${transport}" "${worker_index}")"
   base_prefix="${VALIDATION_ROOT}/${label}"
   existing_marker=""
 
@@ -384,7 +385,8 @@ run_or_validate_strict() {
       if [[ -e "${marker_candidate}" || -L "${marker_candidate}" ]]; then
         if ! pcap="$(
           protocol_pilot_evidence verify \
-            "${marker_candidate}" "${transport}" "${results_candidate}"
+            "${marker_candidate}" "${transport}" "${results_candidate}" \
+            "${worker_index}"
         )"; then
           die "${label}: immutable pilot evidence is invalid at ${marker_candidate}"
         fi
@@ -422,6 +424,7 @@ run_or_validate_strict() {
     SECURE_PROXY_HOST="${SECURE_PROXY_HOST:-10.200.0.1}" \
     CAPTURE_INTERFACE_OVERRIDE="${CLIENT_VETH:-llmclient0}" \
     CAPTURE_FILTER_OVERRIDE="${capture_filter}" \
+    PILOT_WORKER_INDEX="${worker_index}" \
     bash "${SCRIPT_DIR}/08_run_transport_profile.sh" \
     2>&1 | tee "${console_log}"
 
@@ -441,14 +444,17 @@ run_or_validate_strict() {
   evidence_marker="$(dirname -- "${results_json}")/PILOT_EVIDENCE_OK.json"
   pcap="$(
     protocol_pilot_evidence check \
-      "${evidence_marker}" "${transport}" "${results_json}"
+      "${evidence_marker}" "${transport}" "${results_json}" \
+      "${worker_index}"
   )"
   echo "Validating: ${pcap}"
   validate_pcap "${pcap}" "${transport}" "${port}"
   protocol_pilot_evidence mark \
-    "${evidence_marker}" "${transport}" "${results_json}" >/dev/null
+    "${evidence_marker}" "${transport}" "${results_json}" \
+    "${worker_index}" >/dev/null
   protocol_pilot_evidence verify \
-    "${evidence_marker}" "${transport}" "${results_json}" >/dev/null
+    "${evidence_marker}" "${transport}" "${results_json}" \
+    "${worker_index}" >/dev/null
   LAST_PILOT_EVIDENCE_MARKER="${evidence_marker}"
 }
 
@@ -468,13 +474,33 @@ echo "============================================="
 run_or_validate_strict http3 8444 http3
 HTTP3_PILOT_EVIDENCE_MARKER="${LAST_PILOT_EVIDENCE_MARKER}"
 
+WORKER_1_TLS_PILOT_EVIDENCE_MARKER=""
+WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER=""
+if [[ "${TOPOLOGY_WORKER_COUNT}" -eq 2 ]]; then
+  echo ""
+  echo "============================================="
+  echo "  Worker 1 TLS 1.3 validation"
+  echo "============================================="
+  run_or_validate_strict tls13 8543 worker-1-tls 1
+  WORKER_1_TLS_PILOT_EVIDENCE_MARKER="${LAST_PILOT_EVIDENCE_MARKER}"
+
+  echo ""
+  echo "============================================="
+  echo "  Worker 1 HTTP/3 validation"
+  echo "============================================="
+  run_or_validate_strict http3 8544 worker-1-http3 1
+  WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER="${LAST_PILOT_EVIDENCE_MARKER}"
+fi
+
 # 7. Report
 cleanup_resources
 trap - EXIT
 write_protocol_success_marker \
   "${PROTOCOL_MARKER}" \
   "${TLS_PILOT_EVIDENCE_MARKER}" \
-  "${HTTP3_PILOT_EVIDENCE_MARKER}"
+  "${HTTP3_PILOT_EVIDENCE_MARKER}" \
+  "${WORKER_1_TLS_PILOT_EVIDENCE_MARKER}" \
+  "${WORKER_1_HTTP3_PILOT_EVIDENCE_MARKER}"
 echo ""
 echo "============================================="
 echo "  PROTOCOL VALIDATION COMPLETE"

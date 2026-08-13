@@ -84,6 +84,8 @@ def _write_fixture(tmp_path: Path, transport: str = "tls13") -> tuple[Path, Path
         "repetition": 1,
         "worker_count": 1,
         "worker_index": 0,
+        "worker_gpu_index": 2,
+        "worker_gpu_uuid": "GPU-2222",
         "backend": "local_vllm",
         "backend_ip": "10.200.0.1",
         "backend_port": 8444 if transport == "http3" else 8443,
@@ -134,6 +136,10 @@ def _validate(manifest_path: Path, results_path: Path, transport: str = "tls13")
         else "tcp port 8443",
         seed=SEED,
         max_output_tokens=MAX_OUTPUT_TOKENS,
+        backend_port=8444 if transport == "http3" else 8443,
+        worker_gpu_index=2,
+        worker_gpu_uuid="GPU-2222",
+        topology_worker_index=0,
     )
 
 
