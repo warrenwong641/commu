@@ -109,6 +109,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--worker-count", type=int, default=1)
     run.add_argument("--worker-index", type=int, default=0)
+    run.add_argument("--worker-gpu-index", type=int)
+    run.add_argument("--worker-gpu-uuid")
     run.add_argument("--no-capture", action="store_true")
     run.add_argument("--no-wait-after-request", action="store_true", help=argparse.SUPPRESS)
     run.add_argument("--session-id")
@@ -392,6 +394,8 @@ def main() -> int:
                 capture_stop_on_response=args.capture_stop_on_response,
                 worker_count=args.worker_count,
                 worker_index=args.worker_index,
+                worker_gpu_index=args.worker_gpu_index,
+                worker_gpu_uuid=args.worker_gpu_uuid,
                 no_capture=args.no_capture,
                 no_wait_after_request=args.no_wait_after_request,
                 backend=args.backend,

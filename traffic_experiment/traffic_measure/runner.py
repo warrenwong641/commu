@@ -51,6 +51,8 @@ class RunSettings:
     capture_stop_on_response: bool = False
     worker_count: int = 1
     worker_index: int = 0
+    worker_gpu_index: int | None = None
+    worker_gpu_uuid: str | None = None
     no_capture: bool = False
     no_wait_after_request: bool = False
     backend: str = "local_vllm"
@@ -848,6 +850,8 @@ def run_experiment(settings: RunSettings) -> Path:
                 "repetition": repetition,
                 "worker_count": settings.worker_count,
                 "worker_index": settings.worker_index,
+                "worker_gpu_index": settings.worker_gpu_index,
+                "worker_gpu_uuid": settings.worker_gpu_uuid,
                 "backend": settings.backend,
                 "backend_ip": backend_ip,
                 "backend_port": backend_port,

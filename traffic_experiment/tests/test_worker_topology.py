@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import json
 from pathlib import Path
 
 import pytest
-
 
 ROOT = Path(__file__).parents[1]
 LIB = ROOT / "scripts" / "lib.sh"
@@ -98,3 +98,119 @@ def test_single_caddy_config_has_only_primary_listener_and_backend():
     assert ":8543" not in single and ":8544" not in single
     assert "VLLM_SECONDARY_PORT" not in single
     assert ":8543" in dual and ":8544" in dual
+
+
+from traffic_experiment.traffic_measure.cli import _parser
+from traffic_experiment.traffic_measure.worker_topology import (
+    MARKER_NAME,
+    ensure_worker_topology,
+)
+
+
+def _topology(worker_count: int = 2) -> dict:
+    workers = [
+        {
+            "worker_index": 0,
+            "gpu_selector": "0",
+            "gpu_index": 0,
+            "gpu_uuid": "GPU-0000",
+            "vllm_port": 8000,
+            "secure_ports": {"tls13": 8443, "http3": 8444},
+        },
+        {
+            "worker_index": 1,
+            "gpu_selector": "1",
+            "gpu_index": 1,
+            "gpu_uuid": "GPU-1111",
+            "vllm_port": 8001,
+            "secure_ports": {"tls13": 8543, "http3": 8544},
+        },
+    ]
+    return {
+        "schema_version": 1,
+        "worker_count": worker_count,
+        "model": "Qwen/Qwen3.5-9B",
+        "served_model_name": "Qwen/Qwen3.5-9B",
+        "model_revision": "a" * 40,
+        "workers": workers[:worker_count],
+    }
+
+
+def test_topology_marker_is_created_and_exact_reuse_is_accepted(tmp_path: Path):
+    root = tmp_path / "runs"
+    expected = _topology()
+    marker = ensure_worker_topology(root, expected)
+
+    assert marker == root / MARKER_NAME
+    assert json.loads(marker.read_text(encoding="utf-8")) == expected
+    assert ensure_worker_topology(root, expected) == marker
+
+
+def test_topology_change_in_same_output_tree_is_rejected(tmp_path: Path):
+    root = tmp_path / "runs"
+    ensure_worker_topology(root, _topology(2))
+
+    with pytest.raises(ValueError, match="worker topology mismatch"):
+        ensure_worker_topology(root, _topology(1))
+
+
+def test_writable_topology_marker_is_rejected(tmp_path: Path):
+    root = tmp_path / "runs"
+    marker = ensure_worker_topology(root, _topology())
+    marker.chmod(0o644)
+
+    with pytest.raises(ValueError, match="topology marker is writable"):
+        ensure_worker_topology(root, _topology())
+
+
+def test_results_without_topology_marker_cannot_be_adopted(tmp_path: Path):
+    root = tmp_path / "runs"
+    results = root / "old" / "results.jsonl"
+    results.parent.mkdir(parents=True)
+    results.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="already contains results"):
+        ensure_worker_topology(root, _topology())
+    assert not (root / MARKER_NAME).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation needs privilege")
+def test_symlinked_output_tree_and_marker_are_rejected(tmp_path: Path):
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    with pytest.raises(ValueError, match="contains a symlink"):
+        ensure_worker_topology(alias, _topology())
+
+    marker = actual / MARKER_NAME
+    marker.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(ValueError, match="not a regular file"):
+        ensure_worker_topology(actual, _topology())
+
+
+def test_run_cli_accepts_physical_worker_identity():
+    args = _parser().parse_args(
+        [
+            "run",
+            "--manifest",
+            "manifest.jsonl",
+            "--output-dir",
+            "run",
+            "--samples",
+            "1",
+            "--repetitions",
+            "1",
+            "--worker-count",
+            "2",
+            "--worker-index",
+            "1",
+            "--worker-gpu-index",
+            "7",
+            "--worker-gpu-uuid",
+            "GPU-physical",
+        ]
+    )
+
+    assert args.worker_gpu_index == 7
+    assert args.worker_gpu_uuid == "GPU-physical"

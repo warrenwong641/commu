@@ -2,6 +2,7 @@
 set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 source "${SCRIPT_DIR}/protocol_admission.sh"
+source "${SCRIPT_DIR}/worker_topology.sh"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root: the matrix controls namespaces, qdiscs, MTU, and offloads." >&2
@@ -20,7 +21,12 @@ NETWORKS="${LAB_NETWORKS:-baseline rtt realistic}"
 TRANSPORTS="${LAB_TRANSPORTS:-tls13 http3}"
 WORKLOADS="${LAB_WORKLOADS:-qa summary}"
 CAPTURE_MAX="${CAPTURE_MAX_SECONDS:-900}"
-LIFECYCLE_DIR="$(absolute_from_experiment "${RUNS_ROOT}")/.lifecycle"
+PARALLEL_WORKERS="${PARALLEL_WORKERS:-2}"
+VLLM_PORT_STEP="${VLLM_PORT_STEP:-1}"
+load_measured_worker_topology
+RUNS_ROOT_ABS="$(absolute_from_experiment "${RUNS_ROOT}")"
+ensure_worker_topology "${RUNS_ROOT_ABS}"
+LIFECYCLE_DIR="${RUNS_ROOT_ABS}/.lifecycle"
 mkdir -p "${LIFECYCLE_DIR}"
 LIFECYCLE_STATE="${LIFECYCLE_DIR}/lab-matrix-$$.state"
 CADDY_STATE_FILE="${LIFECYCLE_DIR}/lab-matrix-$$.caddy.state"
@@ -142,6 +148,7 @@ run_cell() {
   CLIENT_NETNS="${NETNS}" \
   SECURE_PROXY_HOST="${PROXY_HOST}" \
   CAPTURE_INTERFACE_OVERRIDE="${CLIENT_IF}" \
+  PARALLEL_WORKERS="${PARALLEL_WORKERS}" \
     "${SCRIPT_DIR}/08_run_transport_profile_parallel.sh"
 }
 
