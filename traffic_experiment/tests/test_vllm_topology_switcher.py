@@ -200,3 +200,8 @@ def test_files_are_restricted_to_regular_user_owned_targets():
     assert "log must be a new user-owned regular file" in text
     assert '[[ ! -L "${LOCK_DIR}"' in text
     assert "set -o noclobber" in text
+    # GNU stat describes a zero-byte file as "regular empty file", so an exact
+    # comparison with "regular file" rejects the freshly created log on Linux.
+    log_helper = text[text.index("prepare_new_log() {") : text.index('if [[ "${ACTION}" == validate-config')]
+    assert '[[ -f "$1" && ! -L "$1"' in log_helper
+    assert 'stat -c %F -- "$1"' not in log_helper
