@@ -159,6 +159,15 @@ memory, and never writes or prints it. If the target cannot pass the health
 gate, it stops only the newly verified controller and automatically restarts
 the previous configuration. It never signals GPU engine PIDs directly.
 
+The active state file and its containing directory must be regular,
+non-symlinked, singly linked where applicable, and owned by that Unix user.
+The switcher accepts credential-free configuration files made only of blank
+lines, comments, and simple quoted `NAME="literal"` assignments (plus the
+required `export LD_LIBRARY_PATH="literal"`). It deliberately rejects shell
+expansion, substitutions, commands, duplicate assignments, inline comments,
+and credentials. The current and target files are validated and frozen before
+the API key is recovered.
+
 Treat a topology change as a service maintenance event. Finish or explicitly
 stop the current measured run first, then create a fresh run root after the
 switch. Do not change the target environment file while a switch is in

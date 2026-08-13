@@ -12,124 +12,135 @@ ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "24_switch_vllm_topology.sh"
 
 
-def _source() -> str:
+def source() -> str:
     return SCRIPT.read_text(encoding="utf-8")
 
 
-def _bash() -> str:
-    bash = shutil.which("bash")
+def bash() -> str:
+    result = shutil.which("bash")
     if os.name == "nt":
         candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/bin/bash.exe"
-        bash = str(candidate) if candidate.is_file() else ""
-    if not bash:
-        pytest.skip("bash is unavailable")
-    return bash
+        result = str(candidate) if candidate.is_file() else ""
+    if not result:
+        pytest.skip("bash unavailable")
+    return result
 
 
-def _bash_path(path: Path) -> str:
+def bp(path: Path) -> str:
     value = path.resolve().as_posix()
-    if os.name == "nt":
-        return f"/{value[0].lower()}{value[2:]}"
-    return value
+    return f"/{value[0].lower()}{value[2:]}" if os.name == "nt" else value
 
 
-def _config(tmp_path: Path, workers: int, gpus: str, extra: str = "") -> Path:
+def config(tmp_path: Path, workers: int, gpus: str, extra: str = "") -> Path:
     path = tmp_path / "target.env"
     path.write_text(
         "\n".join(
             (
-                f'PARALLEL_WORKERS="{workers}"',
-                f'CUDA_VISIBLE_DEVICES="{gpus}"',
-                'VLLM_HOST="127.0.0.1"',
-                'VLLM_PORT="8000"',
-                'VLLM_PORT_STEP="1"',
-                'VLLM_MODEL="Qwen/Qwen3.5-9B"',
-                'VLLM_MODEL_REVISION="revision"',
-                'RUNS_ROOT="runs/topology-test"',
-                extra,
-                "",
+                f'PARALLEL_WORKERS="{workers}"', f'CUDA_VISIBLE_DEVICES="{gpus}"',
+                'VLLM_HOST="127.0.0.1"', 'VLLM_PORT="8000"', 'VLLM_SECONDARY_PORT="8001"', 'VLLM_PORT_STEP="1"',
+                'VLLM_MODEL="Qwen/Qwen3.5-9B"', 'VLLM_SERVED_MODEL_NAME="Qwen/Qwen3.5-9B"',
+                'VLLM_MODEL_REVISION="revision"', 'VLLM_BIN="/nonexistent/static-validation"',
+                'MAX_MODEL_LEN="65536"', 'GPU_MEMORY_UTILIZATION="0.90"',
+                'TENSOR_PARALLEL_SIZE="1"', 'export LD_LIBRARY_PATH="/opt/cuda/lib"',
+                'RUNS_ROOT="runs/topology-test"', extra, "",
             )
-        ),
-        encoding="utf-8",
+        ), encoding="utf-8",
     )
     return path
 
 
-def _validate(path: Path) -> subprocess.CompletedProcess[str]:
+def validate(path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [_bash(), _bash_path(SCRIPT), "validate-config", "--target-env", _bash_path(path)],
-        cwd=path.parent,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
+        [bash(), bp(SCRIPT), "validate-config", "--target-env", bp(path)],
+        cwd=path.parent, capture_output=True, text=True, timeout=10, check=False,
     )
 
 
-@pytest.mark.parametrize(
-    ("workers", "gpus", "ports"),
-    ((1, "2", "ports=8000"), (2, "2,1", "ports=8000,8001")),
-)
-def test_validate_config_accepts_exact_one_and_two_worker_topologies(
-    tmp_path: Path, workers: int, gpus: str, ports: str
-):
-    result = _validate(_config(tmp_path, workers, gpus))
+@pytest.mark.parametrize(("workers", "gpus", "ports"), ((1, "2", "ports=8000"), (2, "2,1", "ports=8000,8001")))
+def test_accepts_exact_topologies(tmp_path: Path, workers: int, gpus: str, ports: str):
+    result = validate(config(tmp_path, workers, gpus))
     assert result.returncode == 0, result.stderr
-    assert f"workers={workers}" in result.stdout
-    assert f"gpu_indices={gpus}" in result.stdout
-    assert ports in result.stdout
+    assert f"workers={workers}" in result.stdout and f"gpu_indices={gpus}" in result.stdout and ports in result.stdout
 
 
-@pytest.mark.parametrize(
-    ("workers", "gpus", "message"),
-    (
-        (3, "2,1,0", "must be 1 or 2"),
-        (1, "2,1", "exactly one GPU per worker"),
-        (2, "2,2", "two distinct GPU indices"),
-        (2, "2, 1", "must not contain whitespace"),
-    ),
-)
-def test_validate_config_rejects_ambiguous_topologies(
-    tmp_path: Path, workers: int, gpus: str, message: str
-):
-    result = _validate(_config(tmp_path, workers, gpus))
-    assert result.returncode == 2
-    assert message in result.stderr
+@pytest.mark.parametrize(("workers", "gpus", "message"), (
+    (3, "2,1,0", "must be 1 or 2"),
+    (1, "2,1", "exactly one whitespace-free GPU per worker"),
+    (2, "2,2", "distinct GPU indices"),
+    (2, "2, 1", "exactly one whitespace-free GPU per worker"),
+))
+def test_rejects_ambiguous_topologies(tmp_path: Path, workers: int, gpus: str, message: str):
+    result = validate(config(tmp_path, workers, gpus))
+    assert result.returncode == 2 and message in result.stderr
 
 
-def test_validate_config_rejects_persisted_credentials(tmp_path: Path):
-    result = _validate(_config(tmp_path, 1, "2", 'LOCAL_VLLM_API_KEY="forbidden"'))
-    assert result.returncode == 2
-    assert "credential assignment" in result.stderr
+def test_parser_is_inert_and_credentials_are_rejected(tmp_path: Path):
+    marker = tmp_path / "executed"
+    result = validate(config(tmp_path, 1, "2", f'EVIL="$(touch {marker})"'))
+    assert result.returncode == 2 and not marker.exists()
+    result = validate(config(tmp_path, 1, "2", 'LOCAL_VLLM_API_KEY="forbidden"'))
+    assert result.returncode == 2 and "credential assignment" in result.stderr
     assert "forbidden" not in result.stdout + result.stderr
 
 
-def test_switcher_is_ownership_scoped_and_does_not_persist_or_expose_key():
-    source = _source()
-    state_writer = source[source.index("write_state() {") : source.index('if [[ "${ACTION}" == "validate-config"')]
-    start_body = source[source.index("start_service() {") : source.index("wait_service_ready() {")]
-
-    assert 'kill -TERM "${pid}"' in source
-    assert "pkill" not in source
-    assert "kill -KILL" not in source
-    assert "kill -- -" not in source
-    assert "nvidia-smi" not in source[source.index("stop_verified_controller() {") : source.index("start_service() {")]
-    assert 'controller_gpu_processes_exact "${controller}" || return 1' in source
-    assert "LOCAL_VLLM_API_KEY" not in state_writer
-    assert 'export LOCAL_VLLM_API_KEY="${api_key}"' in start_body
-    assert "--header @-" in source
-    assert "Authorization: Bearer ${" not in source
-    assert "/v1/models" in source
+def test_configs_freeze_before_key_recovery_and_are_never_sourced():
+    text = source()
+    switch = text[text.rindex('[[ -n "${TARGET_ENV}" ]] || die "--target-env required"') :]
+    assert switch.index("PREV_FROZEN=") < switch.index('VKEY="$(proc_env_value')
+    assert switch.index("TARGET_FROZEN=") < switch.index('VKEY="$(proc_env_value')
+    assert 'source "${' not in text
+    assert 'LOCAL_VLLM_API_KEY="${key}"' in text
+    writer = text[text.index("write_state() {") : text.index("prepare_new_log() {")]
+    assert "LOCAL_VLLM_API_KEY" not in writer
 
 
-def test_switcher_has_fail_closed_identity_checks_and_automatic_rollback():
-    source = _source()
-    stop_body = source[source.index("stop_verified_controller() {") : source.index("STARTED_PID=")]
+def test_stop_is_exact_and_gpu_engines_are_never_signalled():
+    text = source()
+    stop = text[text.index("stop_controller() {") : text.index("START_PID=")]
+    assert 'validate_controller "${pid}" "${ticks}" "${config}" "${uid}" || return 1' in stop
+    assert 'capture_owned_resources "${pid}" || return 1' in stop
+    assert "old_resources_gone" in stop
+    assert 'kill -TERM "${pid}"' in stop
+    assert "pkill" not in text and "kill -KILL" not in text and "kill -- -" not in text
 
-    assert 'validate_controller "${pid}" "${ticks}" "${config}" "${uid}" || return 1' in stop_body
-    assert 'wait_controller_exit "${pid}" "${ticks}" || return 1' in stop_body
-    assert 'for port in 8000 8001; do port_closed "${port}" || return 1; done' in stop_body
-    assert "attempting verified rollback" in source
-    assert 'start_service "${PREVIOUS_CONFIG}"' in source
-    assert 'write_state "${PREVIOUS_CONFIG}" rolled_back' in source
-    assert 'if [[ "${CFG_WORKERS}" == "1" ]]; then port_closed 8001 || return 1; fi' in source
+
+def test_ss_target_gpu_and_identity_checks_fail_closed():
+    text = source()
+    assert 'rows="$(ss_rows -H -ltn "sport = :$1")" || return 1' in text
+    assert 'audit_target_gpus || die "target GPU has an unrelated compute process"' in text
+    assert '[[ "${allowed}" == true ]] || return 1' in text
+    assert 'identity_gone "${VAP[i]}" "${VAT[i]}" || return 1' in text
+    assert 'identity_gone "${VEP[i]}" "${VET[i]}" || return 1' in text
+
+
+def test_state_publication_is_durable_and_transactional():
+    text = source()
+    writer = text[text.index("write_state() {") : text.index("prepare_new_log() {")]
+    for expected in ("mktemp", 'sync -f "${tmp}"', 'mv -- "${tmp}" "${STATE_FILE}"', 'sync -f "${STATE_DIR}"'):
+        assert expected in writer
+    assert 'target_ok}" == true ]] && write_state' in text
+    assert "rollback state publication failed" in text
+    assert 'stop_controller "${START_PID}"' in text
+
+
+def test_exact_legacy_v1_is_live_derived_then_upgraded_to_v2():
+    text = source()
+    legacy_fields = (
+        "config_sha256", "controller_pid", "controller_start_ticks", "worker_${i}_port",
+        "worker_${i}_gpu_index", "worker_${i}_gpu_uuid", "worker_${i}_api_pid",
+        "worker_${i}_engine_pid",
+    )
+    assert "commu-vllm-service-state-v1" in text
+    for field in legacy_fields:
+        assert field in text
+    assert 'if [[ "${schema}" == commu-vllm-service-state-v2 ]]' in text
+    assert "worker_${i}_api_start_ticks" in text and "worker_${i}_engine_start_ticks" in text
+    assert "schema=commu-vllm-service-state-v2" in text
+
+
+def test_files_are_restricted_to_regular_user_owned_targets():
+    text = source()
+    assert "state must be singly-linked and user-owned" in text
+    assert "log must be a new user-owned regular file" in text
+    assert '[[ ! -L "${LOCK_DIR}"' in text
+    assert "set -o noclobber" in text
