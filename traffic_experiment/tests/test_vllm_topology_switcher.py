@@ -116,10 +116,37 @@ def test_configs_freeze_before_key_recovery_and_are_never_sourced():
     switch = text[text.rindex('[[ -n "${TARGET_ENV}" ]] || die "--target-env required"') :]
     assert switch.index("PREV_FROZEN=") < switch.index('VKEY="$(proc_env_value')
     assert switch.index("TARGET_FROZEN=") < switch.index('VKEY="$(proc_env_value')
+    # save_cfg serializes CFG_*, so update CFG_PATH/CFG_SHA rather than the
+    # PREV_/TARGET_ snapshots that save_cfg is about to overwrite.
+    assert 'CFG_PATH="${PREV_FROZEN}"; CFG_SHA="$(sha256_file "${PREV_FROZEN}")"; save_cfg PREV' in switch
+    assert 'CFG_PATH="${TARGET_FROZEN}"; CFG_SHA="$(sha256_file "${TARGET_FROZEN}")"; save_cfg TARGET' in switch
+    assert 'PREV_PATH="${PREV_FROZEN}"' not in switch
+    assert 'TARGET_PATH="${TARGET_FROZEN}"' not in switch
     assert 'source "${' not in text
     assert 'LOCAL_VLLM_API_KEY="${key}"' in text
     writer = text[text.index("write_state() {") : text.index("prepare_new_log() {")]
     assert "LOCAL_VLLM_API_KEY" not in writer
+
+
+def test_unused_frozen_configs_are_cleaned_without_deleting_live_config():
+    text = source()
+    cleanup = text[
+        text.index("remove_unused_frozen_config() {") :
+        text.index("validate_controller() {")
+    ]
+    assert '"${path}" != "${KEEP_FROZEN}"' in cleanup
+    assert '"${STATE_DIR}"/.previous.*.env|"${STATE_DIR}"/.target.*.env' in cleanup
+    assert '[[ -f "${path}" && ! -L "${path}"' in cleanup
+    assert 'rm -- "${path}"' in cleanup
+    assert 'trap cleanup_switcher_exit EXIT' in text
+
+    switch = text[text.index('stop_controller "${OLD_C}"') :]
+    target_keep = switch.index('KEEP_FROZEN="${TARGET_FROZEN}"')
+    target_start = switch.index('start_service "${TARGET_PATH}"')
+    rollback_keep = switch.index('KEEP_FROZEN="${PREV_FROZEN}"')
+    rollback_start = switch.index('start_service "${PREV_PATH}"')
+    assert target_keep < target_start < rollback_keep < rollback_start
+    assert switch.count('KEEP_FROZEN=""') >= 4
 
 
 def test_stop_is_exact_and_gpu_engines_are_never_signalled():
