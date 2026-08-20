@@ -513,7 +513,7 @@ trap cleanup EXIT INT TERM HUP
 
 verify_active_service() {
   local state_parent active_config active_hash controller api engine gpu_index gpu_uuid
-  local active_vllm active_ld controller_cwd api_cwd engine_cwd engine_title
+  local active_vllm active_ld controller_cwd api_cwd engine_cwd engine_title engine_arg_index
   local -a controller_args=() api_args=() engine_args=() expected_api_args=()
   state_parent="$(dirname -- "${SERVICE_STATE_ORIGINAL}")"
   regular_root_file "${SERVICE_STATE}" || die "unsafe pinned service state"
@@ -602,11 +602,14 @@ verify_active_service() {
   is_descendant "${engine}" "${controller}" || die "GPU engine is not owned by the controller"
   engine_cwd="$(/usr/bin/readlink -e -- "/proc/${engine}/cwd")" || die "cannot inspect engine cwd"
   process_args "${engine}" engine_args || die "cannot inspect engine argv"
-  [[ "${#engine_args[@]}" -eq 1 ]] || die "GPU engine argv drifted"
+  [[ "${#engine_args[@]}" -ge 1 ]] || die "GPU engine argv drifted"
   engine_title="${engine_args[0]}"
   # setproctitle(3) pads unused argv storage with ASCII spaces. Accept only
   # that exact suffix padding and require the canonical title after trimming.
   while [[ "${engine_title}" == *" " ]]; do engine_title="${engine_title% }"; done
+  for ((engine_arg_index=1;engine_arg_index<${#engine_args[@]};engine_arg_index++)); do
+    [[ -z "${engine_args[engine_arg_index]}" ]] || die "GPU engine argv drifted"
+  done
   [[ "${engine_cwd}" == "${EXPECTED_CONTROLLER_CWD}" &&
     "$(process_exe "${engine}")" == "$(/usr/bin/readlink -e -- "${EXPECTED_API_PYTHON}")" &&
     "${engine_title}" == 'VLLM::EngineCore' &&

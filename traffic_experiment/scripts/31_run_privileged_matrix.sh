@@ -523,7 +523,7 @@ trap cleanup EXIT INT TERM HUP
 
 verify_active_service() {
   local state_parent active_config active_hash controller api engine gpu_index gpu_uuid
-  local active_vllm active_ld controller_cwd api_cwd engine_cwd
+  local active_vllm active_ld controller_cwd api_cwd engine_cwd engine_title engine_arg_index
   local -a controller_args=() api_args=() engine_args=() expected_api_args=()
   state_parent="$(dirname -- "${SERVICE_STATE_ORIGINAL}")"
   regular_root_file "${SERVICE_STATE}" || die "unsafe pinned service state"
@@ -613,9 +613,15 @@ verify_active_service() {
   is_descendant "${engine}" "${controller}" || die "GPU engine is not owned by the controller"
   engine_cwd="$(/usr/bin/readlink -e -- "/proc/${engine}/cwd")" || die "cannot inspect engine cwd"
   process_args "${engine}" engine_args || die "cannot inspect engine argv"
+  [[ "${#engine_args[@]}" -ge 1 ]] || die "engine cwd/argv/process group drifted"
+  engine_title="${engine_args[0]}"
+  while [[ "${engine_title}" == *" " ]]; do engine_title="${engine_title% }"; done
+  for ((engine_arg_index=1;engine_arg_index<${#engine_args[@]};engine_arg_index++)); do
+    [[ -z "${engine_args[engine_arg_index]}" ]] || die "engine cwd/argv/process group drifted"
+  done
   [[ "${engine_cwd}" == "${EXPECTED_CONTROLLER_CWD}" &&
     "$(process_exe "${engine}")" == "$(/usr/bin/readlink -e -- "${EXPECTED_API_PYTHON}")" &&
-    "${#engine_args[@]}" -eq 1 && "${engine_args[0]}" == 'VLLM::EngineCore' &&
+    "${engine_title}" == 'VLLM::EngineCore' &&
     "$(process_group "${engine}")" == "${api}" && "$(process_session "${engine}")" == "${api}" ]] ||
     die "engine cwd/argv/process group drifted"
   local apps matching

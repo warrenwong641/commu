@@ -293,6 +293,7 @@ def test_root_runner_has_clean_environment_lock_and_fail_closed_inventory() -> N
     assert 'while [[ "${engine_title}" == *" " ]]' in text
     assert '"${engine_title}" == \'VLLM::EngineCore\'' in text
     assert '"${engine_args[0]}" == \'VLLM::EngineCore\'' not in text
+    assert '[[ -z "${engine_args[engine_arg_index]}" ]] || die' in text
     publish = text.index("publish_deferred_admission\n")
     assert text.rfind("verify_active_service\n", 0, publish) != -1
     assert text.index("verify_active_service\n", publish) != -1

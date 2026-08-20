@@ -41,6 +41,8 @@ def test_matrix_release_is_separate_from_pilot_launcher() -> None:
     fixed = matrix.index('[[ "${HOME}" == /root')
     assert scan < clean < fixed
     assert "|OLDPWD|" not in matrix
+    assert '[[ -z "${engine_args[engine_arg_index]}" ]] || die' in matrix
+    assert '"${engine_title}" == \'VLLM::EngineCore\'' in matrix
 
 
 def test_builder_is_platform_stable_credential_free_and_matrix_scoped() -> None:
