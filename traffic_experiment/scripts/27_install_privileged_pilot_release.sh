@@ -49,9 +49,7 @@ EXPECTED_CADDY_VERSION='v2.11.3 h1:/vFbdjcs2DtzcWTIxHybf5R5TspYFFThlZffChyBFHg='
 EXPECTED_SERVICE_USER=wongshingyin
 EXPECTED_SERVICE_UID=1007
 EXPECTED_SERVICE_GID=1007
-EXPECTED_SERVICE_STATE=/home/wongshingyin/.config/commu/qwen35-e12240f/service-attempt-5-gpu2-1.state
-EXPECTED_GPU_INDEX=2
-EXPECTED_GPU_UUID=GPU-41d1f86d-0197-51fe-c1ef-ad53c99e3223
+EXPECTED_SERVICE_STATE_ROOT=/home/wongshingyin/.config/commu
 EXPECTED_MODEL=Qwen/Qwen3.5-9B
 EXPECTED_SERVED_MODEL=Qwen/Qwen3.5-9B
 EXPECTED_MODEL_REVISION=c202236235762e1c871ad0ccb60c8ee5ba337b9a
@@ -330,13 +328,12 @@ EARLY_CONFIG="${AUTHORIZED_RELEASE}/config/server.env"
   "$(early_value purpose "${EARLY_METADATA}")" == protocol-pilots-only &&
   "$(early_value repository_sha "${EARLY_METADATA}")" == "${EXPECTED_REPOSITORY_SHA}" ]] ||
   die "bundle metadata is outside this installer's authorized release"
-[[ "$(early_value schema "${EARLY_POLICY}")" == commu-privileged-pilot-policy-v1 &&
+[[ "$(early_value schema "${EARLY_POLICY}")" == commu-privileged-pilot-policy-v2 &&
   "$(early_value repository_sha "${EARLY_POLICY}")" == "${EXPECTED_REPOSITORY_SHA}" &&
   "$(early_value service_user "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_USER}" &&
   "$(early_value service_uid "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_UID}" &&
   "$(early_value service_gid "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_GID}" &&
-  "$(early_value service_state "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_STATE}" &&
-  "$(early_value expected_gpu_uuid "${EARLY_POLICY}")" == "${EXPECTED_GPU_UUID}" ]] ||
+  "$(early_value service_state_root "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_STATE_ROOT}" ]] ||
   die "bundle policy is outside this installer's authorized service scope"
 /usr/bin/python3 -I "${VALIDATOR}" check \
   --input "${EARLY_CONFIG}" --repository-sha "${EXPECTED_REPOSITORY_SHA}" \
@@ -346,8 +343,7 @@ early_config_value() {
   /usr/bin/python3 -I "${VALIDATOR}" get \
     --input "${EARLY_CONFIG}" --repository-sha "${EXPECTED_REPOSITORY_SHA}" --key "$1"
 }
-[[ "$(early_config_value CUDA_VISIBLE_DEVICES)" == "${EXPECTED_GPU_INDEX}" &&
-  "$(early_config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
+[[ "$(early_config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
   "$(early_config_value VLLM_SERVED_MODEL_NAME)" == "${EXPECTED_SERVED_MODEL}" &&
   "$(early_config_value VLLM_MODEL_REVISION)" == "${EXPECTED_MODEL_REVISION}" &&
   "$(early_config_value MANIFEST_PATH)" == "${EXPECTED_QA_MANIFEST}" &&
@@ -530,16 +526,16 @@ policy_value() {
 [[ "$(metadata_value purpose)" == protocol-pilots-only ]] || die "release is not pilots-only"
 REPOSITORY_SHA="$(metadata_value repository_sha)" || die "release has no repository SHA"
 [[ "${REPOSITORY_SHA}" == "${EXPECTED_REPOSITORY_SHA}" ]] || die "release repository SHA mismatch"
+[[ "$(policy_value schema)" == commu-privileged-pilot-policy-v2 ]] || die "wrong policy schema"
+[[ "$(policy_value repository_sha)" == "${REPOSITORY_SHA}" ]] || die "policy/release SHA mismatch"
 SERVICE_UID="$(policy_value service_uid)" || die "policy has no service UID"
 SERVICE_GID="$(policy_value service_gid)" || die "policy has no service GID"
 SERVICE_USER="$(policy_value service_user)" || die "policy has no service user"
-SERVICE_STATE="$(policy_value service_state)" || die "policy has no service state path"
-POLICY_GPU_UUID="$(policy_value expected_gpu_uuid)" || die "policy has no GPU UUID"
+SERVICE_STATE_ROOT="$(policy_value service_state_root)" || die "policy has no service-state root"
 [[ "${SERVICE_USER}" == "${EXPECTED_SERVICE_USER}" &&
   "${SERVICE_UID}" == "${EXPECTED_SERVICE_UID}" &&
   "${SERVICE_GID}" == "${EXPECTED_SERVICE_GID}" &&
-  "${SERVICE_STATE}" == "${EXPECTED_SERVICE_STATE}" &&
-  "${POLICY_GPU_UUID}" == "${EXPECTED_GPU_UUID}" ]] ||
+  "${SERVICE_STATE_ROOT}" == "${EXPECTED_SERVICE_STATE_ROOT}" ]] ||
   die "bundle policy is outside the independently authorized service scope"
 [[ "$(/usr/bin/id -u "${SERVICE_USER}")" == "${SERVICE_UID}" &&
   "$(/usr/bin/id -g "${SERVICE_USER}")" == "${SERVICE_GID}" ]] ||
@@ -554,8 +550,7 @@ config_value() {
   /usr/bin/python3 -I "${VALIDATOR}" get \
     --input "${CONFIG}" --repository-sha "${REPOSITORY_SHA}" --key "$1"
 }
-[[ "$(config_value CUDA_VISIBLE_DEVICES)" == "${EXPECTED_GPU_INDEX}" &&
-  "$(config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
+[[ "$(config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
   "$(config_value VLLM_SERVED_MODEL_NAME)" == "${EXPECTED_SERVED_MODEL}" &&
   "$(config_value VLLM_MODEL_REVISION)" == "${EXPECTED_MODEL_REVISION}" &&
   "$(config_value MANIFEST_PATH)" == "${EXPECTED_QA_MANIFEST}" &&
@@ -683,8 +678,7 @@ else
 fi
 /usr/bin/install -d -o root -g root -m 0700 \
   "${OUTPUT_BASE}/${REPOSITORY_SHA}" \
-  "${OUTPUT_BASE}/${REPOSITORY_SHA}/runs" \
-  "${OUTPUT_BASE}/${REPOSITORY_SHA}/caddy"
+  "${OUTPUT_BASE}/${REPOSITORY_SHA}/snapshots"
 /usr/bin/mv -- "${RELEASE}" "${DESTINATION}"
 /usr/bin/sync -f "${DESTINATION}"
 /usr/bin/sync -f "${BASE}"
@@ -696,4 +690,4 @@ trap - EXIT
 /usr/bin/find "${INSTALL_ROOT}" -depth -delete
 printf 'PRIVILEGED_PILOT_RELEASE_INSTALLED repository_sha=%s\n' "${REPOSITORY_SHA}"
 printf 'release_root=%s\n' "${DESTINATION}"
-printf 'run_command=sudo %s run\n' "${RUNNER}"
+printf 'run_command=sudo %s run --service-state /absolute/path/to/service.state\n' "${RUNNER}"

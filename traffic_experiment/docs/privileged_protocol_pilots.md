@@ -17,8 +17,9 @@ The bundle is created without privilege. The root bootstrap then:
 1. opens the bundle once and copies from that pinned file descriptor;
 2. checks the archive SHA-256 for copy integrity, then independently authorizes
    executable bytes through the digest embedded in the reviewed installer;
-3. pins the exact account, state path, GPU 2 UUID, model/revision, served name,
-   and two frozen manifest digests before creating scoped output or locks;
+3. pins the exact account, service-state root, model/revision, served name, and
+   two frozen manifest digests; each invocation then selects one state file and
+   verifies its GPU index/UUID against the live NVIDIA inventory;
 4. rejects absolute paths, traversal, duplicate entries, links, devices, and
    oversized expansion;
 5. rebuilds CPython 3.12 with `--copies`, offline, from the exact committed
@@ -46,7 +47,8 @@ admission candidate; its privileged parent rechecks the service and teardown,
 then publishes `PROTOCOL_VALIDATION_OK`. `ss` and `ip` inventory errors are
 fatal rather than being interpreted as an empty system.
 
-Pilot output is under `/var/lib/commu-protocol-pilots/COMMIT/`, whose complete
+Pilot output is isolated by the verified GPU identity under
+`/var/lib/commu-protocol-pilots/COMMIT/gpu-INDEX-GPU-UUID/`, whose complete
 ancestor chain is root-owned. The installed source/runtime is under
 `/opt/commu-protocol-pilots/releases/COMMIT/`.
 
@@ -105,9 +107,8 @@ bash traffic_experiment/scripts/26_create_privileged_pilot_bundle.sh \
   --qa-manifest traffic_experiment/artifacts/requests_32.jsonl \
   --summary-manifest traffic_experiment/artifacts/event_summaries_10.jsonl \
   --wheelhouse ~/.config/commu/qwen35-2b96b6b49f01/runner-wheelhouse-cp312-linux-x86_64-v1 \
-  --service-state ~/.config/commu/qwen35-e12240f/service-attempt-5-gpu2-1.state \
+  --service-state-root ~/.config/commu \
   --service-user "$(id -un)" --service-uid "$(id -u)" --service-gid "$(id -g)" \
-  --gpu-uuid GPU-41d1f86d-0197-51fe-c1ef-ad53c99e3223 \
   --output ~/.config/commu/commu-privileged-pilot.tar.gz
 ```
 
@@ -137,22 +138,33 @@ sudo /root/commu-install-privileged-pilot-release.sh \
   BUNDLE_SHA256 REPOSITORY_SHA
 ```
 
-Use the exact installed path printed by the installer:
+Use the exact installed path printed by the installer. Set `SERVICE_STATE` to
+the running one-worker state for the GPU being tested; the same selected state
+must be supplied to `check`, `run`, and `admission`:
 
 ```bash
-sudo /opt/commu-protocol-pilots/releases/REPOSITORY_SHA/repository/\
-traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh check
+SERVICE_STATE=/home/wongshingyin/.config/commu/qwen35-e12240f/service-gpu4.state
 
 sudo /opt/commu-protocol-pilots/releases/REPOSITORY_SHA/repository/\
-traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh run
+traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh \
+  check --service-state "${SERVICE_STATE}"
 
 sudo /opt/commu-protocol-pilots/releases/REPOSITORY_SHA/repository/\
-traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh admission
+traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh \
+  run --service-state "${SERVICE_STATE}"
+
+sudo /opt/commu-protocol-pilots/releases/REPOSITORY_SHA/repository/\
+traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh \
+  admission --service-state "${SERVICE_STATE}"
 ```
 
 `check` performs no generation. `run` performs only the two one-request pilots
 and publishes admission after complete teardown and a post-pilot service
 identity check. `admission` only revalidates existing immutable evidence.
+The release is not pinned to a numbered GPU: it accepts any installed GPU whose
+selected state, active config, live index-to-UUID mapping, process ownership,
+and exclusive engine all pass the reviewed checks. It does not select an idle
+GPU or move vLLM; the one-worker service must already be running on that GPU.
 
 This release does not complete the one-GPU experiment. A one-GPU full matrix
 still needs a separate reviewed root-owned launcher/release and explicit run

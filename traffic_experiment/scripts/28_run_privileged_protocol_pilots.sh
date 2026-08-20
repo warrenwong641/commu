@@ -15,8 +15,7 @@ EXPECTED_API_LD_LIBRARY_PATH=/home/wongshingyin/.venvs/commu-qwen35-e12240f/lib/
 EXPECTED_SERVICE_USER=wongshingyin
 EXPECTED_SERVICE_UID=1007
 EXPECTED_SERVICE_GID=1007
-EXPECTED_SERVICE_STATE=/home/wongshingyin/.config/commu/qwen35-e12240f/service-attempt-5-gpu2-1.state
-EXPECTED_GPU_UUID_PIN=GPU-41d1f86d-0197-51fe-c1ef-ad53c99e3223
+EXPECTED_SERVICE_STATE_ROOT=/home/wongshingyin/.config/commu
 
 FIXED_PATH=/usr/sbin:/usr/bin
 if [[ "${COMMU_PRIVILEGED_PILOT_CLEAN_ENV:-}" != 1 ]]; then
@@ -50,15 +49,23 @@ done < <(/usr/bin/env)
   exit 2
 }
 
-ACTION="${1:-check}"
-[[ $# -le 1 ]] || { printf 'usage: %s {check|run|admission}\n' "$0" >&2; exit 2; }
-case "${ACTION}" in check|run|admission) ;; *) printf 'usage: %s {check|run|admission}\n' "$0" >&2; exit 2 ;; esac
+ACTION="${1:-}"
+shift || true
+SERVICE_STATE_REQUESTED=""
+if [[ "${1:-}" == --service-state && $# -eq 2 ]]; then
+  SERVICE_STATE_REQUESTED="$2"
+else
+  printf 'usage: %s {check|run|admission} --service-state /absolute/path/to/service.state\n' "$0" >&2
+  exit 2
+fi
+case "${ACTION}" in check|run|admission) ;; *) printf 'usage: %s {check|run|admission} --service-state /absolute/path/to/service.state\n' "$0" >&2; exit 2 ;; esac
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPOSITORY_ROOT="$(cd -- "${EXPERIMENT_ROOT}/.." && pwd)"
 RELEASE_ROOT="$(cd -- "${REPOSITORY_ROOT}/.." && pwd)"
-CONFIG="${RELEASE_ROOT}/config/server.env"
+CONFIG_TEMPLATE="${RELEASE_ROOT}/config/server.env"
+CONFIG=""
 POLICY="${RELEASE_ROOT}/policy/service.state"
 METADATA="${RELEASE_ROOT}/RELEASE_METADATA"
 MANIFEST="${RELEASE_ROOT}/RELEASE_FILES.sha256"
@@ -80,6 +87,11 @@ ACTIVE_CONFIG_SNAPSHOT=""
 ACTIVE_CONFIG_SOURCE_ID=""
 ADMISSION_PUBLISHED=0
 ADMISSION_MARKER_ID=""
+BASE_OUTPUT_ROOT=""
+OUTPUT_ROOT=""
+RUNTIME_CONFIG=""
+PROTOCOL_ROOT=""
+NETWORK_STATE_ROOT=""
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 
@@ -319,7 +331,7 @@ release_precheck() {
   trusted_root_directory /run/lock 1777 || die "unsafe system lock directory"
   trusted_root_directory /run/lock/commu-protocol-pilots 755 ||
     die "unsafe project lock directory"
-  for file in "${CONFIG}" "${POLICY}" "${METADATA}" "${MANIFEST}" "${RUNTIME_MANIFEST}" "${VALIDATOR}" "${PILOT_SCRIPT}" "${RUNNER_PYTHON}" "${CADDY}"; do
+  for file in "${CONFIG_TEMPLATE}" "${POLICY}" "${METADATA}" "${MANIFEST}" "${RUNTIME_MANIFEST}" "${VALIDATOR}" "${PILOT_SCRIPT}" "${RUNNER_PYTHON}" "${CADDY}"; do
     regular_root_file "${file}" || die "unsafe release file: ${file}"
   done
   case "${RELEASE_ROOT}" in /opt/commu-protocol-pilots/releases/[0-9a-f][0-9a-f]*) ;; *) die "release is outside the fixed installation root" ;; esac
@@ -341,39 +353,75 @@ release_precheck() {
     trusted_root_directory "${directory}" || die "unsafe release directory: ${directory}"
   done
   /usr/bin/python3 -I "${VALIDATOR}" check \
-    --input "${CONFIG}" --repository-sha "${REPOSITORY_SHA}" --release-root "${RELEASE_ROOT}" ||
+    --input "${CONFIG_TEMPLATE}" --repository-sha "${REPOSITORY_SHA}" --release-root "${RELEASE_ROOT}" ||
     die "privileged config validation failed"
 }
 
 load_policy() {
-  [[ "$(policy_value schema)" == commu-privileged-pilot-policy-v1 ]] || die "wrong policy schema"
+  [[ "$(policy_value schema)" == commu-privileged-pilot-policy-v2 ]] || die "wrong policy schema"
   [[ "$(policy_value repository_sha)" == "${REPOSITORY_SHA}" ]] || die "policy/release SHA mismatch"
-  SERVICE_STATE="$(policy_value service_state)" || die "missing service state path"
+  SERVICE_STATE_ROOT="$(policy_value service_state_root)" || die "missing service-state root"
   SERVICE_USER="$(policy_value service_user)" || die "missing service user"
   SERVICE_UID="$(policy_value service_uid)" || die "missing service UID"
   SERVICE_GID="$(policy_value service_gid)" || die "missing service GID"
-  EXPECTED_GPU_UUID="$(policy_value expected_gpu_uuid)" || die "missing expected GPU UUID"
   [[ "${SERVICE_USER}" == "${EXPECTED_SERVICE_USER}" &&
     "${SERVICE_UID}" == "${EXPECTED_SERVICE_UID}" &&
     "${SERVICE_GID}" == "${EXPECTED_SERVICE_GID}" &&
-    "${SERVICE_STATE}" == "${EXPECTED_SERVICE_STATE}" &&
-    "${EXPECTED_GPU_UUID}" == "${EXPECTED_GPU_UUID_PIN}" ]] ||
+    "${SERVICE_STATE_ROOT}" == "${EXPECTED_SERVICE_STATE_ROOT}" ]] ||
     die "installed service policy is outside the reviewed scope"
-  [[ "${SERVICE_STATE}" = /* && "${SERVICE_STATE}" != *$'\n'* ]] || die "unsafe service state path"
+  [[ "${SERVICE_STATE_ROOT}" = /* && "${SERVICE_STATE_ROOT}" != *$'\n'* ]] || die "unsafe service-state root"
   [[ "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ && "${SERVICE_UID}" =~ ^[1-9][0-9]*$ && "${SERVICE_GID}" =~ ^[1-9][0-9]*$ ]] || die "unsafe service identity policy"
-  [[ "${EXPECTED_GPU_UUID}" =~ ^GPU-[0-9A-Fa-f-]+$ ]] || die "unsafe GPU UUID policy"
   [[ "$(/usr/bin/id -u "${SERVICE_USER}")" == "${SERVICE_UID}" && "$(/usr/bin/id -g "${SERVICE_USER}")" == "${SERVICE_GID}" ]] || die "service account identity drifted"
+  [[ -d "${SERVICE_STATE_ROOT}" && ! -L "${SERVICE_STATE_ROOT}" &&
+    "$(/usr/bin/readlink -e -- "${SERVICE_STATE_ROOT}")" == "${SERVICE_STATE_ROOT}" &&
+    "$(/usr/bin/stat -c %u -- "${SERVICE_STATE_ROOT}")" == "${SERVICE_UID}" ]] ||
+    die "unsafe service-state root"
+  SERVICE_STATE="$(/usr/bin/readlink -e -- "${SERVICE_STATE_REQUESTED}")" || die "selected service state does not exist"
+  case "${SERVICE_STATE}" in
+    "${SERVICE_STATE_ROOT}"/qwen35-[A-Za-z0-9._-]*/service-[A-Za-z0-9._-]*.state) ;;
+    *) die "selected service state is outside the reviewed state hierarchy" ;;
+  esac
 }
 
-check_output_hierarchy() {
+check_base_output_hierarchy() {
   local root="/var/lib/commu-protocol-pilots/${REPOSITORY_SHA}" path
-  for path in /var/lib/commu-protocol-pilots "${root}" "${root}/runs" "${root}/caddy"; do
+  for path in /var/lib/commu-protocol-pilots "${root}" "${root}/snapshots"; do
     [[ -d "${path}" && ! -L "${path}" && "$(/usr/bin/stat -c %u -- "${path}")" == 0 && "$(/usr/bin/stat -c %g -- "${path}")" == 0 && "$(/usr/bin/stat -c %a -- "${path}")" == 700 ]] ||
       die "unsafe root-owned output directory: ${path}"
   done
-  OUTPUT_ROOT="${root}"
-  PROTOCOL_ROOT="${root}/runs/protocol_validation"
-  NETWORK_STATE_ROOT="${root}/network_state"
+  BASE_OUTPUT_ROOT="${root}"
+}
+
+select_gpu_output_hierarchy() {
+  local gpu_index gpu_uuid actual_uuid scope path
+  gpu_index="$(state_value worker_0_gpu_index)" || die "service state has no GPU index"
+  gpu_uuid="$(state_value worker_0_gpu_uuid)" || die "service state has no GPU UUID"
+  [[ "${gpu_index}" =~ ^(0|[1-9][0-9]*)$ && "${gpu_uuid}" =~ ^GPU-[0-9A-Fa-f-]+$ ]] ||
+    die "service state has unsafe GPU identity"
+  actual_uuid="$(/usr/bin/nvidia-smi -i "${gpu_index}" --query-gpu=uuid --format=csv,noheader,nounits 2>/dev/null)" ||
+    die "GPU inventory failed"
+  actual_uuid="${actual_uuid//[[:space:]]/}"
+  [[ "${actual_uuid}" == "${gpu_uuid}" ]] || die "selected GPU index/UUID mapping drifted"
+  EXPECTED_GPU_INDEX="${gpu_index}"
+  EXPECTED_GPU_UUID="${gpu_uuid}"
+  scope="gpu-${gpu_index}-${gpu_uuid}"
+  OUTPUT_ROOT="${BASE_OUTPUT_ROOT}/${scope}"
+  for path in "${OUTPUT_ROOT}" "${OUTPUT_ROOT}/runs" "${OUTPUT_ROOT}/caddy"; do
+    if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+      /usr/bin/install -d -o root -g root -m 0700 "${path}"
+    fi
+    [[ -d "${path}" && ! -L "${path}" && "$(/usr/bin/stat -c %u:%g:%a -- "${path}")" == 0:0:700 ]] ||
+      die "unsafe GPU-scoped output directory: ${path}"
+  done
+  RUNTIME_CONFIG="${OUTPUT_ROOT}/.runtime-config-$$"
+  /usr/bin/python3 -I "${VALIDATOR}" materialize \
+    --input "${CONFIG_TEMPLATE}" --output "${RUNTIME_CONFIG}" \
+    --repository-sha "${REPOSITORY_SHA}" --gpu-index "${gpu_index}" --gpu-uuid "${gpu_uuid}" ||
+    die "could not materialize GPU-scoped pilot config"
+  regular_root_file "${RUNTIME_CONFIG}" || die "unsafe GPU-scoped pilot config"
+  CONFIG="${RUNTIME_CONFIG}"
+  PROTOCOL_ROOT="${OUTPUT_ROOT}/runs/protocol_validation"
+  NETWORK_STATE_ROOT="${OUTPUT_ROOT}/network_state"
   if [[ -e "${NETWORK_STATE_ROOT}" || -L "${NETWORK_STATE_ROOT}" ]]; then
     [[ -d "${NETWORK_STATE_ROOT}" && ! -L "${NETWORK_STATE_ROOT}" && "$(/usr/bin/stat -c %u -- "${NETWORK_STATE_ROOT}")" == 0 ]] || die "unsafe network-state directory"
   else
@@ -403,7 +451,7 @@ acquire_service_lock() {
 
 pin_service_state() {
   SERVICE_STATE_ORIGINAL="${SERVICE_STATE}"
-  SERVICE_STATE_SNAPSHOT="${OUTPUT_ROOT}/.service-state-$$"
+  SERVICE_STATE_SNAPSHOT="${BASE_OUTPUT_ROOT}/snapshots/.service-state-$$"
   [[ ! -e "${SERVICE_STATE_SNAPSHOT}" && ! -L "${SERVICE_STATE_SNAPSHOT}" ]] ||
     die "service-state snapshot path already exists"
   SERVICE_STATE_SOURCE_ID="$(snapshot_user_file \
@@ -427,7 +475,7 @@ release_service_lock() {
 cleanup() {
   local status=$?
   trap - EXIT
-  if [[ "${status}" -ne 0 && "${ADMISSION_PUBLISHED}" -eq 1 &&
+  if [[ "${status}" -ne 0 && "${ADMISSION_PUBLISHED}" -eq 1 && -n "${PROTOCOL_ROOT}" &&
     -f "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" &&
     ! -L "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" &&
     "$(/usr/bin/stat -c %u:%h:%d:%i -- "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK")" == "0:1:${ADMISSION_MARKER_ID}" ]]; then
@@ -439,10 +487,12 @@ cleanup() {
     "$(/usr/bin/stat -c %h -- "${ADMISSION_CANDIDATE}")" == 1 ]]; then
     rm -f -- "${ADMISSION_CANDIDATE}" || [[ "${status}" -ne 0 ]] || status=1
   fi
-  for snapshot in "${ACTIVE_CONFIG_SNAPSHOT}" "${SERVICE_STATE_SNAPSHOT}"; do
+  for snapshot in "${ACTIVE_CONFIG_SNAPSHOT}" "${SERVICE_STATE_SNAPSHOT}" "${RUNTIME_CONFIG}"; do
     [[ -n "${snapshot}" ]] || continue
     case "${snapshot}" in
-      "${OUTPUT_ROOT}"/.active-config-[0-9]*|"${OUTPUT_ROOT}"/.service-state-[0-9]*) ;;
+      "${OUTPUT_ROOT}"/.active-config-[0-9]*|\
+      "${OUTPUT_ROOT}"/.runtime-config-[0-9]*|\
+      "${BASE_OUTPUT_ROOT}"/snapshots/.service-state-[0-9]*) ;;
       *) continue ;;
     esac
     if [[ -f "${snapshot}" && ! -L "${snapshot}" &&
@@ -459,7 +509,7 @@ trap cleanup EXIT INT TERM HUP
 
 verify_active_service() {
   local state_parent active_config active_hash controller api engine gpu_index gpu_uuid
-  local active_vllm active_ld controller_cwd api_cwd engine_cwd
+  local active_vllm active_ld controller_cwd api_cwd engine_cwd engine_title
   local -a controller_args=() api_args=() engine_args=() expected_api_args=()
   state_parent="$(dirname -- "${SERVICE_STATE_ORIGINAL}")"
   regular_root_file "${SERVICE_STATE}" || die "unsafe pinned service state"
@@ -548,9 +598,14 @@ verify_active_service() {
   is_descendant "${engine}" "${controller}" || die "GPU engine is not owned by the controller"
   engine_cwd="$(/usr/bin/readlink -e -- "/proc/${engine}/cwd")" || die "cannot inspect engine cwd"
   process_args "${engine}" engine_args || die "cannot inspect engine argv"
+  [[ "${#engine_args[@]}" -eq 1 ]] || die "GPU engine argv drifted"
+  engine_title="${engine_args[0]}"
+  # setproctitle(3) pads unused argv storage with ASCII spaces. Accept only
+  # that exact suffix padding and require the canonical title after trimming.
+  while [[ "${engine_title}" == *" " ]]; do engine_title="${engine_title% }"; done
   [[ "${engine_cwd}" == "${EXPECTED_CONTROLLER_CWD}" &&
     "$(process_exe "${engine}")" == "$(/usr/bin/readlink -e -- "${EXPECTED_API_PYTHON}")" &&
-    "${#engine_args[@]}" -eq 1 && "${engine_args[0]}" == 'VLLM::EngineCore' &&
+    "${engine_title}" == 'VLLM::EngineCore' &&
     "$(process_group "${engine}")" == "${api}" && "$(process_session "${engine}")" == "${api}" ]] ||
     die "engine cwd/argv/process group drifted"
   local apps matching
@@ -660,9 +715,10 @@ publish_deferred_admission() {
 
 release_precheck
 load_policy
-check_output_hierarchy
+check_base_output_hierarchy
 acquire_service_lock
 pin_service_state
+select_gpu_output_hierarchy
 verify_active_service
 check_idle_resources
 
@@ -678,7 +734,7 @@ authenticated_health "${API_KEY}" || die "authenticated vLLM health check failed
 if [[ "${ACTION}" == check ]]; then
   unset API_KEY
   verify_locked_identity
-  printf 'PRIVILEGED_PILOT_PRECHECK_OK repository_sha=%s gpu_uuid=%s\n' "${REPOSITORY_SHA}" "${EXPECTED_GPU_UUID}"
+  printf 'PRIVILEGED_PILOT_PRECHECK_OK repository_sha=%s gpu_index=%s gpu_uuid=%s\n' "${REPOSITORY_SHA}" "${EXPECTED_GPU_INDEX}" "${EXPECTED_GPU_UUID}"
   printf 'protocol_root=%s\n' "${PROTOCOL_ROOT}"
   exit 0
 fi

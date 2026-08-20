@@ -57,7 +57,8 @@ def test_privileged_config_normalizes_exact_commit_and_validates(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     normalized = output.read_text(encoding="utf-8")
     assert "@REPOSITORY_SHA@" not in normalized
-    assert f"/var/lib/commu-protocol-pilots/{repository_sha}/runs" in normalized
+    assert f"/var/lib/commu-protocol-pilots/{repository_sha}/@GPU_SCOPE@/runs" in normalized
+    assert 'CUDA_VISIBLE_DEVICES="@GPU_INDEX@"' in normalized
 
     checked = _run_validator(
         "check",
@@ -67,6 +68,66 @@ def test_privileged_config_normalizes_exact_commit_and_validates(tmp_path: Path)
         repository_sha,
     )
     assert checked.returncode == 0, checked.stderr
+
+    runtime = tmp_path / "runtime.env"
+    materialized = _run_validator(
+        "materialize",
+        "--input",
+        str(output),
+        "--output",
+        str(runtime),
+        "--repository-sha",
+        repository_sha,
+        "--gpu-index",
+        "4",
+        "--gpu-uuid",
+        "GPU-11111111-2222-3333-4444-555555555555",
+    )
+    assert materialized.returncode == 0, materialized.stderr
+    runtime_text = runtime.read_text(encoding="utf-8")
+    assert 'CUDA_VISIBLE_DEVICES="4"' in runtime_text
+    assert (
+        f"/var/lib/commu-protocol-pilots/{repository_sha}/"
+        "gpu-4-GPU-11111111-2222-3333-4444-555555555555/runs"
+    ) in runtime_text
+
+
+def test_privileged_config_rejects_invalid_runtime_gpu_identity(tmp_path: Path) -> None:
+    repository_sha = "d" * 40
+    source = tmp_path / "input.env"
+    normalized = tmp_path / "normalized.env"
+    source.write_text(_valid_source(), encoding="utf-8")
+    result = _run_validator(
+        "normalize",
+        "--input",
+        str(source),
+        "--output",
+        str(normalized),
+        "--repository-sha",
+        repository_sha,
+    )
+    assert result.returncode == 0, result.stderr
+
+    for label, index, uuid in (
+        ("leading-zero index", "04", "GPU-11111111-2222-3333-4444-555555555555"),
+        ("negative index", "-1", "GPU-11111111-2222-3333-4444-555555555555"),
+        ("unsafe UUID", "4", "GPU-../../root"),
+    ):
+        runtime = tmp_path / f"{label.replace(' ', '-')}.env"
+        materialized = _run_validator(
+            "materialize",
+            "--input",
+            str(normalized),
+            "--output",
+            str(runtime),
+            "--repository-sha",
+            repository_sha,
+            "--gpu-index",
+            index,
+            "--gpu-uuid",
+            uuid,
+        )
+        assert materialized.returncode != 0, label
 
 
 def test_privileged_config_rejects_shell_secrets_and_unsafe_overrides(tmp_path: Path) -> None:
@@ -86,8 +147,12 @@ def test_privileged_config_rejects_shell_secrets_and_unsafe_overrides(tmp_path: 
             'OPENROUTER_MODEL="provider/model"',
         ),
         "dual worker": ('PARALLEL_WORKERS="1"', 'PARALLEL_WORKERS="2"'),
+        "fixed gpu": (
+            'CUDA_VISIBLE_DEVICES="@GPU_INDEX@"',
+            'CUDA_VISIBLE_DEVICES="2"',
+        ),
         "external output": (
-            'RUNS_ROOT="/var/lib/commu-protocol-pilots/@REPOSITORY_SHA@/runs"',
+            'RUNS_ROOT="/var/lib/commu-protocol-pilots/@REPOSITORY_SHA@/@GPU_SCOPE@/runs"',
             'RUNS_ROOT="/home/user/runs"',
         ),
         "host cidr": ('HOST_VETH_CIDR="10.200.0.1/24"', 'HOST_VETH_CIDR="10.9.0.1/24"'),
@@ -126,6 +191,8 @@ def test_release_builder_is_credential_free_and_binds_runtime_and_caddy() -> Non
     assert "RELEASE_FILES.sha256" in text
     assert "LOCAL_VLLM_API_KEY" not in text
     assert "18_run_lab_matrix" not in text
+    assert "service_state_root=" in text
+    assert "expected_gpu_uuid=" not in text
 
 
 def test_review_archive_is_independent_of_ambient_git_line_endings() -> None:
@@ -161,6 +228,9 @@ def test_installer_pins_bundle_rejects_links_and_hardens_before_execution() -> N
     assert '[[ "${ACTUAL_ARCHIVE_SHA}" == "${EXPECTED_ARCHIVE_SHA}" ]]' in text
     assert "EXPECTED_REVIEWED_CODE_MANIFEST_SHA256=" in text
     assert "bundle policy is outside this installer's authorized service scope" in text
+    assert "EXPECTED_SERVICE_STATE_ROOT=" in text
+    assert "EXPECTED_GPU_INDEX=" not in text
+    assert "EXPECTED_GPU_UUID=" not in text
     assert "--only-binary=:all:" in text
     assert "requirements-privileged-pilot.lock" in text
     assert "--copies" in text
@@ -212,6 +282,12 @@ def test_root_runner_has_clean_environment_lock_and_fail_closed_inventory() -> N
     assert "process_exe" in text
     assert '"$(process_exe "${controller}")" == "${EXPECTED_CONTROLLER_EXE}"' in text
     assert '"$(process_exe "${engine}")" == "$(/usr/bin/readlink -e -- "${EXPECTED_API_PYTHON}")"' in text
+    assert "select_gpu_output_hierarchy" in text
+    assert "--service-state /absolute/path/to/service.state" in text
+    assert "EXPECTED_GPU_UUID_PIN" not in text
+    assert 'while [[ "${engine_title}" == *" " ]]' in text
+    assert '"${engine_title}" == \'VLLM::EngineCore\'' in text
+    assert '"${engine_args[0]}" == \'VLLM::EngineCore\'' not in text
     publish = text.index("publish_deferred_admission\n")
     assert text.rfind("verify_active_service\n", 0, publish) != -1
     assert text.index("verify_active_service\n", publish) != -1
@@ -231,7 +307,8 @@ def test_example_has_no_secret_and_output_is_commit_scoped() -> None:
     assert "LOCAL_VLLM_API_KEY=" not in text
     assert text.count("@REPOSITORY_SHA@") == 3
     assert 'PARALLEL_WORKERS="1"' in text
-    assert 'CUDA_VISIBLE_DEVICES="2"' in text
+    assert 'CUDA_VISIBLE_DEVICES="@GPU_INDEX@"' in text
+    assert text.count("@GPU_SCOPE@") == 2
     assert 'VLLM_BIN="/usr/bin/false"' in text
     assert hashlib.sha256(text.encode()).hexdigest()
 
