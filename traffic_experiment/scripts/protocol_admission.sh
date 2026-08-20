@@ -16,6 +16,7 @@ protocol_stack_sha256() {
     scripts/18_run_lab_matrix.sh
     scripts/19_run_lab_sessions.sh
     scripts/22_validate_protocol_pilots.sh
+    scripts/caddy_readiness.py
     scripts/lib.sh
     scripts/protocol_admission.sh
     scripts/worker_topology.sh

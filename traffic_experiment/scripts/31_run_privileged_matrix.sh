@@ -84,6 +84,7 @@ METADATA="${RELEASE_ROOT}/RELEASE_METADATA"
 MANIFEST="${RELEASE_ROOT}/RELEASE_FILES.sha256"
 RUNTIME_MANIFEST="${RELEASE_ROOT}/INSTALLED_RUNTIME_FILES.sha256"
 VALIDATOR="${SCRIPT_DIR}/privileged_matrix_config.py"
+CADDY_READINESS="${SCRIPT_DIR}/caddy_readiness.py"
 RUNNER_PYTHON="${EXPERIMENT_ROOT}/.venv-runner/bin/python"
 CADDY="${EXPERIMENT_ROOT}/.tools/caddy"
 LOCK_HELD=0
@@ -343,7 +344,7 @@ release_precheck() {
     die "unsafe project lock directory"
   for file in "${CONFIG_TEMPLATE}" "${POLICY}" "${METADATA}" "${MANIFEST}" "${RUNTIME_MANIFEST}" \
     "${VALIDATOR}" "${SCRIPT_DIR}/privileged_matrix_state.py" \
-    "${SCRIPT_DIR}/privileged_matrix_request.py" "${RUNNER_PYTHON}" "${CADDY}"; do
+    "${SCRIPT_DIR}/privileged_matrix_request.py" "${CADDY_READINESS}" "${RUNNER_PYTHON}" "${CADDY}"; do
     regular_root_file "${file}" || die "unsafe release file: ${file}"
   done
   case "${RELEASE_ROOT}" in /opt/commu-secure-matrix/releases/[0-9a-f][0-9a-f]*) ;; *) die "release is outside the fixed installation root" ;; esac
@@ -810,18 +811,75 @@ verify_caddy_process() {
   caddy_process_matches || die "Caddy process identity/argv drifted"
 }
 
-verify_caddy() {
+caddy_listeners_owned() {
   local tcp udp tcp_pids udp_pids
-  verify_caddy_process
-  tcp="$(ss_rows -H -ltnp 'sport = :8443')" || die "TCP listener inventory failed"
-  udp="$(ss_rows -H -lunp 'sport = :8444')" || die "UDP listener inventory failed"
+  tcp="$(ss_rows -H -ltnp 'sport = :8443')" || return 1
+  udp="$(ss_rows -H -lunp 'sport = :8444')" || return 1
   tcp_pids="$(/usr/bin/grep -oE 'pid=[0-9]+' <<<"${tcp}" | /usr/bin/cut -d= -f2 | /usr/bin/sort -u)"
   udp_pids="$(/usr/bin/grep -oE 'pid=[0-9]+' <<<"${udp}" | /usr/bin/cut -d= -f2 | /usr/bin/sort -u)"
   [[ "${tcp_pids}" == "${CADDY_PID}" && "${udp_pids}" == "${CADDY_PID}" &&
     "${tcp}" == *"10.200.0.1:8443"* && "${udp}" == *"10.200.0.1:8444"* ]] ||
-    die "Caddy listeners are absent or owned by another process"
-  port_closed 8543 || die "unexpected worker-1 TLS listener"
-  udp_port_closed 8544 || die "unexpected worker-1 HTTP/3 listener"
+    return 1
+  port_closed 8543 || return 1
+  udp_port_closed 8544 || return 1
+}
+
+verify_caddy() {
+  verify_caddy_process
+  caddy_listeners_owned || die "Caddy listeners are absent or owned by another process"
+}
+
+caddy_namespace_ready() {
+  local ca_file="$1"
+  /usr/sbin/ip netns exec llm-client \
+    "${RUNNER_PYTHON}" -I "${CADDY_READINESS}" \
+    --host 10.200.0.1 --ca-file "${ca_file}" \
+    --tls-port 8443 --http3-port 8444 --timeout-seconds 1
+}
+
+wait_for_caddy_ready() {
+  local ca_file="$1" attempt
+  for ((attempt=0; attempt<60; attempt++)); do
+    caddy_process_matches || return 1
+    if regular_root_file "${ca_file}" && caddy_listeners_owned &&
+      caddy_namespace_ready "${ca_file}" >/dev/null 2>&1; then
+      return 0
+    fi
+    /usr/bin/sleep .1
+  done
+  caddy_namespace_ready "${ca_file}" || true
+  return 1
+}
+
+caddy_listeners_closed() {
+  port_closed 8443 && udp_port_closed 8444 &&
+    port_closed 8543 && udp_port_closed 8544
+}
+
+caddy_recorded_process_exited() {
+  local ticks state
+  [[ -d "/proc/${CADDY_PID}" ]] || return 0
+  if ! ticks="$(process_ticks "${CADDY_PID}" 2>/dev/null)"; then
+    [[ ! -d "/proc/${CADDY_PID}" ]] && return 0
+    return 1
+  fi
+  if ! state="$(process_state "${CADDY_PID}" 2>/dev/null)"; then
+    [[ ! -d "/proc/${CADDY_PID}" ]] && return 0
+    return 1
+  fi
+  [[ "${ticks}" != "${CADDY_TICKS}" || "${state}" == Z ]]
+}
+
+finalize_stopped_caddy() {
+  caddy_listeners_closed || return 1
+  [[ -f "${CADDY_STATE}" && ! -L "${CADDY_STATE}" &&
+    "$(/usr/bin/stat -c %u:%a:%h -- "${CADDY_STATE}")" == 0:400:1 ]] || return 1
+  /usr/bin/rm -- "${CADDY_STATE}" || return 1
+  CADDY_OWNED=0
+  CADDY_PID=""
+  CADDY_TICKS=""
+  CADDY_STATE=""
+  CADDY_LOG=""
 }
 
 start_caddy() {
@@ -857,10 +915,9 @@ start_caddy() {
       "${CADDY_PID}" "${CADDY_TICKS}" "${CADDY}" "${CADDY_CONFIG}"
   } >"${CADDY_STATE}"
   /usr/bin/chmod 0400 "${CADDY_STATE}"
-  /usr/bin/sleep 1
-  verify_caddy
   local generated_ca="${data}/caddy/pki/authorities/local/root.crt"
-  regular_root_file "${generated_ca}" || die "Caddy CA file is unsafe"
+  wait_for_caddy_ready "${generated_ca}" ||
+    die "Caddy did not become ready; see ${CADDY_LOG}"
   /usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${MATRIX_ROOT}/ca"
   CA_FILE="${MATRIX_ROOT}/ca/root.crt"
   if [[ -e "${CA_FILE}" || -L "${CA_FILE}" ]]; then
@@ -877,7 +934,15 @@ start_caddy() {
 stop_caddy() {
   local attempt
   [[ "${CADDY_OWNED}" -eq 1 ]] || return 0
-  caddy_process_matches || return 1
+  if caddy_recorded_process_exited; then
+    wait "${CADDY_PID}" 2>/dev/null || true
+    finalize_stopped_caddy
+    return
+  fi
+  if ! caddy_process_matches; then
+    printf 'ERROR: recorded Caddy PID is live but its identity is ambiguous; preserving state\n' >&2
+    return 1
+  fi
   /usr/bin/kill -TERM "${CADDY_PID}" || return 1
   for ((attempt=0; attempt<100; attempt++)); do
     [[ "$(process_state "${CADDY_PID}" 2>/dev/null || true)" == Z ||
@@ -888,10 +953,7 @@ stop_caddy() {
     "$(process_ticks "${CADDY_PID}" 2>/dev/null || true)" != "${CADDY_TICKS}" ]] ||
     return 1
   wait "${CADDY_PID}" 2>/dev/null || true
-  port_closed 8443 || return 1
-  udp_port_closed 8444 || return 1
-  /usr/bin/rm -- "${CADDY_STATE}"
-  CADDY_OWNED=0
+  finalize_stopped_caddy
 }
 
 matrix_cleanup() {

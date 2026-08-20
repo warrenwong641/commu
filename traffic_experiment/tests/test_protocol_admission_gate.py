@@ -50,6 +50,7 @@ def test_protocol_digest_binds_per_request_and_warm_session_paths():
         "scripts/18_run_lab_matrix.sh",
         "scripts/19_run_lab_sessions.sh",
         "scripts/22_validate_protocol_pilots.sh",
+        "scripts/caddy_readiness.py",
         "scripts/worker_topology.sh",
         "scripts/protocol_admission.sh",
         "traffic_measure/runner.py",
@@ -90,14 +91,25 @@ def test_protocol_pilot_and_matrix_share_redirect_free_caddyfile():
     pilots = _script("22_validate_protocol_pilots.sh")
 
     global_options = caddyfile[: caddyfile.index("\n}\n")]
+    assert global_options.count("admin off") == 1
     assert global_options.count("auto_https disable_redirects") == 1
+    assert global_options.count("skip_install_trust") == 1
     single_global_options = single_caddyfile[: single_caddyfile.index("\n}\n")]
+    assert single_global_options.count("admin off") == 1
     assert single_global_options.count("auto_https disable_redirects") == 1
+    assert single_global_options.count("skip_install_trust") == 1
     assert "caddy_config_for_worker_count" in pilots
-    assert 'caddy validate --config "${CADDY_CONFIG}"' in pilots
-    assert 'caddy run --config "${CADDY_CONFIG}"' in pilots
+    assert '"${CADDY_EXE}" validate --config "${CADDY_CONFIG}"' in pilots
+    assert '"${CADDY_EXE}" run --config "${CADDY_CONFIG}"' in pilots
+    assert 'expected_argv=(' in pilots
     assert ".commu_validation_caddy" not in pilots
     assert "sed -n '/servers/" not in pilots
+    assert "wait_for_caddy_ready" in pilots
+    assert 'ip netns exec "${CLIENT_NETNS:-llm-client}"' in pilots
+    assert '"${RUNNER_PYTHON}" -I "${CADDY_READINESS}"' in pilots
+    caddy_start = pilots.index('"${CADDY_EXE}" run --config "${CADDY_CONFIG}"')
+    pilot_start = pilots.index("run_or_validate_strict tls13", caddy_start)
+    assert "sleep 1" not in pilots[caddy_start:pilot_start]
 
 
 def test_protocol_evidence_generations_are_isolated_under_run_root():

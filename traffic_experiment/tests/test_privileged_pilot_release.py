@@ -281,6 +281,8 @@ def test_root_runner_has_clean_environment_lock_and_fail_closed_inventory() -> N
     assert "|OLDPWD|" not in text
     assert "DEFER_PROTOCOL_ADMISSION_PUBLICATION=true" in text
     assert "publish_deferred_admission" in text
+    assert 'CADDY_READINESS="${SCRIPT_DIR}/caddy_readiness.py"' in text
+    assert '"${CADDY_READINESS}" "${RUNNER_PYTHON}"' in text
     assert "snapshot_user_file" in text
     assert "O_NOFOLLOW" in text
     assert "EXPECTED_API_VLLM" in text

@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -95,6 +97,114 @@ def test_supervisor_holds_locks_for_matrix_and_rechecks_each_cell() -> None:
     run_cell = text[text.index("run_cell()") : text.index("release_precheck\n")]
     assert run_cell.count('verify_cell_boundary "${network}"') == 3
     assert "seal-cell" in run_cell
+
+
+def test_caddy_start_waits_for_namespaced_tls_and_http3_readiness() -> None:
+    text = SUPERVISOR.read_text()
+    start = text[text.index("start_caddy() {") : text.index("stop_caddy() {")]
+    assert "/usr/bin/sleep 1" not in start
+    assert 'wait_for_caddy_ready "${generated_ca}"' in start
+    assert "/usr/sbin/ip netns exec llm-client" in text
+    assert '"${RUNNER_PYTHON}" -I "${CADDY_READINESS}"' in text
+    assert "--tls-port 8443 --http3-port 8444" in text
+    assert 'CADDY_READINESS="${SCRIPT_DIR}/caddy_readiness.py"' in text
+    assert '"${CADDY_READINESS}" "${RUNNER_PYTHON}"' in text
+
+
+def test_caddy_early_exit_still_allows_exact_network_cleanup() -> None:
+    text = SUPERVISOR.read_text()
+    stop = text[text.index("stop_caddy() {") : text.index("matrix_cleanup() {")]
+    exited = stop.index("if caddy_recorded_process_exited; then")
+    reap = stop.index('wait "${CADDY_PID}"', exited)
+    finalize = stop.index("finalize_stopped_caddy", reap)
+    identity = stop.index("if ! caddy_process_matches", finalize)
+    assert exited < reap < finalize < identity
+    assert "identity is ambiguous; preserving state" in stop
+
+    finalizer = text[
+        text.index("finalize_stopped_caddy() {") : text.index("start_caddy() {")
+    ]
+    assert finalizer.index("caddy_listeners_closed") < finalizer.index(
+        '/usr/bin/rm -- "${CADDY_STATE}"'
+    )
+    for check in (
+        "port_closed 8443",
+        "udp_port_closed 8444",
+        "port_closed 8543",
+        "udp_port_closed 8544",
+    ):
+        assert check in text
+
+    cleanup = text[text.index("matrix_cleanup() {") : text.index("state_args() {")]
+    assert "if ! stop_caddy; then" in cleanup
+    assert "elif ! cleanup_network; then" in cleanup
+
+
+def test_caddy_early_exit_cleanup_branch_executes_without_signal() -> None:
+    candidates = [shutil.which("bash")]
+    if os.name == "nt":
+        candidates.extend(
+            [
+                str(
+                    Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+                    / "Git/bin/bash.exe"
+                ),
+                str(
+                    Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+                    / "Git/usr/bin/bash.exe"
+                ),
+            ]
+        )
+    bash = None
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "--noprofile", "--norc", "-c", ":"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            bash = candidate
+            break
+    if bash is None:
+        pytest.skip("working Bash is required")
+
+    text = SUPERVISOR.read_text()
+    stop = text[text.index("stop_caddy() {") : text.index("matrix_cleanup() {")]
+    cleanup = text[text.index("matrix_cleanup() {") : text.index("state_args() {")]
+    harness = f"""
+set -euo pipefail
+CADDY_OWNED=1
+CADDY_PID=999999
+CADDY_TICKS=123
+caddy_recorded_process_exited() {{ return 0; }}
+caddy_process_matches() {{ printf 'signal-path-entered\\n'; return 1; }}
+finalize_stopped_caddy() {{ CADDY_OWNED=0; printf 'caddy-finalized\\n'; }}
+cleanup_network() {{ printf 'network-cleaned\\n'; }}
+cleanup() {{ printf 'cleanup-status=%s\\n' "$1"; return "$1"; }}
+{stop}
+{cleanup}
+matrix_cleanup
+"""
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", harness],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "caddy-finalized",
+        "network-cleaned",
+        "cleanup-status=0",
+    ]
+    assert "signal-path-entered" not in result.stdout + result.stderr
 
 
 def test_request_enters_namespace_then_drops_identity_without_lock_or_key() -> None:

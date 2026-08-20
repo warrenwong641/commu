@@ -70,6 +70,7 @@ CADDY_PID=""
 CADDY_START_TICKS=""
 CADDY_CONFIG="$(caddy_config_for_worker_count "${TOPOLOGY_WORKER_COUNT}")"
 CADDY_EXE="$(command -v caddy || true)"
+CADDY_READINESS="${SCRIPT_DIR}/caddy_readiness.py"
 
 write_lifecycle_state() {
   {
@@ -99,16 +100,80 @@ caddy_pid_matches() {
   [[ -n "${CADDY_EXE}" &&
     "$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)" == "$(readlink -f "${CADDY_EXE}")" ]] ||
     return 1
-  local -a argv=()
+  local -a argv=() expected_argv=(
+    "${CADDY_EXE}" run --config "${expected_config}" --adapter caddyfile
+  )
   mapfile -d '' -t argv <"/proc/${pid}/cmdline" || return 1
-  local index saw_run=0 saw_config=0
-  for ((index = 0; index < ${#argv[@]}; index++)); do
-    [[ "${argv[index]}" == "run" ]] && saw_run=1
-    if [[ "${argv[index]}" == "--config" && "${argv[index + 1]:-}" == "${expected_config}" ]]; then
-      saw_config=1
-    fi
+  [[ "${#argv[@]}" -eq "${#expected_argv[@]}" ]] || return 1
+  local index
+  for index in "${!expected_argv[@]}"; do
+    [[ "${argv[index]}" == "${expected_argv[index]}" ]] || return 1
   done
-  [[ "${saw_run}" -eq 1 && "${saw_config}" -eq 1 ]]
+}
+
+caddy_ca_is_safe() {
+  local path="$1" mode
+  [[ -f "${path}" && ! -L "${path}" &&
+    "$(stat -c %u -- "${path}" 2>/dev/null)" == 0 &&
+    "$(stat -c %h -- "${path}" 2>/dev/null)" == 1 ]] || return 1
+  mode="$(stat -c %a -- "${path}" 2>/dev/null)" || return 1
+  [[ "${mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#${mode} & 8#022) == 0 ))
+}
+
+caddy_listener_owned() {
+  local protocol="$1" port="$2" rows pids
+  case "${protocol}" in
+    tcp) rows="$(ss -H -ltnp "sport = :${port}" 2>/dev/null)" || return 1 ;;
+    udp) rows="$(ss -H -lunp "sport = :${port}" 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
+  esac
+  [[ -n "${rows}" &&
+    "${rows}" == *"${SECURE_PROXY_HOST:-10.200.0.1}:${port}"* ]] || return 1
+  pids="$(grep -oE 'pid=[0-9]+' <<<"${rows}" | cut -d= -f2 | sort -u || true)"
+  [[ "${pids}" == "${CADDY_PID}" ]]
+}
+
+caddy_listeners_owned() {
+  local port
+  for port in "${EXPECTED_PROXY_TCP_PORTS[@]}"; do
+    caddy_listener_owned tcp "${port}" || return 1
+  done
+  for port in "${EXPECTED_PROXY_UDP_PORTS[@]}"; do
+    caddy_listener_owned udp "${port}" || return 1
+  done
+}
+
+caddy_namespace_ready() {
+  local ca_file="$1" port
+  local -a readiness_args=(
+    --host "${SECURE_PROXY_HOST:-10.200.0.1}"
+    --ca-file "${ca_file}"
+    --timeout-seconds 1
+  )
+  for port in "${EXPECTED_PROXY_TCP_PORTS[@]}"; do
+    readiness_args+=(--tls-port "${port}")
+  done
+  for port in "${EXPECTED_PROXY_UDP_PORTS[@]}"; do
+    readiness_args+=(--http3-port "${port}")
+  done
+  ip netns exec "${CLIENT_NETNS:-llm-client}" \
+    "${RUNNER_PYTHON}" -I "${CADDY_READINESS}" "${readiness_args[@]}"
+}
+
+wait_for_caddy_ready() {
+  local ca_file="$1" attempt
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    caddy_pid_matches \
+      "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDY_CONFIG}" || return 1
+    if caddy_ca_is_safe "${ca_file}" && caddy_listeners_owned &&
+      caddy_namespace_ready "${ca_file}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  caddy_namespace_ready "${ca_file}" || true
+  return 1
 }
 
 wait_for_owned_caddy_exit() {
@@ -368,18 +433,18 @@ CADDY_RUN_DIR="$(absolute_from_experiment "${CADDY_RUN_DIR:-runs/caddy}")"
 mkdir -p "${CADDY_RUN_DIR}"
 export XDG_DATA_HOME="${CADDY_RUN_DIR}/data"
 export XDG_CONFIG_HOME="${CADDY_RUN_DIR}/config"
-caddy validate --config "${CADDY_CONFIG}" --adapter caddyfile
-caddy run --config "${CADDY_CONFIG}" --adapter caddyfile \
+"${CADDY_EXE}" validate --config "${CADDY_CONFIG}" --adapter caddyfile
+"${CADDY_EXE}" run --config "${CADDY_CONFIG}" --adapter caddyfile \
   >"${VALIDATION_ROOT}/caddy-$$.log" 2>&1 &
 CADDY_PID=$!
 CADDY_START_TICKS="$(process_start_ticks "${CADDY_PID}")"
 CADDY_OWNED=1
 write_lifecycle_state
-sleep 1
-if ! caddy_pid_matches "${CADDY_PID}" "${CADDY_START_TICKS}" "${CADDY_CONFIG}"; then
-  die "Project Caddy failed to start; see ${VALIDATION_ROOT}/caddy-$$.log"
+CA_FILE="${XDG_DATA_HOME}/caddy/pki/authorities/local/root.crt"
+if ! wait_for_caddy_ready "${CA_FILE}"; then
+  die "Project Caddy did not become ready; see ${VALIDATION_ROOT}/caddy-$$.log"
 fi
-echo "Caddy started with auto_https disabled."
+echo "Caddy TLS/HTTP3 listeners are identity-verified and reachable from ${CLIENT_NETNS:-llm-client}."
 
 # Only evidence
 # with an immutable marker bound to the current row, PCAP, manifest, model,

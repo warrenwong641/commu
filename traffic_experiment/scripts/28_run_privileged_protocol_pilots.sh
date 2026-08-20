@@ -76,6 +76,7 @@ MANIFEST="${RELEASE_ROOT}/RELEASE_FILES.sha256"
 RUNTIME_MANIFEST="${RELEASE_ROOT}/INSTALLED_RUNTIME_FILES.sha256"
 VALIDATOR="${SCRIPT_DIR}/privileged_pilot_config.py"
 PILOT_SCRIPT="${SCRIPT_DIR}/22_validate_protocol_pilots.sh"
+CADDY_READINESS="${SCRIPT_DIR}/caddy_readiness.py"
 RUNNER_PYTHON="${EXPERIMENT_ROOT}/.venv-runner/bin/python"
 CADDY="${EXPERIMENT_ROOT}/.tools/caddy"
 LOCK_HELD=0
@@ -335,7 +336,7 @@ release_precheck() {
   trusted_root_directory /run/lock 1777 || die "unsafe system lock directory"
   trusted_root_directory /run/lock/commu-protocol-pilots 755 ||
     die "unsafe project lock directory"
-  for file in "${CONFIG_TEMPLATE}" "${POLICY}" "${METADATA}" "${MANIFEST}" "${RUNTIME_MANIFEST}" "${VALIDATOR}" "${PILOT_SCRIPT}" "${RUNNER_PYTHON}" "${CADDY}"; do
+  for file in "${CONFIG_TEMPLATE}" "${POLICY}" "${METADATA}" "${MANIFEST}" "${RUNTIME_MANIFEST}" "${VALIDATOR}" "${PILOT_SCRIPT}" "${CADDY_READINESS}" "${RUNNER_PYTHON}" "${CADDY}"; do
     regular_root_file "${file}" || die "unsafe release file: ${file}"
   done
   case "${RELEASE_ROOT}" in /opt/commu-protocol-pilots/releases/[0-9a-f][0-9a-f]*) ;; *) die "release is outside the fixed installation root" ;; esac

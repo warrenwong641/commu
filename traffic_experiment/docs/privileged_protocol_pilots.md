@@ -47,6 +47,15 @@ admission candidate; its privileged parent rechecks the service and teardown,
 then publishes `PROTOCOL_VALIDATION_OK`. `ss` and `ip` inventory errors are
 fatal rather than being interpreted as an empty system.
 
+Caddy disables its admin API and does not install its experiment-local CA into
+the shared system trust store. The namespace clients trust the generated,
+identity-checked `root.crt` explicitly. This prevents future runs from adding
+trust entries; it does not delete a certificate left by an older run. Startup
+is admitted only after a bounded check verifies the exact Caddy-owned TCP/UDP
+listeners and completes TLS 1.3/HTTP/1.1 and HTTP/3/QUIC handshakes from the
+client namespace. These readiness handshakes contain no HTTP request and
+therefore cannot invoke model generation.
+
 Pilot output is isolated by the verified GPU identity under
 `/var/lib/commu-protocol-pilots/COMMIT/gpu-INDEX-GPU-UUID/`, whose complete
 ancestor chain is root-owned. The installed source/runtime is under
