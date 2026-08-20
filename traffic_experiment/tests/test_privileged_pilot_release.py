@@ -274,6 +274,9 @@ def test_root_runner_has_clean_environment_lock_and_fail_closed_inventory() -> N
     assert '"${LANG}" == C.UTF-8' in text
     assert '"${PYTHONSAFEPATH}" == 1' in text
     assert "unsanitized environment variable" in text
+    assert text.index("cd /") < text.index("unset OLDPWD") < text.index(
+        "unsanitized environment variable"
+    )
     assert "DEFER_PROTOCOL_ADMISSION_PUBLICATION=true" in text
     assert "publish_deferred_admission" in text
     assert "snapshot_user_file" in text

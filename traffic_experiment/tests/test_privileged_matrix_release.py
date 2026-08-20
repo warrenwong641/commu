@@ -36,6 +36,9 @@ def test_matrix_release_is_separate_from_pilot_launcher() -> None:
     assert "/opt/commu-secure-matrix/releases" in matrix
     assert "/var/lib/commu-secure-matrix/" in matrix
     assert "/var/lib/commu-protocol-pilots/" in matrix
+    assert matrix.index("cd /") < matrix.index("unset OLDPWD") < matrix.index(
+        "unsanitized environment variable"
+    )
 
 
 def test_builder_is_platform_stable_credential_free_and_matrix_scoped() -> None:

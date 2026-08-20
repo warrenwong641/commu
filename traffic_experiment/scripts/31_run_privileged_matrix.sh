@@ -31,6 +31,10 @@ fi
 PATH="${FIXED_PATH}"
 export PATH HOME LANG LC_ALL TZ PYTHONNOUSERSITE PYTHONDONTWRITEBYTECODE PYTHONSAFEPATH
 cd /
+# Bash exports OLDPWD when cd runs, even though the re-exec started with an
+# empty environment. Remove this shell-created value before enforcing the
+# ambient-environment allowlist below.
+unset OLDPWD
 
 # The sentinel is not a trust decision. Even if a caller spells it manually,
 # no ambient variable outside this harmless allowlist may survive.
