@@ -15,11 +15,10 @@ QA_MANIFEST=""
 SUMMARY_MANIFEST=""
 RUNNER_WHEELHOUSE=""
 CADDY_BIN="${EXPERIMENT_ROOT}/.tools/caddy"
-SERVICE_STATE=""
+SERVICE_STATE_ROOT=""
 SERVICE_USER=""
 SERVICE_UID=""
 SERVICE_GID=""
-EXPECTED_GPU_UUID=""
 OUTPUT=""
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
@@ -27,11 +26,12 @@ usage() {
   cat <<'EOF'
 Usage: 29_create_privileged_matrix_bundle.sh \
   --config PATH --qa-manifest PATH --summary-manifest PATH \
-  --service-state PATH --service-user NAME --service-uid UID --service-gid GID \
-  --gpu-uuid GPU-UUID --output PATH --wheelhouse PATH [--caddy-bin PATH]
+  --service-state-root PATH --service-user NAME --service-uid UID --service-gid GID \
+  --output PATH --wheelhouse PATH [--caddy-bin PATH]
 
-The config may use @REPOSITORY_SHA@ in RUNS_ROOT and CADDY_RUN_DIR. The bundle
-contains no API key and can launch only the fixed one-GPU 2,808-call matrix.
+The config may use @REPOSITORY_SHA@, @GPU_INDEX@, and @GPU_SCOPE@ placeholders.
+The bundle contains no API key and can launch only the fixed one-GPU
+2,808-call matrix for a service state selected at runtime.
 EOF
 }
 
@@ -42,11 +42,10 @@ while (($#)); do
     --summary-manifest) [[ $# -ge 2 ]] || die "--summary-manifest requires a path"; SUMMARY_MANIFEST="$2"; shift 2 ;;
     --wheelhouse) [[ $# -ge 2 ]] || die "--wheelhouse requires a path"; RUNNER_WHEELHOUSE="$2"; shift 2 ;;
     --caddy-bin) [[ $# -ge 2 ]] || die "--caddy-bin requires a path"; CADDY_BIN="$2"; shift 2 ;;
-    --service-state) [[ $# -ge 2 ]] || die "--service-state requires a path"; SERVICE_STATE="$2"; shift 2 ;;
+    --service-state-root) [[ $# -ge 2 ]] || die "--service-state-root requires a path"; SERVICE_STATE_ROOT="$2"; shift 2 ;;
     --service-user) [[ $# -ge 2 ]] || die "--service-user requires a name"; SERVICE_USER="$2"; shift 2 ;;
     --service-uid) [[ $# -ge 2 ]] || die "--service-uid requires a UID"; SERVICE_UID="$2"; shift 2 ;;
     --service-gid) [[ $# -ge 2 ]] || die "--service-gid requires a GID"; SERVICE_GID="$2"; shift 2 ;;
-    --gpu-uuid) [[ $# -ge 2 ]] || die "--gpu-uuid requires a UUID"; EXPECTED_GPU_UUID="$2"; shift 2 ;;
     --output) [[ $# -ge 2 ]] || die "--output requires a path"; OUTPUT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -54,8 +53,8 @@ while (($#)); do
 done
 
 [[ "${EUID}" -ne 0 ]] || die "build the release as the unprivileged service user"
-for value in CONFIG QA_MANIFEST SUMMARY_MANIFEST SERVICE_STATE SERVICE_USER \
-  SERVICE_UID SERVICE_GID EXPECTED_GPU_UUID OUTPUT RUNNER_WHEELHOUSE; do
+for value in CONFIG QA_MANIFEST SUMMARY_MANIFEST SERVICE_STATE_ROOT SERVICE_USER \
+  SERVICE_UID SERVICE_GID OUTPUT RUNNER_WHEELHOUSE; do
   [[ -n "${!value}" ]] || die "missing required option for ${value}"
 done
 for command_name in git tar gzip cp find sha256sum awk mktemp readlink; do
@@ -82,14 +81,16 @@ QA_MANIFEST="$(canonical_regular "${QA_MANIFEST}")" || die "unsafe QA manifest p
 SUMMARY_MANIFEST="$(canonical_regular "${SUMMARY_MANIFEST}")" || die "unsafe summary manifest path"
 RUNNER_WHEELHOUSE="$(canonical_directory "${RUNNER_WHEELHOUSE}")" || die "unsafe wheelhouse path"
 CADDY_BIN="$(canonical_regular "${CADDY_BIN}")" || die "unsafe Caddy path"
+SERVICE_STATE_ROOT="$(canonical_directory "${SERVICE_STATE_ROOT}")" ||
+  die "unsafe service-state root"
 [[ -x "${CADDY_BIN}" ]] || die "Caddy binary is not executable"
 EXPECTED_CADDY_SHA256="f16be85d67d7a8369c7255a8514204112bb63a58490bba7d458b38818a75fb94"
 [[ "$(sha256sum -- "${CADDY_BIN}" | awk '{print $1}')" == "${EXPECTED_CADDY_SHA256}" ]] ||
   die "Caddy binary does not match the independently pinned release digest"
-[[ "${SERVICE_STATE}" = /* && "${SERVICE_STATE}" != *$'\n'* ]] || die "service state must be an absolute single-line path"
+[[ "${SERVICE_STATE_ROOT}" = /* && "${SERVICE_STATE_ROOT}" != *$'\n'* ]] ||
+  die "service-state root must be an absolute single-line path"
 [[ "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "unsafe service user"
 [[ "${SERVICE_UID}" =~ ^[1-9][0-9]*$ && "${SERVICE_GID}" =~ ^[1-9][0-9]*$ ]] || die "service UID/GID must be positive integers"
-[[ "${EXPECTED_GPU_UUID}" =~ ^GPU-[0-9A-Fa-f-]+$ ]] || die "invalid expected GPU UUID"
 
 REPOSITORY_SHA="$(git -C "${REPOSITORY_ROOT}" rev-parse HEAD)"
 [[ "${REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ]] || die "could not resolve an exact repository commit"
@@ -133,6 +134,7 @@ git -c core.autocrlf=false -c core.eol=lf \
   cd "${RELEASE_ROOT}"
   find repository -type f \
     ! -path 'repository/traffic_experiment/artifacts/*' \
+    ! -path 'repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh' \
     ! -path 'repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh' \
     -print0 | LC_ALL=C sort -z | xargs -0 sha256sum --text -- \
     >REVIEWED_CODE_FILES.sha256
@@ -218,14 +220,13 @@ if find "${RELEASE_ROOT}" -type l -print -quit | grep -q .; then
 fi
 
 cat >"${RELEASE_ROOT}/policy/service.state" <<EOF
-schema=commu-privileged-matrix-policy-v1
+schema=commu-privileged-matrix-policy-v2
 repository_sha=${REPOSITORY_SHA}
-service_state=${SERVICE_STATE}
+service_state_root=${SERVICE_STATE_ROOT}
 service_user=${SERVICE_USER}
 service_uid=${SERVICE_UID}
 service_gid=${SERVICE_GID}
-expected_gpu_uuid=${EXPECTED_GPU_UUID}
-pilot_repository_sha=7ed49eb0a04c3d4bd69e7361aab31de83426c61f
+pilot_repository_sha=${REPOSITORY_SHA}
 EOF
 cat >"${RELEASE_ROOT}/RELEASE_METADATA" <<EOF
 schema=commu-privileged-matrix-release-v1

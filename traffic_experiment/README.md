@@ -115,7 +115,8 @@ the weighted average is 5,250 input tokens per call.
   matrix bundle builder.
 - scripts/30_install_privileged_matrix_release.sh: authenticated root
   installer for the separate matrix release.
-- scripts/31_run_privileged_matrix.sh: fixed 2,808-call root supervisor.
+- scripts/31_run_privileged_matrix.sh: GPU-scoped 2,808-call root supervisor
+  with immutable plan, strict resume identity, and sealed results.
 - `scripts/discover_capture_interface.sh`: capture-interface discovery.
 - `scripts/run_physical_client.sh`: physical-client pilot runner.
 

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -124,6 +125,10 @@ def publish(path: Path, value: dict) -> None:
 
 
 def expected_plan(args: argparse.Namespace) -> dict:
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", args.run_id) is None:
+        raise ValueError("run ID is not canonical and safe")
+    if args.gpu_index < 0 or re.fullmatch(r"GPU-[0-9A-Fa-f-]+", args.gpu_uuid) is None:
+        raise ValueError("GPU identity is invalid")
     cells = [
         {
             "network": network,
@@ -151,8 +156,9 @@ def expected_plan(args: argparse.Namespace) -> dict:
         "active_config_sha256": args.active_config_sha256,
         "qa_manifest_sha256": args.qa_manifest_sha256,
         "summary_manifest_sha256": args.summary_manifest_sha256,
+        "run_id": args.run_id,
         "worker_count": 1,
-        "gpu_index": 2,
+        "gpu_index": args.gpu_index,
         "gpu_uuid": args.gpu_uuid,
         "service_uid": args.service_uid,
         "worker_topology_sha256": hashlib.sha256(canonical(topology)).hexdigest(),
@@ -177,8 +183,8 @@ def expected_topology(args: argparse.Namespace) -> dict:
         "workers": [
             {
                 "worker_index": 0,
-                "gpu_selector": "2",
-                "gpu_index": 2,
+                "gpu_selector": str(args.gpu_index),
+                "gpu_index": args.gpu_index,
                 "gpu_uuid": args.gpu_uuid,
                 "vllm_port": 8000,
                 "secure_ports": {"tls13": 8443, "http3": 8444},
@@ -228,6 +234,7 @@ def completed_rows(
     manifest_sha: str,
     expected: int,
     transport: str,
+    gpu_index: int,
     gpu_uuid: str,
     capture_remap: tuple[Path, Path] | None = None,
 ) -> list[dict]:
@@ -247,7 +254,7 @@ def completed_rows(
         if (
             row.get("worker_count") != 1
             or row.get("worker_index") != 0
-            or row.get("worker_gpu_index") != 2
+            or row.get("worker_gpu_index") != gpu_index
             or row.get("worker_gpu_uuid") != gpu_uuid
             or row.get("topology_worker_index") != 0
             or row.get("transport") != transport
@@ -340,6 +347,7 @@ def seal_cell(args: argparse.Namespace) -> None:
         args.manifest_sha256,
         expected,
         args.transport,
+        args.gpu_index,
         args.gpu_uuid,
     )
     sealing_root = root / ".sealing"
@@ -363,6 +371,7 @@ def seal_cell(args: argparse.Namespace) -> None:
         args.manifest_sha256,
         expected,
         args.transport,
+        args.gpu_index,
         args.gpu_uuid,
         capture_remap=(original_cell, cell),
     )
@@ -382,6 +391,7 @@ def seal_cell(args: argparse.Namespace) -> None:
         args.manifest_sha256,
         expected,
         args.transport,
+        args.gpu_index,
         args.gpu_uuid,
         capture_remap=(original_cell, cell),
     )
@@ -493,6 +503,7 @@ def verify_cell_marker(root: Path, plan: dict, cell_plan: dict) -> dict:
         manifest_sha,
         cell_plan["calls"],
         cell_plan["transport"],
+        plan["gpu_index"],
         plan["gpu_uuid"],
     )
     return data
@@ -600,7 +611,9 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--active-config-sha256", required=True)
         command.add_argument("--qa-manifest-sha256", required=True)
         command.add_argument("--summary-manifest-sha256", required=True)
+        command.add_argument("--run-id", required=True)
         command.add_argument("--gpu-uuid", required=True)
+        command.add_argument("--gpu-index", required=True, type=int)
         command.add_argument("--service-uid", required=True, type=int)
         command.add_argument("--model", required=True)
         command.add_argument("--served-model-name", required=True)
@@ -613,6 +626,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--manifest-sha256", required=True)
     command.add_argument("--service-uid", required=True, type=int)
     command.add_argument("--gpu-uuid", required=True)
+    command.add_argument("--gpu-index", required=True, type=int)
     for action in ("status", "seal-matrix"):
         command = commands.add_parser(action)
         command.add_argument("--root", required=True, type=Path)

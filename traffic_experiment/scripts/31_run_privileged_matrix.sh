@@ -15,9 +15,7 @@ EXPECTED_API_LD_LIBRARY_PATH=/home/wongshingyin/.venvs/commu-qwen35-e12240f/lib/
 EXPECTED_SERVICE_USER=wongshingyin
 EXPECTED_SERVICE_UID=1007
 EXPECTED_SERVICE_GID=1007
-EXPECTED_SERVICE_STATE=/home/wongshingyin/.config/commu/qwen35-e12240f/service-attempt-5-gpu2-1.state
-EXPECTED_GPU_UUID_PIN=GPU-41d1f86d-0197-51fe-c1ef-ad53c99e3223
-EXPECTED_PILOT_REPOSITORY_SHA=7ed49eb0a04c3d4bd69e7361aab31de83426c61f
+EXPECTED_SERVICE_STATE_ROOT=/home/wongshingyin/.config/commu
 
 FIXED_PATH=/usr/sbin:/usr/bin
 if [[ "${COMMU_PRIVILEGED_MATRIX_CLEAN_ENV:-}" != 1 ]]; then
@@ -51,15 +49,32 @@ done < <(/usr/bin/env)
   exit 2
 }
 
-ACTION="${1:-status}"
-[[ $# -le 1 ]] || { printf 'usage: %s {check|status|run|resume}\n' "$0" >&2; exit 2; }
-case "${ACTION}" in check|status|run|resume) ;; *) printf 'usage: %s {check|status|run|resume}\n' "$0" >&2; exit 2 ;; esac
+ACTION="${1:-}"
+shift || true
+SERVICE_STATE_REQUESTED=""
+RUN_ID=""
+while (($#)); do
+  case "$1" in
+    --service-state) [[ $# -ge 2 && -z "${SERVICE_STATE_REQUESTED}" ]] || break; SERVICE_STATE_REQUESTED="$2"; shift 2 ;;
+    --run-id) [[ $# -ge 2 && -z "${RUN_ID}" ]] || break; RUN_ID="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+case "${ACTION}" in check|status|run|resume) ;;
+  *) ACTION="" ;;
+esac
+if [[ -z "${ACTION}" || -z "${SERVICE_STATE_REQUESTED}" ||
+  ! "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ || $# -ne 0 ]]; then
+  printf 'usage: %s {check|status|run|resume} --service-state /absolute/path/to/service.state --run-id SAFE_ID\n' "$0" >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPOSITORY_ROOT="$(cd -- "${EXPERIMENT_ROOT}/.." && pwd)"
 RELEASE_ROOT="$(cd -- "${REPOSITORY_ROOT}/.." && pwd)"
-CONFIG="${RELEASE_ROOT}/config/server.env"
+CONFIG_TEMPLATE="${RELEASE_ROOT}/config/server.env"
+CONFIG=""
 POLICY="${RELEASE_ROOT}/policy/service.state"
 METADATA="${RELEASE_ROOT}/RELEASE_METADATA"
 MANIFEST="${RELEASE_ROOT}/RELEASE_FILES.sha256"
@@ -77,6 +92,11 @@ SERVICE_STATE_SOURCE_ID=""
 ACTIVE_CONFIG_ORIGINAL=""
 ACTIVE_CONFIG_SNAPSHOT=""
 ACTIVE_CONFIG_SOURCE_ID=""
+BASE_OUTPUT_ROOT=""
+OUTPUT_ROOT=""
+RUNTIME_CONFIG=""
+PROTOCOL_ROOT=""
+NETWORK_STATE_ROOT=""
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 
@@ -317,7 +337,7 @@ release_precheck() {
   trusted_root_directory /run/lock 1777 || die "unsafe system lock directory"
   trusted_root_directory /run/lock/commu-protocol-pilots 755 ||
     die "unsafe project lock directory"
-  for file in "${CONFIG}" "${POLICY}" "${METADATA}" "${MANIFEST}" "${RUNTIME_MANIFEST}" \
+  for file in "${CONFIG_TEMPLATE}" "${POLICY}" "${METADATA}" "${MANIFEST}" "${RUNTIME_MANIFEST}" \
     "${VALIDATOR}" "${SCRIPT_DIR}/privileged_matrix_state.py" \
     "${SCRIPT_DIR}/privileged_matrix_request.py" "${RUNNER_PYTHON}" "${CADDY}"; do
     regular_root_file "${file}" || die "unsafe release file: ${file}"
@@ -343,45 +363,83 @@ release_precheck() {
     trusted_root_directory "${directory}" || die "unsafe release directory: ${directory}"
   done
   /usr/bin/python3 -I "${VALIDATOR}" check \
-    --input "${CONFIG}" --repository-sha "${REPOSITORY_SHA}" --release-root "${RELEASE_ROOT}" ||
+    --input "${CONFIG_TEMPLATE}" --repository-sha "${REPOSITORY_SHA}" --release-root "${RELEASE_ROOT}" ||
     die "privileged config validation failed"
 }
 
 load_policy() {
-  [[ "$(policy_value schema)" == commu-privileged-matrix-policy-v1 ]] || die "wrong policy schema"
+  [[ "$(policy_value schema)" == commu-privileged-matrix-policy-v2 ]] || die "wrong policy schema"
   [[ "$(policy_value repository_sha)" == "${REPOSITORY_SHA}" ]] || die "policy/release SHA mismatch"
-  SERVICE_STATE="$(policy_value service_state)" || die "missing service state path"
+  SERVICE_STATE_ROOT="$(policy_value service_state_root)" || die "missing service-state root"
   SERVICE_USER="$(policy_value service_user)" || die "missing service user"
   SERVICE_UID="$(policy_value service_uid)" || die "missing service UID"
   SERVICE_GID="$(policy_value service_gid)" || die "missing service GID"
-  EXPECTED_GPU_UUID="$(policy_value expected_gpu_uuid)" || die "missing expected GPU UUID"
   PILOT_REPOSITORY_SHA="$(policy_value pilot_repository_sha)" || die "missing pilot repository SHA"
   [[ "${SERVICE_USER}" == "${EXPECTED_SERVICE_USER}" &&
     "${SERVICE_UID}" == "${EXPECTED_SERVICE_UID}" &&
     "${SERVICE_GID}" == "${EXPECTED_SERVICE_GID}" &&
-    "${SERVICE_STATE}" == "${EXPECTED_SERVICE_STATE}" &&
-    "${EXPECTED_GPU_UUID}" == "${EXPECTED_GPU_UUID_PIN}" &&
-    "${PILOT_REPOSITORY_SHA}" == "${EXPECTED_PILOT_REPOSITORY_SHA}" ]] ||
+    "${SERVICE_STATE_ROOT}" == "${EXPECTED_SERVICE_STATE_ROOT}" &&
+    "${PILOT_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" ]] ||
     die "installed service policy is outside the reviewed scope"
-  [[ "${SERVICE_STATE}" = /* && "${SERVICE_STATE}" != *$'\n'* ]] || die "unsafe service state path"
+  [[ "${SERVICE_STATE_ROOT}" = /* && "${SERVICE_STATE_ROOT}" != *$'\n'* ]] || die "unsafe service-state root"
   [[ "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ && "${SERVICE_UID}" =~ ^[1-9][0-9]*$ && "${SERVICE_GID}" =~ ^[1-9][0-9]*$ ]] || die "unsafe service identity policy"
-  [[ "${EXPECTED_GPU_UUID}" =~ ^GPU-[0-9A-Fa-f-]+$ ]] || die "unsafe GPU UUID policy"
   [[ "$(/usr/bin/id -u "${SERVICE_USER}")" == "${SERVICE_UID}" && "$(/usr/bin/id -g "${SERVICE_USER}")" == "${SERVICE_GID}" ]] || die "service account identity drifted"
+  [[ -d "${SERVICE_STATE_ROOT}" && ! -L "${SERVICE_STATE_ROOT}" &&
+    "$(/usr/bin/readlink -e -- "${SERVICE_STATE_ROOT}")" == "${SERVICE_STATE_ROOT}" &&
+    "$(/usr/bin/stat -c %u -- "${SERVICE_STATE_ROOT}")" == "${SERVICE_UID}" ]] ||
+    die "unsafe service-state root"
+  SERVICE_STATE="$(/usr/bin/readlink -e -- "${SERVICE_STATE_REQUESTED}")" ||
+    die "selected service state does not exist"
+  case "${SERVICE_STATE}" in
+    "${SERVICE_STATE_ROOT}"/qwen35-[A-Za-z0-9._-]*/service-[A-Za-z0-9._-]*.state) ;;
+    *) die "selected service state is outside the reviewed state hierarchy" ;;
+  esac
 }
 
-check_output_hierarchy() {
+check_base_output_hierarchy() {
   local root="/var/lib/commu-secure-matrix/${REPOSITORY_SHA}" path
   [[ -d /var/lib/commu-secure-matrix && ! -L /var/lib/commu-secure-matrix &&
     "$(/usr/bin/stat -c %u:%g:%a -- /var/lib/commu-secure-matrix)" == "0:${SERVICE_GID}:710" ]] ||
     die "unsafe root-owned matrix output base"
-  for path in "${root}" "${root}/runs" "${root}/caddy"; do
+  for path in "${root}" "${root}/snapshots"; do
     [[ -d "${path}" && ! -L "${path}" &&
       "$(/usr/bin/stat -c %u:%g:%a -- "${path}")" == "0:${SERVICE_GID}:710" ]] ||
       die "unsafe root-owned output directory: ${path}"
   done
-  OUTPUT_ROOT="${root}"
-  PROTOCOL_ROOT="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/runs/protocol_validation"
-  NETWORK_STATE_ROOT="${root}/network_state"
+  BASE_OUTPUT_ROOT="${root}"
+}
+
+select_gpu_output_hierarchy() {
+  local gpu_index gpu_uuid actual_uuid scope path
+  gpu_index="$(state_value worker_0_gpu_index)" || die "service state has no GPU index"
+  gpu_uuid="$(state_value worker_0_gpu_uuid)" || die "service state has no GPU UUID"
+  [[ "${gpu_index}" =~ ^(0|[1-9][0-9]*)$ && "${gpu_uuid}" =~ ^GPU-[0-9A-Fa-f-]+$ ]] ||
+    die "service state has unsafe GPU identity"
+  actual_uuid="$(/usr/bin/nvidia-smi -i "${gpu_index}" --query-gpu=uuid --format=csv,noheader,nounits 2>/dev/null)" ||
+    die "GPU inventory failed"
+  actual_uuid="${actual_uuid//[[:space:]]/}"
+  [[ "${actual_uuid}" == "${gpu_uuid}" ]] || die "selected GPU index/UUID mapping drifted"
+  EXPECTED_GPU_INDEX="${gpu_index}"
+  EXPECTED_GPU_UUID="${gpu_uuid}"
+  scope="gpu-${gpu_index}-${gpu_uuid}"
+  OUTPUT_ROOT="${BASE_OUTPUT_ROOT}/${scope}"
+  for path in "${OUTPUT_ROOT}" "${OUTPUT_ROOT}/runs" "${OUTPUT_ROOT}/caddy"; do
+    if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+      /usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${path}"
+    fi
+    [[ -d "${path}" && ! -L "${path}" &&
+      "$(/usr/bin/stat -c %u:%g:%a -- "${path}")" == "0:${SERVICE_GID}:710" ]] ||
+      die "unsafe GPU-scoped output directory: ${path}"
+  done
+  RUNTIME_CONFIG="${OUTPUT_ROOT}/.runtime-config-$$"
+  /usr/bin/python3 -I "${VALIDATOR}" materialize \
+    --input "${CONFIG_TEMPLATE}" --output "${RUNTIME_CONFIG}" \
+    --repository-sha "${REPOSITORY_SHA}" --gpu-index "${gpu_index}" --gpu-uuid "${gpu_uuid}" ||
+    die "could not materialize GPU-scoped matrix config"
+  regular_root_file "${RUNTIME_CONFIG}" || die "unsafe GPU-scoped matrix config"
+  CONFIG="${RUNTIME_CONFIG}"
+  PROTOCOL_ROOT="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/${scope}/runs/protocol_validation"
+  NETWORK_STATE_ROOT="${OUTPUT_ROOT}/network_state"
   if [[ -e "${NETWORK_STATE_ROOT}" || -L "${NETWORK_STATE_ROOT}" ]]; then
     [[ -d "${NETWORK_STATE_ROOT}" && ! -L "${NETWORK_STATE_ROOT}" && "$(/usr/bin/stat -c %u -- "${NETWORK_STATE_ROOT}")" == 0 ]] || die "unsafe network-state directory"
   else
@@ -411,7 +469,7 @@ acquire_service_lock() {
 
 pin_service_state() {
   SERVICE_STATE_ORIGINAL="${SERVICE_STATE}"
-  SERVICE_STATE_SNAPSHOT="${OUTPUT_ROOT}/.service-state-$$"
+  SERVICE_STATE_SNAPSHOT="${BASE_OUTPUT_ROOT}/snapshots/.service-state-$$"
   [[ ! -e "${SERVICE_STATE_SNAPSHOT}" && ! -L "${SERVICE_STATE_SNAPSHOT}" ]] ||
     die "service-state snapshot path already exists"
   SERVICE_STATE_SOURCE_ID="$(snapshot_user_file \
@@ -436,10 +494,12 @@ cleanup() {
   local status="${1:-$?}"
   local behavior="${2:-exit}"
   trap - EXIT
-  for snapshot in "${ACTIVE_CONFIG_SNAPSHOT}" "${SERVICE_STATE_SNAPSHOT}"; do
+  for snapshot in "${RUNTIME_CONFIG}" "${ACTIVE_CONFIG_SNAPSHOT}" "${SERVICE_STATE_SNAPSHOT}"; do
     [[ -n "${snapshot}" ]] || continue
     case "${snapshot}" in
-      "${OUTPUT_ROOT}"/.active-config-[0-9]*|"${OUTPUT_ROOT}"/.service-state-[0-9]*) ;;
+      "${OUTPUT_ROOT}"/.runtime-config-[0-9]*|\
+      "${OUTPUT_ROOT}"/.active-config-[0-9]*|\
+      "${BASE_OUTPUT_ROOT}"/snapshots/.service-state-[0-9]*) ;;
       *) continue ;;
     esac
     if [[ -f "${snapshot}" && ! -L "${snapshot}" &&
@@ -600,10 +660,12 @@ verify_locked_identity() {
     die "service identity changed while its topology lock was held"
 }
 verify_admission() {
-  local marker="${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" path
+  local marker="${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" path protocol_runs protocol_gpu_root
+  protocol_runs="$(/usr/bin/dirname -- "${PROTOCOL_ROOT}")"
+  protocol_gpu_root="$(/usr/bin/dirname -- "${protocol_runs}")"
   for path in /var/lib/commu-protocol-pilots \
     "/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}" \
-    "/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/runs" \
+    "${protocol_gpu_root}" "${protocol_runs}" \
     "${PROTOCOL_ROOT}"; do
     trusted_root_directory "${path}" ||
       die "unsafe protocol-admission path component: ${path}"
@@ -849,6 +911,8 @@ state_args() {
     --active-config-sha256 "${ACTIVE_CONFIG_SHA}" \
     --qa-manifest-sha256 "$(config_value "${CONFIG}" MANIFEST_SHA256)" \
     --summary-manifest-sha256 "$(config_value "${CONFIG}" SUMMARY_MANIFEST_SHA256)" \
+    --run-id "${RUN_ID}" \
+    --gpu-index "${EXPECTED_GPU_INDEX}" \
     --gpu-uuid "${EXPECTED_GPU_UUID}" \
     --service-uid "${SERVICE_UID}" \
     --model "$(config_value "${CONFIG}" VLLM_MODEL)" \
@@ -912,7 +976,7 @@ run_cell() {
         --max-output-tokens 4096 --request-timeout-seconds 900 \
         --observation-seconds 900 --capture-interface llmclient0 \
         --capture-filter "${12} port ${16}" --capture-stop-on-response \
-        --worker-count 1 --worker-index 0 --worker-gpu-index 2 \
+        --worker-count 1 --worker-index 0 --worker-gpu-index "${17}" \
         --worker-gpu-uuid "${13}" --topology-worker-index 0 \
         --transport "${14}" --connection-mode warm --tls-ca-file "${15}"
     ' matrix-child "${SERVICE_UID}" "${SERVICE_GID}" "${REPOSITORY_ROOT}" \
@@ -920,7 +984,7 @@ run_cell() {
       "${manifest}" "${cell}" \
       "$(config_value "${CONFIG}" VLLM_SERVED_MODEL_NAME)" "${samples}" \
       "${filter}" "${EXPECTED_GPU_UUID}" "${transport}" "${CA_FILE}" \
-      "${secure_port}" ||
+      "${secure_port}" "${EXPECTED_GPU_INDEX}" ||
     child_status=$?
   [[ "${child_status:-0}" -eq 0 ]] ||
     die "measurement cell failed; append-only attempts remain in ${cell}"
@@ -928,20 +992,22 @@ run_cell() {
   /usr/bin/python3 -I "${STATE_TOOL}" seal-cell --root "${MATRIX_ROOT}" \
     --network "${network}" --workload "${workload}" --transport "${transport}" \
     --manifest-sha256 "${manifest_sha}" --service-uid "${SERVICE_UID}" \
+    --gpu-index "${EXPECTED_GPU_INDEX}" \
     --gpu-uuid "${EXPECTED_GPU_UUID}"
   verify_cell_boundary "${network}"
 }
 
 release_precheck
 load_policy
-check_output_hierarchy
+check_base_output_hierarchy
 acquire_service_lock
 pin_service_state
+select_gpu_output_hierarchy
 verify_active_service
 verify_locked_identity
 verify_admission
 verify_locked_identity
-MATRIX_ROOT="${OUTPUT_ROOT}/runs/full-matrix"
+MATRIX_ROOT="${OUTPUT_ROOT}/runs/${RUN_ID}"
 if [[ ! -e "${MATRIX_ROOT}" && ! -L "${MATRIX_ROOT}" ]]; then
   if [[ "${ACTION}" == check ]]; then
     check_idle_resources

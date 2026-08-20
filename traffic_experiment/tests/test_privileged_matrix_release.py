@@ -50,18 +50,19 @@ def test_builder_is_platform_stable_credential_free_and_matrix_scoped() -> None:
     assert "commu-matrix-release." in text
 
 
-def test_installer_requires_pilot_admission_and_existing_shared_lock() -> None:
+def test_installer_requires_existing_shared_lock_and_runtime_requires_admission() -> None:
     text = INSTALLER.read_text()
+    supervisor = SUPERVISOR.read_text()
     assert "EXPECTED_REVIEWED_CODE_MANIFEST_SHA256=" in text
     assert "/opt/commu-secure-matrix/releases" in text
     assert "/var/lib/commu-secure-matrix" in text
-    assert (
-        'ADMISSION="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/runs/'
-        'protocol_validation/PROTOCOL_VALIDATION_OK"' in text
-    )
-    assert "root-owned immutable protocol admission is absent" in text
     assert "pilot-installed shared topology lock is absent or unsafe" in text
-    assert "EXPECTED_PILOT_REPOSITORY_SHA=7ed49eb0a04c3d4bd69e7361aab31de83426c61f" in text
+    assert "service_state_root" in text
+    assert "EXPECTED_GPU_INDEX=" not in text
+    assert "EXPECTED_GPU_UUID=" not in text
+    assert 'PROTOCOL_ROOT="/var/lib/commu-protocol-pilots/' in supervisor
+    assert "verify_admission" in supervisor
+    assert "protocol admission is not an immutable root-owned regular file" in supervisor
     assert "LOCK_TMP=" not in text
     assert "31_run_privileged_matrix.sh" in text
     assert 'install -d -o root -g "${SERVICE_GID}" -m 0710' in text
@@ -140,6 +141,8 @@ def test_plan_publication_and_exact_verification(tmp_path: Path) -> None:
         "--active-config-sha256", "f" * 64,
         "--qa-manifest-sha256", "1" * 64,
         "--summary-manifest-sha256", "2" * 64,
+        "--run-id", "main-20260820t180000z",
+        "--gpu-index", "4",
         "--gpu-uuid", "GPU-1234",
         "--service-uid", str(os.getuid()),
         "--model", "Qwen/model",
@@ -152,7 +155,9 @@ def test_plan_publication_and_exact_verification(tmp_path: Path) -> None:
     assert len(plan["cells"]) == 12
     assert (root / "worker-topology.json").is_file()
     state.plan_action(parser.parse_args(["verify-plan", *values]))
-    changed = parser.parse_args(["verify-plan", *values[:-1], "GPU-different"])
+    changed_values = values.copy()
+    changed_values[changed_values.index("4")] = "5"
+    changed = parser.parse_args(["verify-plan", *changed_values])
     with pytest.raises(ValueError, match="does not match"):
         state.plan_action(changed)
 
@@ -162,7 +167,7 @@ def test_config_example_is_secret_free_and_fixed() -> None:
     assert "LOCAL_VLLM_API_KEY=" not in text
     assert text.count("@REPOSITORY_SHA@") == 3
     for assignment in (
-        'CUDA_VISIBLE_DEVICES="2"',
+        'CUDA_VISIBLE_DEVICES="@GPU_INDEX@"',
         'PARALLEL_WORKERS="1"',
         'LAB_NETWORKS="baseline rtt realistic"',
         'LAB_QA_SAMPLES="32"',
@@ -188,9 +193,52 @@ def test_config_validator_accepts_only_exact_matrix(tmp_path: Path) -> None:
     path.write_text(text)
     values = config.parse_config(path)
     config.validate_release_config(values, repository_sha, None)
+    rendered = tmp_path / "gpu4.env"
+    config.materialize(
+        path,
+        rendered,
+        repository_sha,
+        "4",
+        "GPU-1234",
+    )
+    rendered_values = config.parse_config(rendered)
+    assert rendered_values["CUDA_VISIBLE_DEVICES"] == "4"
+    assert rendered_values["RUNS_ROOT"] == (
+        f"/var/lib/commu-secure-matrix/{repository_sha}/gpu-4-GPU-1234/runs"
+    )
+    assert rendered_values["CADDY_RUN_DIR"] == (
+        f"/var/lib/commu-secure-matrix/{repository_sha}/gpu-4-GPU-1234/caddy"
+    )
     values["LAB_NETWORKS"] = "baseline realistic"
     with pytest.raises(config.ConfigError, match="LAB_NETWORKS"):
         config.validate_release_config(values, repository_sha, None)
+
+
+def test_supervisor_binds_selected_gpu_to_output_plan_and_admission() -> None:
+    text = SUPERVISOR.read_text()
+    assert "--service-state /absolute/path/to/service.state --run-id SAFE_ID" in text
+    assert 'scope="gpu-${gpu_index}-${gpu_uuid}"' in text
+    assert 'OUTPUT_ROOT="${BASE_OUTPUT_ROOT}/${scope}"' in text
+    assert 'PROTOCOL_ROOT="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/${scope}/runs/protocol_validation"' in text
+    assert '--gpu-index "${EXPECTED_GPU_INDEX}"' in text
+    assert '--worker-gpu-index "${17}"' in text
+    assert 'MATRIX_ROOT="${OUTPUT_ROOT}/runs/${RUN_ID}"' in text
+    assert '--run-id "${RUN_ID}"' in text
+    assert "worker-gpu-index 2" not in text
+
+
+def test_both_root_installers_are_outside_reviewed_code_manifest() -> None:
+    pilot_builder = (SCRIPTS / "26_create_privileged_pilot_bundle.sh").read_text()
+    pilot_installer = (SCRIPTS / "27_install_privileged_pilot_release.sh").read_text()
+    matrix_builder = BUILDER.read_text()
+    for installer in (
+        "27_install_privileged_pilot_release.sh",
+        "30_install_privileged_matrix_release.sh",
+    ):
+        assert installer in pilot_builder
+        assert installer in matrix_builder
+        assert installer in pilot_installer
+        assert installer in INSTALLER.read_text()
 
 
 def test_sealing_is_no_follow_hardlink_checked_and_atomic() -> None:

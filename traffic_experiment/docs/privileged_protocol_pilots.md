@@ -166,11 +166,12 @@ selected state, active config, live index-to-UUID mapping, process ownership,
 and exclusive engine all pass the reviewed checks. It does not select an idle
 GPU or move vLLM; the one-worker service must already be running on that GPU.
 
-This release does not complete the one-GPU experiment. A one-GPU full matrix
-still needs a separate reviewed root-owned launcher/release and explicit run
-authorization. In particular, never resume the old two-worker matrix tree into
-this topology: its worker/GPU blocking factor differs, and unreadable or absent
-completion state is not evidence that it completed.
+This release does not complete the one-GPU experiment. The separate full-matrix
+release in `docs/privileged_full_matrix.md` consumes this GPU-scoped admission
+and refuses to run or resume when its immutable plan differs. Never resume the
+old two-worker matrix tree into this topology: its worker/GPU blocking factor
+differs, and unreadable or absent completion state is not evidence that it
+completed.
 
 If a pilot fails, the existing owned-resource lifecycle keeps its precise state
 when cleanup cannot be verified. Inspect that state before any manual action;

@@ -165,10 +165,10 @@ archive = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 expected_manifest_sha = sys.argv[3]
 manifest_name = "release/REVIEWED_CODE_FILES.sha256"
-installer_name = (
-    "release/repository/traffic_experiment/scripts/"
-    "27_install_privileged_pilot_release.sh"
-)
+installer_names = {
+    "release/repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh",
+    "release/repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh",
+}
 members: dict[str, tarfile.TarInfo] = {}
 total = 0
 with tarfile.open(archive, "r:gz") as bundle:
@@ -218,7 +218,7 @@ with tarfile.open(archive, "r:gz") as bundle:
         archive_name = f"release/{relative}"
         path = PurePosixPath(archive_name)
         if (
-            archive_name == installer_name
+            archive_name in installer_names
             or relative.startswith("repository/traffic_experiment/artifacts/")
             or relative.startswith("repository/traffic_experiment/.tools/")
             or archive_name in listed
@@ -232,7 +232,7 @@ with tarfile.open(archive, "r:gz") as bundle:
         for name, member in members.items()
         if member.isreg()
         and name.startswith("release/repository/")
-        and name != installer_name
+        and name not in installer_names
         and not name.startswith("release/repository/traffic_experiment/artifacts/")
         and not name.startswith("release/repository/traffic_experiment/.tools/")
     }
@@ -461,7 +461,10 @@ for number, line in enumerate(reviewed.read_text(encoding="utf-8").splitlines(),
         or ".." in path.parts
         or relative in reviewed_listed
         or relative.startswith("repository/traffic_experiment/artifacts/")
-        or relative == "repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh"
+        or relative in {
+            "repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh",
+            "repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh",
+        }
     ):
         raise SystemExit(f"unsafe reviewed-code manifest path: {relative!r}")
     reviewed_listed.add(relative)
@@ -473,7 +476,10 @@ reviewed_actual = {
         "repository/traffic_experiment/artifacts/"
     )
     and str(path.relative_to(root)).replace("\\", "/")
-    != "repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh"
+    not in {
+        "repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh",
+        "repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh",
+    }
     and not str(path.relative_to(root)).replace("\\", "/").startswith(
         "repository/traffic_experiment/.tools/"
     )

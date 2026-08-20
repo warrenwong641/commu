@@ -18,6 +18,8 @@ SHA1 = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 GPU_UUID = re.compile(r"GPU-[0-9A-Fa-f-]+")
 SAFE_INTERFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
+GPU_INDEX_PLACEHOLDER = "@GPU_INDEX@"
+GPU_SCOPE_PLACEHOLDER = "@GPU_SCOPE@"
 
 CREDENTIAL_NAMES = {
     "LOCAL_VLLM_API_KEY",
@@ -152,15 +154,35 @@ def relative_artifact(value: str, label: str) -> PurePosixPath:
 
 
 def validate_release_config(
-    values: dict[str, str], repository_sha: str, release_root: Path | None
+    values: dict[str, str],
+    repository_sha: str,
+    release_root: Path | None,
+    *,
+    gpu_index: str | None = None,
+    gpu_uuid: str | None = None,
 ) -> None:
     if SHA1.fullmatch(repository_sha) is None:
         raise ConfigError("repository SHA must be 40 lowercase hexadecimal characters")
-    expected_output = f"/var/lib/commu-secure-matrix/{repository_sha}"
+    if gpu_index is None and gpu_uuid is None:
+        expected_gpu_index = GPU_INDEX_PLACEHOLDER
+        expected_scope = GPU_SCOPE_PLACEHOLDER
+    elif gpu_index is not None and gpu_uuid is not None:
+        if re.fullmatch(r"0|[1-9][0-9]*", gpu_index) is None:
+            raise ConfigError("GPU index must be canonical non-negative decimal")
+        if GPU_UUID.fullmatch(gpu_uuid) is None:
+            raise ConfigError("GPU UUID is invalid")
+        expected_gpu_index = gpu_index
+        expected_scope = f"gpu-{gpu_index}-{gpu_uuid}"
+    else:
+        raise ConfigError("GPU index and UUID must be supplied together")
+    expected_output = (
+        f"/var/lib/commu-secure-matrix/{repository_sha}/{expected_scope}"
+    )
     exact = {
         "LOCOMO_DATA_DIR": "/nonexistent",
         "CAPTURE_INTERFACE": "llmhost0",
         "PARALLEL_WORKERS": "1",
+        "CUDA_VISIBLE_DEVICES": expected_gpu_index,
         "VLLM_HOST": "127.0.0.1",
         "VLLM_PORT": "8000",
         "VLLM_SECONDARY_PORT": "8001",
@@ -224,9 +246,6 @@ def validate_release_config(
     )
     if expected_calls != 2808:
         raise ConfigError("matrix plan must contain exactly 2,808 calls")
-    gpu_index = require(values, "CUDA_VISIBLE_DEVICES")
-    if re.fullmatch(r"0|[1-9][0-9]*", gpu_index) is None:
-        raise ConfigError("CUDA_VISIBLE_DEVICES must contain exactly one canonical GPU index")
     if SHA1.fullmatch(require(values, "VLLM_MODEL_REVISION").lower()) is None:
         raise ConfigError("VLLM_MODEL_REVISION must be an exact commit SHA")
     if SHA256.fullmatch(require(values, "MANIFEST_SHA256")) is None:
@@ -293,6 +312,46 @@ def normalize(source: Path, output: Path, repository_sha: str) -> None:
     validate_release_config(values, repository_sha, None)
 
 
+def materialize(
+    source: Path,
+    output: Path,
+    repository_sha: str,
+    gpu_index: str,
+    gpu_uuid: str,
+) -> None:
+    values = parse_config(source)
+    validate_release_config(values, repository_sha, None)
+    raw = source.read_text(encoding="utf-8")
+    if raw.count(GPU_INDEX_PLACEHOLDER) != 1:
+        raise ConfigError("release template must contain one GPU-index placeholder")
+    if raw.count(GPU_SCOPE_PLACEHOLDER) != 2:
+        raise ConfigError("release template must contain two GPU-scope placeholders")
+    scope = f"gpu-{gpu_index}-{gpu_uuid}"
+    rendered = raw.replace(GPU_INDEX_PLACEHOLDER, gpu_index).replace(
+        GPU_SCOPE_PLACEHOLDER, scope
+    )
+    if "@GPU_" in rendered:
+        raise ConfigError("unresolved GPU placeholder")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(output, flags, 0o400)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(rendered)
+            if rendered and not rendered.endswith("\n"):
+                handle.write("\n")
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
+    rendered_values = parse_config(output)
+    validate_release_config(
+        rendered_values,
+        repository_sha,
+        None,
+        gpu_index=gpu_index,
+        gpu_uuid=gpu_uuid,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -308,6 +367,12 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("--input", required=True, type=Path)
     command.add_argument("--output", required=True, type=Path)
     command.add_argument("--repository-sha", required=True)
+    command = subparsers.add_parser("materialize")
+    command.add_argument("--input", required=True, type=Path)
+    command.add_argument("--output", required=True, type=Path)
+    command.add_argument("--repository-sha", required=True)
+    command.add_argument("--gpu-index", required=True)
+    command.add_argument("--gpu-uuid", required=True)
     return parser
 
 
@@ -316,6 +381,15 @@ def main() -> int:
     try:
         if args.action == "normalize":
             normalize(args.input, args.output, args.repository_sha)
+            return 0
+        if args.action == "materialize":
+            materialize(
+                args.input,
+                args.output,
+                args.repository_sha,
+                args.gpu_index,
+                args.gpu_uuid,
+            )
             return 0
         values = parse_config(args.input)
         if args.action == "check":

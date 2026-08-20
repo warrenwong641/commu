@@ -135,6 +135,7 @@ git -c core.autocrlf=false -c core.eol=lf \
   find repository -type f \
     ! -path 'repository/traffic_experiment/artifacts/*' \
     ! -path 'repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh' \
+    ! -path 'repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh' \
     -print0 | LC_ALL=C sort -z | xargs -0 sha256sum --text -- \
     >REVIEWED_CODE_FILES.sha256
 )

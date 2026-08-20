@@ -49,10 +49,7 @@ EXPECTED_CADDY_VERSION='v2.11.3 h1:/vFbdjcs2DtzcWTIxHybf5R5TspYFFThlZffChyBFHg='
 EXPECTED_SERVICE_USER=wongshingyin
 EXPECTED_SERVICE_UID=1007
 EXPECTED_SERVICE_GID=1007
-EXPECTED_SERVICE_STATE=/home/wongshingyin/.config/commu/qwen35-e12240f/service-attempt-5-gpu2-1.state
-EXPECTED_GPU_INDEX=2
-EXPECTED_GPU_UUID=GPU-41d1f86d-0197-51fe-c1ef-ad53c99e3223
-EXPECTED_PILOT_REPOSITORY_SHA=7ed49eb0a04c3d4bd69e7361aab31de83426c61f
+EXPECTED_SERVICE_STATE_ROOT=/home/wongshingyin/.config/commu
 EXPECTED_MODEL=Qwen/Qwen3.5-9B
 EXPECTED_SERVED_MODEL=Qwen/Qwen3.5-9B
 EXPECTED_MODEL_REVISION=c202236235762e1c871ad0ccb60c8ee5ba337b9a
@@ -63,7 +60,7 @@ EXPECTED_SUMMARY_SHA256=f6873ec918d63c9b8d12aa17efaa460c7b1650977d73bd4585670a3e
 # Updated after committing by hashing REVIEWED_CODE_FILES.sha256 from a clean
 # git archive. This file itself is excluded; administrators authenticate this
 # installer with its separately published SHA-256.
-EXPECTED_REVIEWED_CODE_MANIFEST_SHA256=06cd06f94d161e548747ac79d48affe24ed190685478b9845f9fc9d40f2b7f3e
+EXPECTED_REVIEWED_CODE_MANIFEST_SHA256=TO_BE_FINALIZED_AFTER_COMMIT
 ARCHIVE="${1:-}"
 EXPECTED_ARCHIVE_SHA="${2:-}"
 EXPECTED_REPOSITORY_SHA="${3:-}"
@@ -168,10 +165,10 @@ archive = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 expected_manifest_sha = sys.argv[3]
 manifest_name = "release/REVIEWED_CODE_FILES.sha256"
-installer_name = (
-    "release/repository/traffic_experiment/scripts/"
-    "30_install_privileged_matrix_release.sh"
-)
+installer_names = {
+    "release/repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh",
+    "release/repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh",
+}
 members: dict[str, tarfile.TarInfo] = {}
 total = 0
 with tarfile.open(archive, "r:gz") as bundle:
@@ -221,7 +218,7 @@ with tarfile.open(archive, "r:gz") as bundle:
         archive_name = f"release/{relative}"
         path = PurePosixPath(archive_name)
         if (
-            archive_name == installer_name
+            archive_name in installer_names
             or relative.startswith("repository/traffic_experiment/artifacts/")
             or relative.startswith("repository/traffic_experiment/.tools/")
             or archive_name in listed
@@ -235,7 +232,7 @@ with tarfile.open(archive, "r:gz") as bundle:
         for name, member in members.items()
         if member.isreg()
         and name.startswith("release/repository/")
-        and name != installer_name
+        and name not in installer_names
         and not name.startswith("release/repository/traffic_experiment/artifacts/")
         and not name.startswith("release/repository/traffic_experiment/.tools/")
     }
@@ -331,15 +328,14 @@ EARLY_CONFIG="${AUTHORIZED_RELEASE}/config/server.env"
   "$(early_value purpose "${EARLY_METADATA}")" == secure-single-gpu-full-matrix &&
   "$(early_value repository_sha "${EARLY_METADATA}")" == "${EXPECTED_REPOSITORY_SHA}" ]] ||
   die "bundle metadata is outside this installer's authorized release"
-[[ "$(early_value schema "${EARLY_POLICY}")" == commu-privileged-matrix-policy-v1 &&
+[[ "$(early_value schema "${EARLY_POLICY}")" == commu-privileged-matrix-policy-v2 &&
   "$(early_value repository_sha "${EARLY_POLICY}")" == "${EXPECTED_REPOSITORY_SHA}" &&
   "$(early_value service_user "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_USER}" &&
   "$(early_value service_uid "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_UID}" &&
   "$(early_value service_gid "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_GID}" &&
-  "$(early_value service_state "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_STATE}" &&
-  "$(early_value expected_gpu_uuid "${EARLY_POLICY}")" == "${EXPECTED_GPU_UUID}" ]] ||
+  "$(early_value service_state_root "${EARLY_POLICY}")" == "${EXPECTED_SERVICE_STATE_ROOT}" ]] ||
   die "bundle policy is outside this installer's authorized service scope"
-[[ "$(early_value pilot_repository_sha "${EARLY_POLICY}")" == "${EXPECTED_PILOT_REPOSITORY_SHA}" ]] ||
+[[ "$(early_value pilot_repository_sha "${EARLY_POLICY}")" == "${EXPECTED_REPOSITORY_SHA}" ]] ||
   die "bundle policy does not pin the reviewed pilot release"
 /usr/bin/python3 -I "${VALIDATOR}" check \
   --input "${EARLY_CONFIG}" --repository-sha "${EXPECTED_REPOSITORY_SHA}" \
@@ -349,8 +345,7 @@ early_config_value() {
   /usr/bin/python3 -I "${VALIDATOR}" get \
     --input "${EARLY_CONFIG}" --repository-sha "${EXPECTED_REPOSITORY_SHA}" --key "$1"
 }
-[[ "$(early_config_value CUDA_VISIBLE_DEVICES)" == "${EXPECTED_GPU_INDEX}" &&
-  "$(early_config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
+[[ "$(early_config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
   "$(early_config_value VLLM_SERVED_MODEL_NAME)" == "${EXPECTED_SERVED_MODEL}" &&
   "$(early_config_value VLLM_MODEL_REVISION)" == "${EXPECTED_MODEL_REVISION}" &&
   "$(early_config_value MANIFEST_PATH)" == "${EXPECTED_QA_MANIFEST}" &&
@@ -468,7 +463,10 @@ for number, line in enumerate(reviewed.read_text(encoding="utf-8").splitlines(),
         or ".." in path.parts
         or relative in reviewed_listed
         or relative.startswith("repository/traffic_experiment/artifacts/")
-        or relative == "repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh"
+        or relative in {
+            "repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh",
+            "repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh",
+        }
     ):
         raise SystemExit(f"unsafe reviewed-code manifest path: {relative!r}")
     reviewed_listed.add(relative)
@@ -480,7 +478,10 @@ reviewed_actual = {
         "repository/traffic_experiment/artifacts/"
     )
     and str(path.relative_to(root)).replace("\\", "/")
-    != "repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh"
+    not in {
+        "repository/traffic_experiment/scripts/27_install_privileged_pilot_release.sh",
+        "repository/traffic_experiment/scripts/30_install_privileged_matrix_release.sh",
+    }
     and not str(path.relative_to(root)).replace("\\", "/").startswith(
         "repository/traffic_experiment/.tools/"
     )
@@ -536,15 +537,13 @@ REPOSITORY_SHA="$(metadata_value repository_sha)" || die "release has no reposit
 SERVICE_UID="$(policy_value service_uid)" || die "policy has no service UID"
 SERVICE_GID="$(policy_value service_gid)" || die "policy has no service GID"
 SERVICE_USER="$(policy_value service_user)" || die "policy has no service user"
-SERVICE_STATE="$(policy_value service_state)" || die "policy has no service state path"
-POLICY_GPU_UUID="$(policy_value expected_gpu_uuid)" || die "policy has no GPU UUID"
+SERVICE_STATE_ROOT="$(policy_value service_state_root)" || die "policy has no service-state root"
 PILOT_REPOSITORY_SHA="$(policy_value pilot_repository_sha)" || die "policy has no pilot repository SHA"
 [[ "${SERVICE_USER}" == "${EXPECTED_SERVICE_USER}" &&
   "${SERVICE_UID}" == "${EXPECTED_SERVICE_UID}" &&
   "${SERVICE_GID}" == "${EXPECTED_SERVICE_GID}" &&
-  "${SERVICE_STATE}" == "${EXPECTED_SERVICE_STATE}" &&
-  "${POLICY_GPU_UUID}" == "${EXPECTED_GPU_UUID}" &&
-  "${PILOT_REPOSITORY_SHA}" == "${EXPECTED_PILOT_REPOSITORY_SHA}" ]] ||
+  "${SERVICE_STATE_ROOT}" == "${EXPECTED_SERVICE_STATE_ROOT}" &&
+  "${PILOT_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" ]] ||
   die "bundle policy is outside the independently authorized service scope"
 [[ "$(/usr/bin/id -u "${SERVICE_USER}")" == "${SERVICE_UID}" &&
   "$(/usr/bin/id -g "${SERVICE_USER}")" == "${SERVICE_GID}" ]] ||
@@ -559,8 +558,7 @@ config_value() {
   /usr/bin/python3 -I "${VALIDATOR}" get \
     --input "${CONFIG}" --repository-sha "${REPOSITORY_SHA}" --key "$1"
 }
-[[ "$(config_value CUDA_VISIBLE_DEVICES)" == "${EXPECTED_GPU_INDEX}" &&
-  "$(config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
+[[ "$(config_value VLLM_MODEL)" == "${EXPECTED_MODEL}" &&
   "$(config_value VLLM_SERVED_MODEL_NAME)" == "${EXPECTED_SERVED_MODEL}" &&
   "$(config_value VLLM_MODEL_REVISION)" == "${EXPECTED_MODEL_REVISION}" &&
   "$(config_value MANIFEST_PATH)" == "${EXPECTED_QA_MANIFEST}" &&
@@ -674,27 +672,9 @@ GLOBAL_LOCK="/run/lock/commu-protocol-pilots/vllm-topology-${SERVICE_UID}.lock"
 exec 8<>"${GLOBAL_LOCK}" || die "cannot open existing shared topology lock"
 /usr/bin/flock -n 8 || die "service topology is busy; release installation refused"
 
-ADMISSION="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/runs/protocol_validation/PROTOCOL_VALIDATION_OK"
-for admission_dir in /var/lib/commu-protocol-pilots \
-  "/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}" \
-  "/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/runs" \
-  "/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/runs/protocol_validation"; do
-  [[ -d "${admission_dir}" && ! -L "${admission_dir}" &&
-    "$(/usr/bin/readlink -e -- "${admission_dir}")" == "${admission_dir}" &&
-    "$(/usr/bin/stat -c %u -- "${admission_dir}")" == 0 ]] ||
-    die "unsafe protocol-admission path component: ${admission_dir}"
-  admission_mode="$(/usr/bin/stat -c %a -- "${admission_dir}")"
-  (( (8#${admission_mode} & 8#022) == 0 )) ||
-    die "writable protocol-admission path component: ${admission_dir}"
-done
-[[ -f "${ADMISSION}" && ! -L "${ADMISSION}" &&
-  "$(/usr/bin/stat -c %u:%g:%a:%h -- "${ADMISSION}")" == 0:0:444:1 ]] ||
-  die "root-owned immutable protocol admission is absent; complete the separate pilots first"
-
 /usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 \
   "${OUTPUT_BASE}/${REPOSITORY_SHA}" \
-  "${OUTPUT_BASE}/${REPOSITORY_SHA}/runs" \
-  "${OUTPUT_BASE}/${REPOSITORY_SHA}/caddy"
+  "${OUTPUT_BASE}/${REPOSITORY_SHA}/snapshots"
 /usr/bin/mv -- "${RELEASE}" "${DESTINATION}"
 /usr/bin/sync -f "${DESTINATION}"
 /usr/bin/sync -f "${BASE}"
@@ -706,4 +686,4 @@ trap - EXIT
 /usr/bin/find "${INSTALL_ROOT}" -depth -delete
 printf 'PRIVILEGED_MATRIX_RELEASE_INSTALLED repository_sha=%s\n' "${REPOSITORY_SHA}"
 printf 'release_root=%s\n' "${DESTINATION}"
-printf 'run_command=sudo %s run\n' "${RUNNER}"
+printf 'run_command=sudo %s run --service-state /absolute/path/to/service.state --run-id SAFE_ID\n' "${RUNNER}"
