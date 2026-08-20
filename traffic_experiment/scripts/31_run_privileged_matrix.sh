@@ -30,11 +30,6 @@ if [[ "${COMMU_PRIVILEGED_MATRIX_CLEAN_ENV:-}" != 1 ]]; then
 fi
 PATH="${FIXED_PATH}"
 export PATH HOME LANG LC_ALL TZ PYTHONNOUSERSITE PYTHONDONTWRITEBYTECODE PYTHONSAFEPATH
-cd /
-# Bash exports OLDPWD when cd runs, even though the re-exec started with an
-# empty environment. Remove this shell-created value before enforcing the
-# ambient-environment allowlist below.
-unset OLDPWD
 
 # The sentinel is not a trust decision. Even if a caller spells it manually,
 # no ambient variable outside this harmless allowlist may survive.
@@ -45,6 +40,11 @@ while IFS='=' read -r inherited_name _; do
   esac
 done < <(/usr/bin/env)
 [[ "${EUID}" -eq 0 ]] || { printf 'ERROR: runner must run as root\n' >&2; exit 2; }
+cd /
+# Bash exports OLDPWD when cd runs. The ambient scan above has already rejected
+# a caller-supplied value, so remove only this shell-created value before any
+# child process can inherit it.
+unset OLDPWD
 [[ "${HOME}" == /root && "${LANG}" == C.UTF-8 && "${LC_ALL}" == C.UTF-8 &&
   "${TZ}" == UTC && "${PATH}" == "${FIXED_PATH}" &&
   "${PYTHONNOUSERSITE}" == 1 && "${PYTHONDONTWRITEBYTECODE}" == 1 &&

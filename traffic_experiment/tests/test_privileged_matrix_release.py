@@ -36,9 +36,11 @@ def test_matrix_release_is_separate_from_pilot_launcher() -> None:
     assert "/opt/commu-secure-matrix/releases" in matrix
     assert "/var/lib/commu-secure-matrix/" in matrix
     assert "/var/lib/commu-protocol-pilots/" in matrix
-    assert matrix.index("cd /") < matrix.index("unset OLDPWD") < matrix.index(
-        "unsanitized environment variable"
-    )
+    scan = matrix.index("while IFS='=' read -r inherited_name _; do")
+    clean = matrix.index("cd /\n# Bash exports OLDPWD")
+    fixed = matrix.index('[[ "${HOME}" == /root')
+    assert scan < clean < fixed
+    assert "|OLDPWD|" not in matrix
 
 
 def test_builder_is_platform_stable_credential_free_and_matrix_scoped() -> None:
