@@ -78,10 +78,35 @@ async def _http3_handshake(
         configuration=configuration,
         wait_connected=False,
     ) as protocol:
-        await asyncio.wait_for(protocol.wait_connected(), timeout=timeout)
+        protocol.transmit()
+        connection_waiter = asyncio.create_task(protocol.wait_connected())
+        completed, _pending = await asyncio.wait(
+            {connection_waiter}, timeout=timeout
+        )
+        if connection_waiter not in completed:
+            protocol.close(
+                error_code=0,
+                reason_phrase="Caddy readiness handshake timed out",
+            )
+            await protocol.wait_closed()
+            await asyncio.gather(connection_waiter, return_exceptions=True)
+            raise TimeoutError(
+                f"HTTP/3 handshake to {host}:{port} timed out "
+                f"after {timeout:.3f} seconds"
+            )
+        try:
+            await connection_waiter
+        except ConnectionError as exc:
+            detail = str(exc) or type(exc).__name__
+            raise ConnectionError(
+                f"HTTP/3 handshake to {host}:{port} failed: {detail}"
+            ) from exc
         negotiated = protocol._quic.tls.alpn_negotiated
         if negotiated not in H3_ALPN:
-            raise RuntimeError("listener did not negotiate HTTP/3 ALPN")
+            raise RuntimeError(
+                f"HTTP/3 handshake to {host}:{port} negotiated "
+                f"unexpected ALPN {negotiated!r}"
+            )
 
 
 def http3_handshake(host: str, port: int, ca_file: Path, timeout: float) -> None:
