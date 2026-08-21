@@ -98,6 +98,9 @@ def test_protocol_pilot_and_matrix_share_redirect_free_caddyfile():
     assert single_global_options.count("admin off") == 1
     assert single_global_options.count("auto_https disable_redirects") == 1
     assert single_global_options.count("skip_install_trust") == 1
+    exact_bind = "bind {$SECURE_PROXY_HOST:localhost}"
+    assert caddyfile.count(exact_bind) == 4
+    assert single_caddyfile.count(exact_bind) == 2
     assert "caddy_config_for_worker_count" in pilots
     assert '"${CADDY_EXE}" validate --config "${CADDY_CONFIG}"' in pilots
     assert '"${CADDY_EXE}" run --config "${CADDY_CONFIG}"' in pilots

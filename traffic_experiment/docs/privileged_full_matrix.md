@@ -81,7 +81,8 @@ unchanged; clients use the matrix-scoped CA snapshot explicitly. This prevents
 future runs from adding trust entries but does not delete a certificate left by
 an older run. Each network cell starts only after a bounded namespace check
 completes both a TLS 1.3/HTTP/1.1 handshake and an HTTP/3/QUIC handshake against
-the exact Caddy-owned listeners, without sending an HTTP request.
+the exact Caddy-owned listeners on the configured experiment-side veth address,
+not a wildcard or public interface, without sending an HTTP request.
 If Caddy exits during readiness, cleanup accepts that state only after proving
 all protected proxy ports are closed; it then removes the exact recorded Caddy
 state and continues namespace/veth teardown. A live PID with changed Caddy

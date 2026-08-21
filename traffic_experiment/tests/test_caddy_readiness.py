@@ -25,6 +25,12 @@ def _module():
 def _install_fake_aioquic(monkeypatch, connect, *, h3_alpn=None) -> None:
     asyncio_module = types.ModuleType("aioquic.asyncio")
     asyncio_module.connect = connect
+    protocol_module = types.ModuleType("aioquic.asyncio.protocol")
+
+    class QuicConnectionProtocol:
+        pass
+
+    protocol_module.QuicConnectionProtocol = QuicConnectionProtocol
     h3_module = types.ModuleType("aioquic.h3.connection")
     h3_module.H3_ALPN = h3_alpn or ["h3"]
 
@@ -39,6 +45,7 @@ def _install_fake_aioquic(monkeypatch, connect, *, h3_alpn=None) -> None:
     configuration_module = types.ModuleType("aioquic.quic.configuration")
     configuration_module.QuicConfiguration = QuicConfiguration
     monkeypatch.setitem(sys.modules, "aioquic.asyncio", asyncio_module)
+    monkeypatch.setitem(sys.modules, "aioquic.asyncio.protocol", protocol_module)
     monkeypatch.setitem(sys.modules, "aioquic.h3.connection", h3_module)
     monkeypatch.setitem(
         sys.modules, "aioquic.quic.configuration", configuration_module
@@ -80,6 +87,12 @@ def test_http3_handshake_transmits_before_waiting_without_http_request(
 
     assert calls[0][0:3] == ("connect", "10.200.0.1", 8444)
     assert calls[0][3]["wait_connected"] is False
+    protocol_class = calls[0][3]["create_protocol"]
+    assert issubclass(
+        protocol_class,
+        sys.modules["aioquic.asyncio.protocol"].QuicConnectionProtocol,
+    )
+    assert protocol_class.quic_event_received(object(), object()) is None
     assert calls[0][3]["configuration"].kwargs == {
         "alpn_protocols": ["h3"],
         "is_client": True,

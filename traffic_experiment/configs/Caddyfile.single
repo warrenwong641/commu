@@ -11,6 +11,7 @@
 }
 
 https://{$SECURE_PROXY_HOST:localhost}:8443 {
+	bind {$SECURE_PROXY_HOST:localhost}
 	tls internal {
 		protocols tls1.3
 		curves x25519
@@ -19,6 +20,7 @@ https://{$SECURE_PROXY_HOST:localhost}:8443 {
 }
 
 https://{$SECURE_PROXY_HOST:localhost}:8444 {
+	bind {$SECURE_PROXY_HOST:localhost}
 	tls internal {
 		protocols tls1.3
 		curves x25519

@@ -63,8 +63,20 @@ async def _http3_handshake(
     host: str, port: int, ca_file: Path, timeout: float
 ) -> None:
     from aioquic.asyncio import connect
+    from aioquic.asyncio.protocol import QuicConnectionProtocol
     from aioquic.h3.connection import H3_ALPN
     from aioquic.quic.configuration import QuicConfiguration
+
+    class HandshakeOnlyProtocol(QuicConnectionProtocol):
+        """Observe connection events without creating application streams."""
+
+        def quic_event_received(self, _event: object) -> None:
+            # Caddy opens HTTP/3 control streams immediately after the QUIC
+            # handshake. The base protocol wraps those peer-initiated streams
+            # in writable StreamWriter objects even though readiness sends no
+            # HTTP request. Ignore application streams while the base class
+            # still handles handshake and termination events first.
+            return
 
     configuration = QuicConfiguration(
         alpn_protocols=H3_ALPN,
@@ -76,6 +88,7 @@ async def _http3_handshake(
         host,
         port,
         configuration=configuration,
+        create_protocol=HandshakeOnlyProtocol,
         wait_connected=False,
     ) as protocol:
         protocol.transmit()
