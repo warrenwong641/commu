@@ -59,6 +59,12 @@ def test_builder_is_platform_stable_credential_free_and_matrix_scoped() -> None:
     assert "commu-matrix-release." in text
 
 
+def test_matrix_builder_has_clean_shebang_bytes() -> None:
+    data = BUILDER.read_bytes()
+    assert data.startswith(b"#!/usr/bin/env bash\n")
+    assert b"\xef\xbb\xbf" not in data
+
+
 def test_installer_requires_existing_shared_lock_and_runtime_requires_admission() -> None:
     text = INSTALLER.read_text()
     supervisor = SUPERVISOR.read_text()
