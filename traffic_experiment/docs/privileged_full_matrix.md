@@ -155,3 +155,47 @@ sudo "$RUNNER" resume --service-state "$STATE" --run-id "$RUN_ID"
 Use `run` only for a new GPU-scoped root. Use `resume` only for that exact
 incomplete plan. A completed root is sealed and cannot be resumed. Never point
 the supervisor at pilot output or an older dual-worker tree.
+
+## Simpler bounded segments
+
+The installed segment launcher replaces the GPU-specific setup, tmux, and
+expiry scripts. The operator supplies a GPU only for a **new** independent run
+and supplies a relative lease duration rather than calculating an absolute
+epoch. The launcher derives the GPU UUID, per-attempt paths, hard deadline,
+cleanup timer, service configuration, logs, and tmux name.
+
+```bash
+LAUNCHER=/opt/commu-secure-matrix/releases/COMMIT/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh
+
+# New independent run on GPU 4. This requires GPU-4 protocol admission.
+sudo "$LAUNCHER" new \
+  --run-id main-YYYYMMDDThhmmssZ \
+  --gpu-index 4 \
+  --lease 2h
+
+# Continue an existing run. Its immutable RUN_PLAN.json selects the GPU.
+sudo "$LAUNCHER" resume \
+  --run-id main-YYYYMMDDThhmmssZ \
+  --lease 115m
+```
+
+Accepted leases are 20 minutes through two hours (`20`, `115m`, or `2h`).
+Cleanup begins ten minutes before the hard deadline. Starting another segment
+does not repeat completed request keys: the matrix generation ledger closes the
+old lease and `resume` appends a new generation. A GPU assertion may be supplied
+on resume, but it must match the immutable plan. To use a different GPU, choose
+a new run ID and keep its output root and analysis separate.
+
+For a reviewed bridge continuing an older run, optionally narrow discovery to
+the source commit:
+
+```bash
+sudo "$LAUNCHER" resume \
+  --run-id main-YYYYMMDDThhmmssZ \
+  --source-repository-sha SOURCE_COMMIT \
+  --lease 2h
+```
+
+The launcher remains fail-closed when the selected GPU is occupied, its pilot
+admission is absent, required ports are in use, the repository has drifted, or
+the service configuration no longer matches the measured release.

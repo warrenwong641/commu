@@ -16,6 +16,7 @@ SCRIPTS = ROOT / "scripts"
 BUILDER = SCRIPTS / "29_create_privileged_matrix_bundle.sh"
 INSTALLER = SCRIPTS / "30_install_privileged_matrix_release.sh"
 SUPERVISOR = SCRIPTS / "31_run_privileged_matrix.sh"
+SEGMENT_LAUNCHER = SCRIPTS / "32_launch_privileged_matrix_segment.sh"
 STATE_TOOL = SCRIPTS / "privileged_matrix_state.py"
 REQUEST_TOOL = SCRIPTS / "privileged_matrix_request.py"
 CONFIG_TOOL = SCRIPTS / "privileged_matrix_config.py"
@@ -46,6 +47,29 @@ def test_matrix_release_is_separate_from_pilot_launcher() -> None:
     assert "|OLDPWD|" not in matrix
     assert '[[ -z "${engine_args[engine_arg_index]}" ]] || die' in matrix
     assert '"${engine_title}" == \'VLLM::EngineCore\'' in matrix
+
+
+def test_segment_launcher_has_gpu_portable_relative_lease_interface() -> None:
+    text = SEGMENT_LAUNCHER.read_text()
+    installer = INSTALLER.read_text()
+    assert "new|resume" in text
+    assert "--gpu-index N" in text
+    assert "--lease 20|115m|2h" in text
+    assert "--deadline-epoch" not in text.split("Usage:", 1)[1].split("EOF", 1)[0]
+    assert "--gpu-index is an assertion only" in text
+    assert "A new run must use a new run ID" in text
+    assert "privileged_matrix_launch.py" in text
+    assert "PROTOCOL_VALIDATION_OK" in text
+    assert "matrix-caddy.state" in text
+    assert "service-matrix-${RECORD_ID}.state" in text
+    timer_arm = text.index('TIMER_ARM_EPOCH="$(/usr/bin/date +%s)"')
+    timer_delay = text.index("DELAY_SECONDS=$((CLEANUP_EPOCH - TIMER_ARM_EPOCH))")
+    timer_start = text.index('/usr/bin/systemd-run --unit="${TIMER_BASE}"')
+    assert timer_arm < timer_delay < timer_start
+    assert "recover-open-generation" in text
+    assert "/usr/bin/flock -n 8" in text
+    assert 'SEGMENT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"' in installer
+    assert '/usr/bin/chmod 0555 "${SEGMENT_LAUNCHER}"' in installer
 
 
 def test_builder_is_platform_stable_credential_free_and_matrix_scoped() -> None:
@@ -418,6 +442,74 @@ def test_service_generations_are_snapshot_paired_closed_and_hash_chained(
     state.record_generation(parser.parse_args(["record-generation", *generation_values]))
     second = state.generation_records(root)[1][1]
     assert second["previous_record_sha256"] == first_closure
+
+
+def test_forced_teardown_can_recover_only_the_matching_open_generation(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt" or os.getuid() != 0:
+        pytest.skip("root POSIX ownership/mode semantics are required")
+    state = load_module("privileged_matrix_generation_recovery_test", STATE_TOOL)
+    root = tmp_path / "matrix"
+    root.mkdir(mode=0o700)
+    parser = state.parser()
+    orchestration_sha = "f" * 40
+    plan_values = [
+        "--root", str(root), "--repository-sha", "a" * 40,
+        "--pilot-repository-sha", "a" * 40,
+        "--release-files-sha256", "b" * 64,
+        "--config-sha256", "c" * 64,
+        "--admission-sha256", "d" * 64,
+        "--active-config-sha256", "e" * 64,
+        "--qa-manifest-sha256", "1" * 64,
+        "--summary-manifest-sha256", "2" * 64,
+        "--run-id", "forced-teardown-recovery", "--gpu-index", "3",
+        "--gpu-uuid", "GPU-1234", "--service-uid", "0",
+        "--model", "Qwen/model", "--served-model-name", "Qwen/model",
+        "--model-revision", "3" * 40,
+    ]
+    state.plan_action(parser.parse_args(["create-plan", *plan_values]))
+    snapshot = root / "temporary.state"
+    snapshot.write_text("schema=commu-vllm-service-state-v2\nstatus=running\n")
+    snapshot.chmod(0o400)
+    digest = state.sha256_file(snapshot)
+    state.record_generation(
+        parser.parse_args(
+            [
+                "record-generation", "--root", str(root),
+                "--orchestration-repository-sha", orchestration_sha,
+                "--orchestration-release-sha256", "4" * 64,
+                "--service-state-snapshot", str(snapshot),
+                "--service-state-sha256", digest,
+                "--active-config-sha256", "e" * 64,
+                "--admission-sha256", "d" * 64,
+            ]
+        )
+    )
+    wrong = parser.parse_args(
+        [
+            "recover-open-generation", "--root", str(root),
+            "--orchestration-repository-sha", "9" * 40,
+        ]
+    )
+    with pytest.raises(ValueError, match="different orchestration"):
+        state.recover_open_generation(wrong)
+    recover = parser.parse_args(
+        [
+            "recover-open-generation", "--root", str(root),
+            "--orchestration-repository-sha", orchestration_sha,
+        ]
+    )
+    state.recover_open_generation(recover)
+    closure = json.loads(
+        (root / "SERVICE_GENERATIONS/000001.closed.json").read_text()
+    )
+    assert closure["outcome"] == "interrupted"
+    state.verify_generations(
+        parser.parse_args(["verify-generations", "--root", str(root)])
+    )
+    with pytest.raises(ValueError, match="already closed"):
+        state.recover_open_generation(recover)
 
 
 def test_legacy_generation_zero_uses_plan_hash_with_preexisting_empty_directory(

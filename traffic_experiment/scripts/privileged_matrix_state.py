@@ -551,6 +551,38 @@ def close_generation(args: argparse.Namespace) -> None:
     print(sha256_file(closure))
 
 
+def recover_open_generation(args: argparse.Namespace) -> None:
+    """Close only the verified last open generation after external teardown.
+
+    Process and network teardown are deliberately proved by the privileged
+    segment launcher, which also holds the global topology lock while invoking
+    this command.  This state-layer operation validates the complete ledger
+    chain and the expected orchestration release before publishing an
+    ``interrupted`` closure.  It never changes the run plan or result rows.
+    """
+    root = args.root.resolve(strict=True)
+    records = generation_records(root)
+    if not records:
+        raise ValueError("no service-state generation exists to recover")
+    path, value = records[-1]
+    if generation_is_closed(path, value):
+        raise ValueError("last service-state generation is already closed")
+    if value["orchestration_repository_sha"] != args.orchestration_repository_sha:
+        raise ValueError("open generation belongs to a different orchestration release")
+    closure = path.with_name(path.stem + ".closed.json")
+    publish(
+        closure,
+        {
+            "schema": GENERATION_CLOSE_SCHEMA,
+            "generation": value["generation"],
+            "activation_sha256": sha256_file(path),
+            "service_state_sha256": value["service_state_sha256"],
+            "outcome": "interrupted",
+        },
+    )
+    print(sha256_file(closure))
+
+
 def cell_path(root: Path, network: str, workload: str, transport: str) -> Path:
     if network not in NETWORKS or transport not in TRANSPORTS:
         raise ValueError("cell is outside the fixed plan")
@@ -987,6 +1019,9 @@ def parser() -> argparse.ArgumentParser:
         choices=("ready-to-seal", "interrupted", "failed"),
         required=True,
     )
+    command = commands.add_parser("recover-open-generation")
+    command.add_argument("--root", required=True, type=Path)
+    command.add_argument("--orchestration-repository-sha", required=True)
     command = commands.add_parser("seal-cell")
     command.add_argument("--root", required=True, type=Path)
     command.add_argument("--network", required=True)
@@ -1016,6 +1051,8 @@ def main() -> int:
             record_generation(args)
         elif args.action == "close-generation":
             close_generation(args)
+        elif args.action == "recover-open-generation":
+            recover_open_generation(args)
         elif args.action == "seal-cell":
             seal_cell(args)
         elif args.action == "compare-measurement-payloads":

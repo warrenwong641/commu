@@ -642,7 +642,9 @@ RUNTIME_MANIFEST="${RELEASE}/INSTALLED_RUNTIME_FILES.sha256"
 /usr/bin/chmod 0555 "${RUNTIME_PYTHON}"
 /usr/bin/chmod 0555 "${CADDY}"
 RUNNER="${RELEASE}/repository/traffic_experiment/scripts/31_run_privileged_matrix.sh"
+SEGMENT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"
 /usr/bin/chmod 0555 "${RUNNER}"
+/usr/bin/chmod 0555 "${SEGMENT_LAUNCHER}"
 [[ -z "$(/usr/bin/find "${RELEASE}" \( ! -user root -o -perm /022 \) -print -quit)" ]] ||
   die "release ownership/mode hardening failed"
 
@@ -681,9 +683,13 @@ exec 8<>"${GLOBAL_LOCK}" || die "cannot open existing shared topology lock"
 /usr/bin/sync -f "${OUTPUT_BASE}/${REPOSITORY_SHA}"
 
 RUNNER="${DESTINATION}/repository/traffic_experiment/scripts/31_run_privileged_matrix.sh"
-[[ -f "${RUNNER}" ]] || die "release runner is missing"
+SEGMENT_LAUNCHER="${DESTINATION}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"
+[[ -f "${RUNNER}" && -x "${RUNNER}" ]] || die "release runner is missing"
+[[ -f "${SEGMENT_LAUNCHER}" && -x "${SEGMENT_LAUNCHER}" ]] ||
+  die "release segment launcher is missing"
 trap - EXIT
 /usr/bin/find "${INSTALL_ROOT}" -depth -delete
 printf 'PRIVILEGED_MATRIX_RELEASE_INSTALLED repository_sha=%s\n' "${REPOSITORY_SHA}"
 printf 'release_root=%s\n' "${DESTINATION}"
 printf 'run_command=sudo %s run --service-state /absolute/path/to/service.state --run-id SAFE_ID\n' "${RUNNER}"
+printf 'segment_command=sudo %s new --run-id SAFE_ID --gpu-index N --lease 2h\n' "${SEGMENT_LAUNCHER}"
