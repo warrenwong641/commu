@@ -264,7 +264,8 @@ def legacy_plan_action(args: argparse.Namespace) -> None:
         or plan.get("release_files_sha256") != args.legacy_release_files_sha256
         or plan.get("config_sha256") != args.legacy_config_sha256
         or plan.get("protocol_admission_sha256") != args.legacy_admission_sha256
-        or not isinstance(plan.get("service_state_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(plan.get("service_state_sha256", "")))
+        is None
         or sha256_file(root / "worker-topology.json")
         != plan.get("worker_topology_sha256")
         or topology != expected_topology(args)
@@ -373,7 +374,7 @@ def generation_is_closed(path: Path, value: dict) -> bool:
         or data["generation"] != value["generation"]
         or data["activation_sha256"] != sha256_file(path)
         or data["service_state_sha256"] != value["service_state_sha256"]
-        or data["outcome"] not in ("complete", "interrupted", "failed")
+        or data["outcome"] not in ("ready-to-seal", "interrupted", "failed")
     ):
         raise ValueError(f"malformed service-generation closure: {closure}")
     return True
@@ -388,18 +389,19 @@ def record_generation(args: argparse.Namespace) -> None:
     if not directory.exists():
         directory.mkdir(mode=0o755)
         os.chown(directory, 0, 0)
+        os.chmod(directory, 0o755)
     records = generation_records(root)
     if records and not generation_is_closed(*records[-1]):
         raise ValueError("prior service-state generation is still open")
-    if records and args.predecessor_service_state_sha256 is not None:
-        raise ValueError("generation-zero predecessor is valid only on the first bridge")
     expected_predecessor = (
         plan.get("service_state_sha256")
         if not records and plan.get("schema") == LEGACY_SCHEMA
         else None
     )
-    if args.predecessor_service_state_sha256 != expected_predecessor:
-        raise ValueError("service-state generation predecessor does not match run plan")
+    if expected_predecessor is not None and re.fullmatch(
+        r"[0-9a-f]{64}", expected_predecessor
+    ) is None:
+        raise ValueError("legacy run plan has an invalid generation-zero digest")
     source = args.service_state_snapshot.resolve(strict=True)
     source_metadata = os.stat(source, follow_symlinks=False)
     if (
@@ -440,7 +442,7 @@ def record_generation(args: argparse.Namespace) -> None:
         "orchestration_repository_sha": args.orchestration_repository_sha,
         "orchestration_release_sha256": args.orchestration_release_sha256,
         "service_state_sha256": digest,
-        "predecessor_service_state_sha256": args.predecessor_service_state_sha256,
+        "predecessor_service_state_sha256": expected_predecessor,
         "service_state_snapshot": str(snapshot.relative_to(root)),
         "active_config_sha256": args.active_config_sha256,
         "protocol_admission_sha256": args.admission_sha256,
@@ -906,14 +908,15 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--orchestration-release-sha256", required=True)
     command.add_argument("--service-state-snapshot", required=True, type=Path)
     command.add_argument("--service-state-sha256", required=True)
-    command.add_argument("--predecessor-service-state-sha256")
     command.add_argument("--active-config-sha256", required=True)
     command.add_argument("--admission-sha256", required=True)
     command = commands.add_parser("close-generation")
     command.add_argument("--root", required=True, type=Path)
     command.add_argument("--service-state-sha256", required=True)
     command.add_argument(
-        "--outcome", choices=("complete", "interrupted", "failed"), required=True
+        "--outcome",
+        choices=("ready-to-seal", "interrupted", "failed"),
+        required=True,
     )
     command = commands.add_parser("seal-cell")
     command.add_argument("--root", required=True, type=Path)

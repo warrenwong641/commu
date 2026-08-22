@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -386,9 +387,16 @@ def test_service_generations_are_snapshot_paired_closed_and_hash_chained(
         "--active-config-sha256", "e" * 64,
         "--admission-sha256", "d" * 64,
     ]
-    state.record_generation(parser.parse_args(["record-generation", *generation_values]))
+    previous_umask = os.umask(0o077)
+    try:
+        state.record_generation(
+            parser.parse_args(["record-generation", *generation_values])
+        )
+    finally:
+        os.umask(previous_umask)
     records = state.generation_records(root)
     assert len(records) == 1
+    assert stat.S_IMODE((root / "SERVICE_GENERATIONS").stat().st_mode) == 0o755
     assert (root / "SERVICE_GENERATIONS/000001.state").is_file()
     with pytest.raises(ValueError, match="still open"):
         state.verify_generations(
@@ -410,6 +418,60 @@ def test_service_generations_are_snapshot_paired_closed_and_hash_chained(
     state.record_generation(parser.parse_args(["record-generation", *generation_values]))
     second = state.generation_records(root)[1][1]
     assert second["previous_record_sha256"] == first_closure
+
+
+def test_legacy_generation_zero_uses_plan_hash_with_preexisting_empty_directory(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt" or os.getuid() != 0:
+        pytest.skip("root POSIX ownership/mode semantics are required")
+    state = load_module("privileged_matrix_legacy_generation_test", STATE_TOOL)
+    root = tmp_path / "matrix"
+    root.mkdir(mode=0o700)
+    parser = state.parser()
+    plan_values = [
+        "--root", str(root), "--repository-sha", "a" * 40,
+        "--pilot-repository-sha", "a" * 40,
+        "--release-files-sha256", "b" * 64,
+        "--config-sha256", "c" * 64,
+        "--admission-sha256", "d" * 64,
+        "--active-config-sha256", "e" * 64,
+        "--qa-manifest-sha256", "1" * 64,
+        "--summary-manifest-sha256", "2" * 64,
+        "--run-id", "main-legacy-generation-test", "--gpu-index", "3",
+        "--gpu-uuid", "GPU-1234", "--service-uid", "0",
+        "--model", "Qwen/model", "--served-model-name", "Qwen/model",
+        "--model-revision", "3" * 40,
+    ]
+    args = parser.parse_args(["create-plan", *plan_values])
+    plan = state.expected_plan(args)
+    plan["schema"] = state.LEGACY_SCHEMA
+    plan["service_state_sha256"] = "9" * 64
+    state.publish(root / "worker-topology.json", state.expected_topology(args))
+    state.publish(root / "RUN_PLAN.json", plan)
+    generations = root / "SERVICE_GENERATIONS"
+    generations.mkdir(mode=0o755)
+    generations.chmod(0o755)
+
+    snapshot = root / "temporary.state"
+    snapshot.write_text("schema=commu-vllm-service-state-v2\nstatus=running\n")
+    snapshot.chmod(0o400)
+    digest = state.sha256_file(snapshot)
+    state.record_generation(
+        parser.parse_args(
+            [
+                "record-generation", "--root", str(root),
+                "--orchestration-repository-sha", "f" * 40,
+                "--orchestration-release-sha256", "4" * 64,
+                "--service-state-snapshot", str(snapshot),
+                "--service-state-sha256", digest,
+                "--active-config-sha256", "e" * 64,
+                "--admission-sha256", "d" * 64,
+            ]
+        )
+    )
+    first = state.generation_records(root)[0][1]
+    assert first["predecessor_service_state_sha256"] == "9" * 64
 
 
 def test_legacy_verification_preserves_v1_plan_bytes_and_inode(tmp_path: Path) -> None:
@@ -469,7 +531,7 @@ def test_existing_check_verifies_resumability_and_legacy_bridge_is_explicit() ->
     assert flow.index("open_service_generation") < flow.index(
         "trap matrix_cleanup"
     )
-    assert flow.index("close_service_generation complete") < flow.index(
+    assert flow.index("close_service_generation ready-to-seal") < flow.index(
         'seal-matrix --root "${MATRIX_ROOT}"'
     )
 

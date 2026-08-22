@@ -627,7 +627,7 @@ cleanup() {
   trap - EXIT
   if [[ "${GENERATION_OPEN}" -eq 1 ]]; then
     local outcome=failed
-    [[ -f "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] && outcome=complete
+    [[ -f "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] && outcome=ready-to-seal
     close_service_generation "${outcome}" || {
       printf 'ERROR: could not immutably close service-state generation\n' >&2
       [[ "${status}" -ne 0 ]] || status=1
@@ -1168,34 +1168,12 @@ verify_selected_plan() {
 }
 
 open_service_generation() {
-  local predecessor="" plan_schema
-  local -a predecessor_args=()
-  plan_schema="$(/usr/bin/python3 -I - "${MATRIX_ROOT}/RUN_PLAN.json" <<'PY'
-import json, sys
-with open(sys.argv[1], "rb") as source:
-    print(json.load(source)["schema"])
-PY
-)" || die "cannot read immutable run-plan schema"
-  if [[ "${plan_schema}" == commu-secure-single-matrix-plan-v1 &&
-    ! -e "${MATRIX_ROOT}/SERVICE_GENERATIONS" ]]; then
-    predecessor="$(/usr/bin/python3 -I - "${MATRIX_ROOT}/RUN_PLAN.json" <<'PY'
-import json, re, sys
-with open(sys.argv[1], "rb") as source:
-    value = json.load(source)["service_state_sha256"]
-if not re.fullmatch(r"[0-9a-f]{64}", value):
-    raise SystemExit(2)
-print(value)
-PY
-)" || die "legacy plan has no valid generation-zero service-state hash"
-    predecessor_args=(--predecessor-service-state-sha256 "${predecessor}")
-  fi
   /usr/bin/python3 -I "${STATE_TOOL}" record-generation \
     --root "${MATRIX_ROOT}" \
     --orchestration-repository-sha "${REPOSITORY_SHA}" \
     --orchestration-release-sha256 "$(sha256_file "${MANIFEST}")" \
     --service-state-snapshot "${SERVICE_STATE}" \
     --service-state-sha256 "${STATE_SHA}" \
-    "${predecessor_args[@]}" \
     --active-config-sha256 "${ACTIVE_CONFIG_SHA}" \
     --admission-sha256 "$(sha256_file "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK")" >/dev/null ||
     die "could not publish service-state generation"
@@ -1360,7 +1338,11 @@ done
 verify_active_service
 verify_locked_identity
 verify_admission
-close_service_generation complete || die "could not close final service-state generation"
+# The generation is closed only after every measured cell is sealed, but the
+# experiment itself is not complete until seal-matrix publishes and verifies
+# MATRIX_COMPLETE.json.  Keep those two meanings distinct so a seal failure
+# cannot leave an immutable lease record that falsely claims full completion.
+close_service_generation ready-to-seal || die "could not close final service-state generation"
 /usr/bin/python3 -I "${STATE_TOOL}" seal-matrix --root "${MATRIX_ROOT}"
 trap - EXIT INT TERM HUP
 cleanup 0 return || exit $?

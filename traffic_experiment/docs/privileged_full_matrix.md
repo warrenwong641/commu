@@ -57,7 +57,9 @@ part of the v2 measurement identity. Instead, before any request, every lease
 activation publishes a root-owned state snapshot and immutable hash-chained
 record under `SERVICE_GENERATIONS/`. Cleanup publishes a closure record. A new
 generation is rejected while the prior generation is open, and final sealing
-binds the closed ledger head. This prevents accidental mixing of results from a
+binds the closed ledger head. The final successful generation closes as
+`ready-to-seal`; only `MATRIX_COMPLETE.json` means the entire experiment is
+complete. This prevents accidental mixing of results from a
 different GPU, topology, code revision, manifest, model, or admission while
 allowing an expired lease to resume the same append-only experiment.
 
