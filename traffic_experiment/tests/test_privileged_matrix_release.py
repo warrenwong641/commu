@@ -310,8 +310,8 @@ def test_fixed_matrix_plan_is_exactly_2808_calls() -> None:
 
 
 def test_plan_publication_and_exact_verification(tmp_path: Path) -> None:
-    if os.name == "nt":
-        pytest.skip("POSIX ownership/mode semantics are required")
+    if os.name == "nt" or os.getuid() != 0:
+        pytest.skip("root POSIX ownership/mode semantics are required")
     state = load_module("privileged_matrix_state_plan_test", STATE_TOOL)
     root = tmp_path / "matrix"
     root.mkdir(mode=0o700)
