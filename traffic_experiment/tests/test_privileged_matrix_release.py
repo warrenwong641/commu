@@ -72,6 +72,83 @@ def test_segment_launcher_has_gpu_portable_relative_lease_interface() -> None:
     assert '/usr/bin/chmod 0555 "${SEGMENT_LAUNCHER}"' in installer
 
 
+def test_segment_launcher_clean_environment_marker_is_shell_local() -> None:
+    text = SEGMENT_LAUNCHER.read_text()
+    marker = 'declare -r COMMU_MATRIX_SEGMENT_CLEAN_ENV="1"'
+    assert f'"${{CLEAN_ENV_DECLARATION}}" != \'{marker}\'' in text
+    assert "readonly COMMU_MATRIX_SEGMENT_CLEAN_ENV=1" in text
+    assert f"'{marker}'" in text
+    clean_exec = text.split("fi\nPATH=", 1)[0]
+    assert "/usr/bin/env -i" in clean_exec
+    assert "/usr/bin/bash -p -c" in clean_exec
+    assert 'source "${launcher}" "$@"' in clean_exec
+    assert 'COMMU_MATRIX_SEGMENT_CLEAN_ENV=1 \\' not in clean_exec
+    assert 'readlink -e -- "${BASH_SOURCE[0]}"' in text
+
+
+@pytest.mark.parametrize(
+    "inherited",
+    (
+        {"TMUX": "/tmp/tmux-1000/default,1,0", "TMUX_PANE": "%3", "TERM": "screen-256color"},
+        {"INVOCATION_ID": "old-invocation", "JOURNAL_STREAM": "8:99", "SYSTEMD_EXEC_PID": "99"},
+    ),
+)
+def test_segment_launcher_child_with_stale_sentinel_resanitizes(
+    tmp_path: Path, inherited: dict[str, str]
+) -> None:
+    if os.name != "posix" or os.geteuid() != 0:
+        pytest.skip("the real root-owned launcher bootstrap requires POSIX root")
+
+    text = SEGMENT_LAUNCHER.read_text()
+    bootstrap = text.split("\ndie() {", 1)[0]
+    harness = tmp_path / "bootstrap.sh"
+    harness.write_text(
+        bootstrap
+        + r'''
+for unexpected in TMUX TMUX_PANE TERM INVOCATION_ID JOURNAL_STREAM SYSTEMD_EXEC_PID; do
+  [[ -z "${!unexpected+x}" ]] || {
+    printf 'unexpected=%s\n' "${unexpected}"
+    exit 91
+  }
+done
+[[ "$#" -eq 2 && "$1" == alpha && "$2" == 'two words' ]] || exit 92
+/usr/bin/env | /usr/bin/grep -q '^COMMU_MATRIX_SEGMENT_CLEAN_ENV=' && exit 93
+printf 'clean-pid=%s sentinel=%s\n' "$$" "${COMMU_MATRIX_SEGMENT_CLEAN_ENV}"
+''',
+        encoding="utf-8",
+    )
+    harness.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update(inherited)
+    environment["COMMU_MATRIX_SEGMENT_CLEAN_ENV"] = "1"
+    result = subprocess.run(
+        ["/usr/bin/bash", "-p", str(harness), "alpha", "two words"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = dict(field.split("=", 1) for field in result.stdout.strip().split())
+    assert fields["sentinel"] == "1"
+    assert "unsanitized environment variable" not in result.stderr
+
+
+def test_segment_matrix_log_is_readable_without_exposing_private_record_state() -> None:
+    text = SEGMENT_LAUNCHER.read_text()
+    assert '/usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${RECORDS_ROOT}"' in text
+    assert '/usr/bin/chown root:"${SERVICE_GID}" "${RECORD_DIR}"' in text
+    assert '/usr/bin/chmod 0710 "${RECORD_DIR}"' in text
+    assert '"0:${SERVICE_GID}:710"' in text
+    assert '/usr/bin/install -o root -g root -m 0600 /dev/null "${RECORD_DIR}/cleanup.lock"' in text
+    assert '/usr/bin/chmod 0600 "${RECORD}"' in text
+    assert '/usr/bin/install -o root -g "${SERVICE_GID}" -m 0640 /dev/null "${MATRIX_LOG}"' in text
+    assert '/usr/bin/install -o root -g "${SERVICE_GID}" -m 0640 /dev/null "${EXPIRY_LOG}"' in text
+    assert '"0:${SERVICE_GID}:640:1"' in text
+    assert 'exec >>"${EXPIRY_LOG}" 2>&1' in text
+
+
 def test_builder_is_platform_stable_credential_free_and_matrix_scoped() -> None:
     text = BUILDER.read_text()
     assert "core.autocrlf=false" in text

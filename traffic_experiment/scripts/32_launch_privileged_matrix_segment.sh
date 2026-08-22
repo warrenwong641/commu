@@ -13,21 +13,30 @@ MANAGER_SHA256=93b6123c3ced3dbe028db80848d98da7ccb1fd465950a3464b56c67c6d371760
 HELPER_SHA256=613eb7e98d7cf03871923f44a532d45b2592b9e3f10ef5ebec9fa40e29f611de
 RECORDS_ROOT=/var/lib/commu-matrix-segments
 
-if [[ "${COMMU_MATRIX_SEGMENT_CLEAN_ENV:-}" != 1 ]]; then
+CLEAN_ENV_DECLARATION="$(declare -p COMMU_MATRIX_SEGMENT_CLEAN_ENV 2>/dev/null || true)"
+if [[ "${CLEAN_ENV_DECLARATION}" != 'declare -r COMMU_MATRIX_SEGMENT_CLEAN_ENV="1"' ]]; then
   [[ "${EUID}" -eq 0 ]] || { printf 'ERROR: launcher must run as root\n' >&2; exit 2; }
-  SELF="$(/usr/bin/readlink -e -- "$0")" || exit 2
+  SELF="$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}")" || exit 2
   [[ -f "${SELF}" && ! -L "${SELF}" && "$(/usr/bin/stat -c %u -- "${SELF}")" == 0 ]] || exit 2
   exec /usr/bin/env -i \
-    COMMU_MATRIX_SEGMENT_CLEAN_ENV=1 \
     HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC PATH="${FIXED_PATH}" \
     PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 PYTHONSAFEPATH=1 \
-    /usr/bin/bash -p "${SELF}" "$@"
+    /usr/bin/bash -p -c '
+      readonly COMMU_MATRIX_SEGMENT_CLEAN_ENV=1
+      launcher="$1"
+      shift
+      source "${launcher}" "$@"
+    ' commu-matrix-clean-env "${SELF}" "$@"
 fi
 PATH="${FIXED_PATH}"
 export PATH HOME LANG LC_ALL TZ PYTHONNOUSERSITE PYTHONDONTWRITEBYTECODE PYTHONSAFEPATH
+[[ "$(declare -p COMMU_MATRIX_SEGMENT_CLEAN_ENV 2>/dev/null || true)" == 'declare -r COMMU_MATRIX_SEGMENT_CLEAN_ENV="1"' ]] || {
+  printf 'ERROR: clean-environment shell marker drifted\n' >&2
+  exit 2
+}
 while IFS='=' read -r inherited_name _; do
   case "${inherited_name}" in
-    COMMU_MATRIX_SEGMENT_CLEAN_ENV|HOME|LANG|LC_ALL|TZ|PATH|PYTHONNOUSERSITE|PYTHONDONTWRITEBYTECODE|PYTHONSAFEPATH|PWD|SHLVL|_) ;;
+    HOME|LANG|LC_ALL|TZ|PATH|PYTHONNOUSERSITE|PYTHONDONTWRITEBYTECODE|PYTHONSAFEPATH|PWD|SHLVL|_) ;;
     *) printf 'ERROR: unsanitized environment variable: %s\n' "${inherited_name}" >&2; exit 2 ;;
   esac
 done < <(/usr/bin/env)
@@ -73,7 +82,7 @@ trusted_root_dir() {
   (( (8#${mode} & 8#022) == 0 ))
 }
 
-SELF="$(/usr/bin/readlink -e -- "$0")" || die "cannot resolve launcher"
+SELF="$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}")" || die "cannot resolve launcher"
 SCRIPT_DIR="$(/usr/bin/dirname -- "${SELF}")"
 EXPERIMENT_ROOT="$(/usr/bin/readlink -e -- "${SCRIPT_DIR}/..")" || die "cannot resolve experiment root"
 REPOSITORY_ROOT="$(/usr/bin/readlink -e -- "${EXPERIMENT_ROOT}/..")" || die "cannot resolve release repository"
@@ -234,9 +243,12 @@ record_value() { kv_value "$1" "${RECORD}"; }
 load_record() {
   local id="$1"
   [[ "${id}" =~ ^[0-9a-f]{16}$ ]] || die "invalid internal record ID"
+  [[ -d "${RECORDS_ROOT}" && ! -L "${RECORDS_ROOT}" &&
+    "$(/usr/bin/stat -c %u:%g:%a -- "${RECORDS_ROOT}")" == "0:${SERVICE_GID}:710" ]] ||
+    die "unsafe segment records root"
   RECORD_DIR="${RECORDS_ROOT}/${id}"
   RECORD="${RECORD_DIR}/record.state"
-  [[ -d "${RECORD_DIR}" && ! -L "${RECORD_DIR}" && "$(/usr/bin/stat -c %u:%g:%a -- "${RECORD_DIR}")" == 0:0:700 ]] ||
+  [[ -d "${RECORD_DIR}" && ! -L "${RECORD_DIR}" && "$(/usr/bin/stat -c %u:%g:%a -- "${RECORD_DIR}")" == "0:${SERVICE_GID}:710" ]] ||
     die "unsafe segment record directory"
   [[ -f "${RECORD}" && ! -L "${RECORD}" && "$(/usr/bin/stat -c %u:%g:%a:%h -- "${RECORD}")" == 0:0:600:1 ]] ||
     die "unsafe segment record"
@@ -246,6 +258,13 @@ load_record() {
   RECORD_ID="$(record_value record_id)"; SESSION="$(record_value session)"; TIMER_BASE="$(record_value timer_base)"
   STATE="$(record_value service_state)"; SERVICE_CONFIG="$(record_value service_config)"
   VLLM_LOG="$(record_value vllm_log)"; MATRIX_LOG="$(record_value matrix_log)"
+  [[ "${MATRIX_LOG}" == "${RECORD_DIR}/matrix.log" && -f "${MATRIX_LOG}" && ! -L "${MATRIX_LOG}" &&
+    "$(/usr/bin/stat -c %u:%g:%a:%h -- "${MATRIX_LOG}")" == "0:${SERVICE_GID}:640:1" ]] ||
+    die "unsafe matrix log"
+  EXPIRY_LOG="${RECORD_DIR}/expiry.log"
+  [[ -f "${EXPIRY_LOG}" && ! -L "${EXPIRY_LOG}" &&
+    "$(/usr/bin/stat -c %u:%g:%a:%h -- "${EXPIRY_LOG}")" == "0:${SERVICE_GID}:640:1" ]] ||
+    die "unsafe expiry log"
   RUN_ID="$(record_value run_id)"; MODE="$(record_value mode)"
   GPU_INDEX="$(record_value gpu_index)"; GPU_UUID="$(record_value gpu_uuid)"
   RUN_REPOSITORY_SHA="$(record_value run_repository_sha)"
@@ -487,7 +506,7 @@ segment_main() {
 expire_main() {
   local id="$1"
   load_record "${id}"
-  exec >>"${RECORD_DIR}/expiry.log" 2>&1
+  exec >>"${EXPIRY_LOG}" 2>&1
   /usr/bin/date '+EXPIRY_CLEANUP_START %F %T %z epoch=%s'
   if /usr/bin/tmux has-session -t "${SESSION}" 2>/dev/null; then
     /usr/bin/tmux send-keys -t "${SESSION}" C-c
@@ -590,7 +609,7 @@ gpu_processes="$(/usr/bin/nvidia-smi --query-compute-apps=gpu_uuid,pid --format=
 /usr/bin/ss -H -lnu '( sport = :8444 )' | /usr/bin/grep -q . && die "required UDP port is occupied"
 /usr/bin/ip netns list | /usr/bin/grep -Eq '^llm-client([[:space:]]|$)' && die "project network namespace already exists"
 
-/usr/bin/install -d -o root -g root -m 0700 "${RECORDS_ROOT}"
+/usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${RECORDS_ROOT}"
 for _ in $(/usr/bin/seq 1 100); do
   RECORD_ID="$(/usr/bin/openssl rand -hex 8)"
   [[ "${RECORD_ID}" =~ ^[0-9a-f]{16}$ ]] || continue
@@ -599,6 +618,8 @@ for _ in $(/usr/bin/seq 1 100); do
   RECORD_DIR=""
 done
 [[ -n "${RECORD_DIR:-}" ]] || die "cannot allocate a unique segment record"
+/usr/bin/chown root:"${SERVICE_GID}" "${RECORD_DIR}"
+/usr/bin/chmod 0710 "${RECORD_DIR}"
 /usr/bin/install -o root -g root -m 0600 /dev/null "${RECORD_DIR}/cleanup.lock"
 SESSION="commu-matrix-${RECORD_ID}"
 TIMER_BASE="${SESSION}-expiry"
@@ -610,6 +631,7 @@ STATE="${SERVICE_STATE_ROOT}/qwen35-${SERVICE_REPOSITORY_SHA:0:7}/service-matrix
 [[ ! -e "${STATE}" && ! -L "${STATE}" ]] || die "allocated service-state path already exists"
 VLLM_LOG="${ATTEMPT_DIR}/vllm.log"
 MATRIX_LOG="${RECORD_DIR}/matrix.log"
+EXPIRY_LOG="${RECORD_DIR}/expiry.log"
 NOW_EPOCH="$(/usr/bin/date +%s)"
 deadline_fields="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" deadline --now "${NOW_EPOCH}" --lease "${LEASE}")" ||
   die "lease duration was rejected"
@@ -646,6 +668,7 @@ RECORD="${RECORD_DIR}/record.state"
 /usr/bin/chown root:root "${RECORD}"
 /usr/bin/chmod 0600 "${RECORD}"
 /usr/bin/install -o root -g "${SERVICE_GID}" -m 0640 /dev/null "${MATRIX_LOG}"
+/usr/bin/install -o root -g "${SERVICE_GID}" -m 0640 /dev/null "${EXPIRY_LOG}"
 
 TIMER_ARM_EPOCH="$(/usr/bin/date +%s)"
 DELAY_SECONDS=$((CLEANUP_EPOCH - TIMER_ARM_EPOCH))
