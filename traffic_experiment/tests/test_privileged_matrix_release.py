@@ -343,6 +343,11 @@ def test_supervisor_binds_selected_gpu_to_output_plan_and_admission() -> None:
     assert 'scope="gpu-${gpu_index}-${gpu_uuid}"' in text
     assert 'OUTPUT_ROOT="${BASE_OUTPUT_ROOT}/${scope}"' in text
     assert 'PROTOCOL_ROOT="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/${scope}/runs/protocol_validation"' in text
+    admission = text[text.index("verify_admission() {") : text.index("STATE_TOOL=")]
+    source_lib = admission.index('source "${SCRIPT_DIR}/lib.sh"')
+    rebase_runs = admission.index('RUNS_ROOT="${protocol_runs}"')
+    verify_marker = admission.index("verify_protocol_admission")
+    assert source_lib < rebase_runs < verify_marker
     assert '--gpu-index "${EXPECTED_GPU_INDEX}"' in text
     assert '--worker-gpu-index "${17}"' in text
     assert 'MATRIX_ROOT="${OUTPUT_ROOT}/runs/${RUN_ID}"' in text

@@ -693,6 +693,10 @@ verify_admission() {
     # Both sourced files are inside the hash-verified, root-owned release.
     source "${SCRIPT_DIR}/lib.sh"
     source "${SCRIPT_DIR}/protocol_admission.sh"
+    # Admission evidence belongs to the separately installed pilot release, so
+    # validate its named generation against the pilot run root rather than the
+    # matrix config's independent output root.
+    RUNS_ROOT="${protocol_runs}"
     verify_protocol_admission
   )
 }
