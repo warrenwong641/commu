@@ -1096,7 +1096,7 @@ run_cell() {
   verify_cell_boundary "${network}"
   /usr/sbin/ip netns exec llm-client /usr/bin/bash -p -c '
       exec 8>&-
-      exec /usr/bin/setpriv --reuid "$1" --regid "$2" --groups "$18" \
+      exec /usr/bin/setpriv --reuid "$1" --regid "$2" --groups "${18}" \
         /usr/bin/env -i HOME=/tmp LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
         PATH=/usr/sbin:/usr/bin PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
         PYTHONSAFEPATH=1 PYTHONPATH="$3" \

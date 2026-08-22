@@ -220,7 +220,8 @@ def test_request_enters_namespace_then_drops_identity_without_lock_or_key() -> N
         "/usr/bin/setpriv --reuid"
     )
     assert "exec 8>&-" in child
-    assert '--groups "$18"' in child
+    assert '--groups "${18}"' in child
+    assert '--groups "$18"' not in child
     assert "--clear-groups" not in child
     assert '"${DUMPCAP_GID}"' in child
     assert 'group_record%%:*}" == wireshark' in text
@@ -265,6 +266,32 @@ def test_dumpcap_group_membership_awk_program_accepts_only_the_exact_gid() -> No
     )
     assert accepted.returncode == 0, accepted.stderr
     assert rejected.returncode != 0
+
+
+def test_matrix_child_reads_the_eighteenth_argument_without_bash_concatenation() -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    probe = subprocess.run(
+        [bash, "--version"], text=True, capture_output=True, check=False
+    )
+    if probe.returncode != 0:
+        pytest.skip("bash is unusable")
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            'printf "%s\\n" "${18}"',
+            "matrix-child",
+            *[str(number) for number in range(1, 18)],
+            "128",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "128\n"
 
 
 def test_fixed_matrix_plan_is_exactly_2808_calls() -> None:
