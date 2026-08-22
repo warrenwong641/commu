@@ -80,6 +80,9 @@ tools and runtime, proves the old plan/config/admission/topology anchors, and
 records the new bridge release plus the new lease snapshot. The old v1
 `service_state_sha256` becomes the explicit generation-zero predecessor.
 Without the option—or if any proof differs—`check` and `resume` fail closed.
+After a bridged v1 run completes, use the bridge release for `status` and final
+marker verification; the older v1 state tool does not understand the v2
+completion marker that binds the generation ledger.
 
 Failed attempts remain append-only. Resume skips only immutable completed
 cells. Sealing rejects symlinks and hardlinks, verifies every result and
