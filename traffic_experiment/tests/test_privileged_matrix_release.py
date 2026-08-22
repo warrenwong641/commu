@@ -346,8 +346,11 @@ def test_supervisor_binds_selected_gpu_to_output_plan_and_admission() -> None:
     admission = text[text.index("verify_admission() {") : text.index("STATE_TOOL=")]
     source_lib = admission.index('source "${SCRIPT_DIR}/lib.sh"')
     rebase_runs = admission.index('RUNS_ROOT="${protocol_runs}"')
+    rebase_manifest = admission.index('MANIFEST_PATH="${pilot_manifest}"')
     verify_marker = admission.index("verify_protocol_admission")
-    assert source_lib < rebase_runs < verify_marker
+    assert source_lib < rebase_runs < rebase_manifest < verify_marker
+    assert 'pilot_release_root="/opt/commu-protocol-pilots/releases/${PILOT_REPOSITORY_SHA}"' in admission
+    assert '[[ "$(sha256_file "${pilot_manifest}")" == "$(config_value "${CONFIG}" MANIFEST_SHA256)" ]]' in admission
     assert '--gpu-index "${EXPECTED_GPU_INDEX}"' in text
     assert '--worker-gpu-index "${17}"' in text
     assert 'MATRIX_ROOT="${OUTPUT_ROOT}/runs/${RUN_ID}"' in text

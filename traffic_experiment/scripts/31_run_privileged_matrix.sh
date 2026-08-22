@@ -672,6 +672,7 @@ verify_locked_identity() {
 }
 verify_admission() {
   local marker="${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK" path protocol_runs protocol_gpu_root
+  local pilot_release_root pilot_experiment_root pilot_manifest manifest_relative
   protocol_runs="$(/usr/bin/dirname -- "${PROTOCOL_ROOT}")"
   protocol_gpu_root="$(/usr/bin/dirname -- "${protocol_runs}")"
   for path in /var/lib/commu-protocol-pilots \
@@ -681,6 +682,23 @@ verify_admission() {
     trusted_root_directory "${path}" ||
       die "unsafe protocol-admission path component: ${path}"
   done
+  pilot_release_root="/opt/commu-protocol-pilots/releases/${PILOT_REPOSITORY_SHA}"
+  pilot_experiment_root="${pilot_release_root}/repository/traffic_experiment"
+  manifest_relative="$(config_value "${CONFIG}" MANIFEST_PATH)" ||
+    die "matrix config has no QA manifest path"
+  [[ "${manifest_relative}" == artifacts/requests_32.jsonl ]] ||
+    die "matrix QA manifest path is outside the reviewed scope"
+  pilot_manifest="${pilot_experiment_root}/${manifest_relative}"
+  for path in /opt/commu-protocol-pilots /opt/commu-protocol-pilots/releases \
+    "${pilot_release_root}" "${pilot_release_root}/repository" \
+    "${pilot_experiment_root}" "${pilot_experiment_root}/artifacts"; do
+    trusted_root_directory "${path}" ||
+      die "unsafe pilot-release path component: ${path}"
+  done
+  regular_root_file "${pilot_manifest}" ||
+    die "pilot QA manifest is not an immutable root-owned regular file"
+  [[ "$(sha256_file "${pilot_manifest}")" == "$(config_value "${CONFIG}" MANIFEST_SHA256)" ]] ||
+    die "pilot and matrix QA manifests differ"
   regular_root_file "${marker}" ||
     die "protocol admission is not an immutable root-owned regular file"
   [[ "$(/usr/bin/stat -c %a -- "${marker}")" == 444 ]] ||
@@ -690,13 +708,14 @@ verify_admission() {
     export PROTOCOL_VALIDATION_ROOT="${PROTOCOL_ROOT}"
     export NETWORK_STATE_DIR="${NETWORK_STATE_ROOT}"
     unset LOCAL_VLLM_API_KEY PROTOCOL_VALIDATION_MARKER
-    # Both sourced files are inside the hash-verified, root-owned release.
+    # Both sourced files are inside the hash-verified, root-owned matrix release.
     source "${SCRIPT_DIR}/lib.sh"
     source "${SCRIPT_DIR}/protocol_admission.sh"
-    # Admission evidence belongs to the separately installed pilot release, so
-    # validate its named generation against the pilot run root rather than the
-    # matrix config's independent output root.
+    # Admission evidence belongs to the separately installed pilot release.
+    # Rebase both paths that carry release-local provenance while retaining the
+    # matrix config's independently verified content digests and fixed plan.
     RUNS_ROOT="${protocol_runs}"
+    MANIFEST_PATH="${pilot_manifest}"
     verify_protocol_admission
   )
 }
