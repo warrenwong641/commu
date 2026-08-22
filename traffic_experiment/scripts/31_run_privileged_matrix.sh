@@ -57,10 +57,12 @@ ACTION="${1:-}"
 shift || true
 SERVICE_STATE_REQUESTED=""
 RUN_ID=""
+LEGACY_RUN_REPOSITORY_SHA=""
 while (($#)); do
   case "$1" in
     --service-state) [[ $# -ge 2 && -z "${SERVICE_STATE_REQUESTED}" ]] || break; SERVICE_STATE_REQUESTED="$2"; shift 2 ;;
     --run-id) [[ $# -ge 2 && -z "${RUN_ID}" ]] || break; RUN_ID="$2"; shift 2 ;;
+    --legacy-run-repository-sha) [[ $# -ge 2 && -z "${LEGACY_RUN_REPOSITORY_SHA}" ]] || break; LEGACY_RUN_REPOSITORY_SHA="$2"; shift 2 ;;
     *) break ;;
   esac
 done
@@ -69,9 +71,14 @@ case "${ACTION}" in check|status|run|resume) ;;
 esac
 if [[ -z "${ACTION}" || -z "${SERVICE_STATE_REQUESTED}" ||
   ! "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ || $# -ne 0 ]]; then
-  printf 'usage: %s {check|status|run|resume} --service-state /absolute/path/to/service.state --run-id SAFE_ID\n' "$0" >&2
+  printf 'usage: %s {check|status|run|resume} --service-state /absolute/path/to/service.state --run-id SAFE_ID [--legacy-run-repository-sha 40_HEX]\n' "$0" >&2
   exit 2
 fi
+[[ -z "${LEGACY_RUN_REPOSITORY_SHA}" ||
+  ( "${ACTION}" != run && "${LEGACY_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || {
+  printf 'ERROR: legacy continuation is valid only for an existing non-run action\n' >&2
+  exit 2
+}
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -104,6 +111,12 @@ OUTPUT_ROOT=""
 RUNTIME_CONFIG=""
 PROTOCOL_ROOT=""
 NETWORK_STATE_ROOT=""
+RUN_REPOSITORY_SHA=""
+LEGACY_RELEASE_ROOT=""
+GENERATION_OPEN=0
+MEASUREMENT_SCRIPT_DIR="${SCRIPT_DIR}"
+MEASUREMENT_EXPERIMENT_ROOT="${EXPERIMENT_ROOT}"
+MEASUREMENT_REPOSITORY_ROOT="${REPOSITORY_ROOT}"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 
@@ -195,7 +208,7 @@ candidate_value() {
 }
 config_value() {
   /usr/bin/python3 -I "${VALIDATOR}" get \
-    --input "$1" --repository-sha "${REPOSITORY_SHA}" --key "$2"
+    --input "$1" --repository-sha "${RUN_REPOSITORY_SHA:-${REPOSITORY_SHA}}" --key "$2"
 }
 sha256_file() { /usr/bin/sha256sum -- "$1" | /usr/bin/awk '{print $1}'; }
 
@@ -419,6 +432,7 @@ load_policy() {
     "${SERVICE_STATE_ROOT}" == "${EXPECTED_SERVICE_STATE_ROOT}" &&
     "${PILOT_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" ]] ||
     die "installed service policy is outside the reviewed scope"
+  RUN_REPOSITORY_SHA="${REPOSITORY_SHA}"
   [[ "${SERVICE_STATE_ROOT}" = /* && "${SERVICE_STATE_ROOT}" != *$'\n'* ]] || die "unsafe service-state root"
   [[ "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ && "${SERVICE_UID}" =~ ^[1-9][0-9]*$ && "${SERVICE_GID}" =~ ^[1-9][0-9]*$ ]] || die "unsafe service identity policy"
   [[ "$(/usr/bin/id -u "${SERVICE_USER}")" == "${SERVICE_UID}" && "$(/usr/bin/id -g "${SERVICE_USER}")" == "${SERVICE_GID}" ]] || die "service account identity drifted"
@@ -436,8 +450,85 @@ load_policy() {
   esac
 }
 
+configure_legacy_continuation() {
+  local legacy_metadata legacy_manifest legacy_policy
+  [[ -n "${LEGACY_RUN_REPOSITORY_SHA}" ]] || return 0
+  LEGACY_RELEASE_ROOT="/opt/commu-secure-matrix/releases/${LEGACY_RUN_REPOSITORY_SHA}"
+  legacy_metadata="${LEGACY_RELEASE_ROOT}/RELEASE_METADATA"
+  legacy_manifest="${LEGACY_RELEASE_ROOT}/RELEASE_FILES.sha256"
+  legacy_policy="${LEGACY_RELEASE_ROOT}/policy/service.state"
+  for path in "${LEGACY_RELEASE_ROOT}" "${LEGACY_RELEASE_ROOT}/repository" \
+    "${LEGACY_RELEASE_ROOT}/repository/traffic_experiment"; do
+    trusted_root_directory "${path}" || die "unsafe legacy measurement release: ${path}"
+  done
+  for path in "${legacy_metadata}" "${legacy_manifest}" "${legacy_policy}" \
+    "${LEGACY_RELEASE_ROOT}/INSTALLED_RUNTIME_FILES.sha256" \
+    "${LEGACY_RELEASE_ROOT}/config/server.env"; do
+    regular_root_file "${path}" || die "unsafe legacy release anchor: ${path}"
+  done
+  (
+    cd "${LEGACY_RELEASE_ROOT}"
+    /usr/bin/sha256sum --check --strict --quiet RELEASE_FILES.sha256
+    /usr/bin/sha256sum --check --strict --quiet INSTALLED_RUNTIME_FILES.sha256
+  ) || die "legacy release file digest verification failed"
+  [[ "$(/usr/bin/awk -F= '$1 == "repository_sha" {print $2}' "${legacy_metadata}")" == "${LEGACY_RUN_REPOSITORY_SHA}" &&
+    "$(/usr/bin/awk -F= '$1 == "repository_sha" {print $2}' "${legacy_policy}")" == "${LEGACY_RUN_REPOSITORY_SHA}" &&
+    "$(/usr/bin/awk -F= '$1 == "pilot_repository_sha" {print $2}' "${legacy_policy}")" == "${LEGACY_RUN_REPOSITORY_SHA}" ]] ||
+    die "legacy release metadata/policy identity mismatch"
+
+  # Compare every executable/data component reached during a measurement.  The
+  # new release contributes only this bridge supervisor and state ledger; the
+  # request client, protocol/network helpers, Caddy, and Python runtime remain
+  # byte-for-byte those of the immutable source release.
+  /usr/bin/python3 -I - "${LEGACY_RELEASE_ROOT}" "${RELEASE_ROOT}" <<'PY'
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+old, new = map(Path, sys.argv[1:])
+roots = (
+    "repository/traffic_experiment/traffic_measure",
+    "repository/traffic_experiment/configs/Caddyfile.single",
+    "repository/traffic_experiment/scripts/privileged_matrix_request.py",
+    "repository/traffic_experiment/scripts/privileged_matrix_config.py",
+    "repository/traffic_experiment/scripts/caddy_readiness.py",
+    "repository/traffic_experiment/scripts/11_network_condition.sh",
+    "repository/traffic_experiment/scripts/lib.sh",
+    "repository/traffic_experiment/scripts/protocol_admission.sh",
+    "repository/traffic_experiment/.tools/caddy",
+    "wheelhouse",
+)
+def inventory(base):
+    result = {}
+    for relative in roots:
+        path = base / relative
+        candidates = [path] if path.is_file() else sorted(path.rglob("*"))
+        if not candidates or any(item.is_symlink() for item in candidates):
+            raise SystemExit(f"unsafe/missing measurement payload: {path}")
+        for item in candidates:
+            if item.is_file():
+                key = str(item.relative_to(base))
+                result[key] = hashlib.sha256(item.read_bytes()).hexdigest()
+    return result
+if inventory(old) != inventory(new):
+    raise SystemExit("legacy/current measurement payloads are not byte-identical")
+PY
+  RUN_REPOSITORY_SHA="${LEGACY_RUN_REPOSITORY_SHA}"
+  PILOT_REPOSITORY_SHA="${LEGACY_RUN_REPOSITORY_SHA}"
+  CONFIG_TEMPLATE="${LEGACY_RELEASE_ROOT}/config/server.env"
+  MEASUREMENT_EXPERIMENT_ROOT="${LEGACY_RELEASE_ROOT}/repository/traffic_experiment"
+  MEASUREMENT_REPOSITORY_ROOT="${LEGACY_RELEASE_ROOT}/repository"
+  MEASUREMENT_SCRIPT_DIR="${MEASUREMENT_EXPERIMENT_ROOT}/scripts"
+  RUNNER_PYTHON="${MEASUREMENT_EXPERIMENT_ROOT}/.venv-runner/bin/python"
+  CADDY="${MEASUREMENT_EXPERIMENT_ROOT}/.tools/caddy"
+  CADDY_READINESS="${MEASUREMENT_SCRIPT_DIR}/caddy_readiness.py"
+  REQUEST_TOOL="${MEASUREMENT_SCRIPT_DIR}/privileged_matrix_request.py"
+  CADDY_CONFIG="${MEASUREMENT_EXPERIMENT_ROOT}/configs/Caddyfile.single"
+}
+
 check_base_output_hierarchy() {
-  local root="/var/lib/commu-secure-matrix/${REPOSITORY_SHA}" path
+  local root="/var/lib/commu-secure-matrix/${RUN_REPOSITORY_SHA}" path
   [[ -d /var/lib/commu-secure-matrix && ! -L /var/lib/commu-secure-matrix &&
     "$(/usr/bin/stat -c %u:%g:%a -- /var/lib/commu-secure-matrix)" == "0:${SERVICE_GID}:710" ]] ||
     die "unsafe root-owned matrix output base"
@@ -474,7 +565,7 @@ select_gpu_output_hierarchy() {
   RUNTIME_CONFIG="${OUTPUT_ROOT}/.runtime-config-$$"
   /usr/bin/python3 -I "${VALIDATOR}" materialize \
     --input "${CONFIG_TEMPLATE}" --output "${RUNTIME_CONFIG}" \
-    --repository-sha "${REPOSITORY_SHA}" --gpu-index "${gpu_index}" --gpu-uuid "${gpu_uuid}" ||
+    --repository-sha "${RUN_REPOSITORY_SHA}" --gpu-index "${gpu_index}" --gpu-uuid "${gpu_uuid}" ||
     die "could not materialize GPU-scoped matrix config"
   regular_root_file "${RUNTIME_CONFIG}" || die "unsafe GPU-scoped matrix config"
   CONFIG="${RUNTIME_CONFIG}"
@@ -534,6 +625,15 @@ cleanup() {
   local status="${1:-$?}"
   local behavior="${2:-exit}"
   trap - EXIT
+  if [[ "${GENERATION_OPEN}" -eq 1 ]]; then
+    local outcome=failed
+    [[ -f "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] && outcome=complete
+    close_service_generation "${outcome}" || {
+      printf 'ERROR: could not immutably close service-state generation\n' >&2
+      [[ "${status}" -ne 0 ]] || status=1
+    }
+    GENERATION_OPEN=0
+  fi
   for snapshot in "${RUNTIME_CONFIG}" "${ACTIVE_CONFIG_SNAPSHOT}" "${SERVICE_STATE_SNAPSHOT}"; do
     [[ -n "${snapshot}" ]] || continue
     case "${snapshot}" in
@@ -744,8 +844,8 @@ verify_admission() {
     export NETWORK_STATE_DIR="${NETWORK_STATE_ROOT}"
     unset LOCAL_VLLM_API_KEY PROTOCOL_VALIDATION_MARKER
     # Both sourced files are inside the hash-verified, root-owned matrix release.
-    source "${SCRIPT_DIR}/lib.sh"
-    source "${SCRIPT_DIR}/protocol_admission.sh"
+    source "${MEASUREMENT_SCRIPT_DIR}/lib.sh"
+    source "${MEASUREMENT_SCRIPT_DIR}/protocol_admission.sh"
     # Admission evidence belongs to the separately installed pilot release.
     # Rebase both paths that carry release-local provenance while retaining the
     # matrix config's independently verified content digests and fixed plan.
@@ -756,13 +856,13 @@ verify_admission() {
 }
 
 STATE_TOOL="${SCRIPT_DIR}/privileged_matrix_state.py"
-REQUEST_TOOL="${SCRIPT_DIR}/privileged_matrix_request.py"
+REQUEST_TOOL="${MEASUREMENT_SCRIPT_DIR}/privileged_matrix_request.py"
 MATRIX_ROOT=""
 NETWORK_OWNED=0
 CADDY_OWNED=0
 CADDY_PID=""
 CADDY_TICKS=""
-CADDY_CONFIG="${EXPERIMENT_ROOT}/configs/Caddyfile.single"
+CADDY_CONFIG="${MEASUREMENT_EXPERIMENT_ROOT}/configs/Caddyfile.single"
 CADDY_STATE=""
 CADDY_LOG=""
 
@@ -839,7 +939,7 @@ apply_network() {
   NETWORK_MTU=1500 NETWORK_RTT_MS=40 NETWORK_UPLINK_MBIT=20 \
   NETWORK_DOWNLINK_MBIT=50 NETWORK_QUEUE_PACKETS=1000 \
   NETWORK_STATE_DIR="${NETWORK_STATE_ROOT}" \
-    /usr/bin/bash -p "${SCRIPT_DIR}/11_network_condition.sh" apply "$1"
+    /usr/bin/bash -p "${MEASUREMENT_SCRIPT_DIR}/11_network_condition.sh" apply "$1"
   NETWORK_OWNED=1
   verify_network_inventory "$1"
 }
@@ -848,7 +948,7 @@ cleanup_network() {
   [[ "${NETWORK_OWNED}" -eq 1 ]] || return 0
   CLIENT_NETNS=llm-client HOST_VETH=llmhost0 CLIENT_VETH=llmclient0 \
   NETWORK_STATE_DIR="${NETWORK_STATE_ROOT}" \
-    /usr/bin/bash -p "${SCRIPT_DIR}/11_network_condition.sh" reset ||
+    /usr/bin/bash -p "${MEASUREMENT_SCRIPT_DIR}/11_network_condition.sh" reset ||
     return 1
   NETWORK_OWNED=0
   check_idle_resources
@@ -1037,7 +1137,6 @@ state_args() {
     --release-files-sha256 "$(sha256_file "${MANIFEST}")" \
     --config-sha256 "$(sha256_file "${CONFIG}")" \
     --admission-sha256 "$(sha256_file "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK")" \
-    --service-state-sha256 "${STATE_SHA}" \
     --active-config-sha256 "${ACTIVE_CONFIG_SHA}" \
     --qa-manifest-sha256 "$(config_value "${CONFIG}" MANIFEST_SHA256)" \
     --summary-manifest-sha256 "$(config_value "${CONFIG}" SUMMARY_MANIFEST_SHA256)" \
@@ -1048,6 +1147,68 @@ state_args() {
     --model "$(config_value "${CONFIG}" VLLM_MODEL)" \
     --served-model-name "$(config_value "${CONFIG}" VLLM_SERVED_MODEL_NAME)" \
     --model-revision "$(config_value "${CONFIG}" VLLM_MODEL_REVISION)"
+}
+
+verify_selected_plan() {
+  local -a args=("${PLAN_ARGS[@]}")
+  if [[ -n "${LEGACY_RUN_REPOSITORY_SHA}" ]]; then
+    args+=(
+      --legacy-repository-sha "${LEGACY_RUN_REPOSITORY_SHA}"
+      --legacy-release-files-sha256 "$(sha256_file "${LEGACY_RELEASE_ROOT}/RELEASE_FILES.sha256")"
+      --legacy-config-sha256 "$(sha256_file "${CONFIG}")"
+      --legacy-admission-sha256 "$(sha256_file "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK")"
+    )
+    /usr/bin/python3 -I "${STATE_TOOL}" verify-legacy-plan "${args[@]}"
+  else
+    /usr/bin/python3 -I "${STATE_TOOL}" verify-plan "${args[@]}"
+  fi
+  /usr/bin/python3 -I "${STATE_TOOL}" verify-generations \
+    --root "${MATRIX_ROOT}" >/dev/null ||
+    die "service-generation ledger is not safely resumable"
+}
+
+open_service_generation() {
+  local predecessor="" plan_schema
+  local -a predecessor_args=()
+  plan_schema="$(/usr/bin/python3 -I - "${MATRIX_ROOT}/RUN_PLAN.json" <<'PY'
+import json, sys
+with open(sys.argv[1], "rb") as source:
+    print(json.load(source)["schema"])
+PY
+)" || die "cannot read immutable run-plan schema"
+  if [[ "${plan_schema}" == commu-secure-single-matrix-plan-v1 &&
+    ! -e "${MATRIX_ROOT}/SERVICE_GENERATIONS" ]]; then
+    predecessor="$(/usr/bin/python3 -I - "${MATRIX_ROOT}/RUN_PLAN.json" <<'PY'
+import json, re, sys
+with open(sys.argv[1], "rb") as source:
+    value = json.load(source)["service_state_sha256"]
+if not re.fullmatch(r"[0-9a-f]{64}", value):
+    raise SystemExit(2)
+print(value)
+PY
+)" || die "legacy plan has no valid generation-zero service-state hash"
+    predecessor_args=(--predecessor-service-state-sha256 "${predecessor}")
+  fi
+  /usr/bin/python3 -I "${STATE_TOOL}" record-generation \
+    --root "${MATRIX_ROOT}" \
+    --orchestration-repository-sha "${REPOSITORY_SHA}" \
+    --orchestration-release-sha256 "$(sha256_file "${MANIFEST}")" \
+    --service-state-snapshot "${SERVICE_STATE}" \
+    --service-state-sha256 "${STATE_SHA}" \
+    "${predecessor_args[@]}" \
+    --active-config-sha256 "${ACTIVE_CONFIG_SHA}" \
+    --admission-sha256 "$(sha256_file "${PROTOCOL_ROOT}/PROTOCOL_VALIDATION_OK")" >/dev/null ||
+    die "could not publish service-state generation"
+  GENERATION_OPEN=1
+}
+
+close_service_generation() {
+  local outcome="$1"
+  [[ "${GENERATION_OPEN}" -eq 1 ]] || return 0
+  /usr/bin/python3 -I "${STATE_TOOL}" close-generation \
+    --root "${MATRIX_ROOT}" --service-state-sha256 "${STATE_SHA}" \
+    --outcome "${outcome}" >/dev/null || return 1
+  GENERATION_OPEN=0
 }
 
 verify_cell_boundary() {
@@ -1066,11 +1227,11 @@ run_cell() {
   local filter secure_port child_status
   if [[ "${workload}" == qa ]]; then
     samples=32
-    manifest="${EXPERIMENT_ROOT}/$(config_value "${CONFIG}" MANIFEST_PATH)"
+    manifest="${MEASUREMENT_EXPERIMENT_ROOT}/$(config_value "${CONFIG}" MANIFEST_PATH)"
     manifest_sha="$(config_value "${CONFIG}" MANIFEST_SHA256)"
   else
     samples=20
-    manifest="${EXPERIMENT_ROOT}/$(config_value "${CONFIG}" SUMMARY_MANIFEST_PATH)"
+    manifest="${MEASUREMENT_EXPERIMENT_ROOT}/$(config_value "${CONFIG}" SUMMARY_MANIFEST_PATH)"
     manifest_sha="$(config_value "${CONFIG}" SUMMARY_MANIFEST_SHA256)"
   fi
   cell="${MATRIX_ROOT}/cells/${network}/${workload}/${transport}"
@@ -1110,7 +1271,7 @@ run_cell() {
         --worker-count 1 --worker-index 0 --worker-gpu-index "${17}" \
         --worker-gpu-uuid "${13}" --topology-worker-index 0 \
         --transport "${14}" --connection-mode warm --tls-ca-file "${15}"
-    ' matrix-child "${SERVICE_UID}" "${SERVICE_GID}" "${REPOSITORY_ROOT}" \
+    ' matrix-child "${SERVICE_UID}" "${SERVICE_GID}" "${MEASUREMENT_REPOSITORY_ROOT}" \
       "${RUNNER_PYTHON}" "${REQUEST_TOOL}" "${CONTROLLER_PID}" "${CONTROLLER_TICKS}" \
       "${manifest}" "${cell}" \
       "$(config_value "${CONFIG}" VLLM_SERVED_MODEL_NAME)" "${samples}" \
@@ -1130,6 +1291,7 @@ run_cell() {
 
 release_precheck
 load_policy
+configure_legacy_continuation
 check_base_output_hierarchy
 acquire_service_lock
 pin_service_state
@@ -1157,20 +1319,20 @@ fi
   "$(/usr/bin/stat -c %u:%g:%a -- "${MATRIX_ROOT}")" == "0:${SERVICE_GID}:710" ]] ||
   die "unsafe matrix root"
 
-if [[ "${ACTION}" == check ]]; then
-  check_idle_resources
-  printf 'PRIVILEGED_MATRIX_PRECHECK_OK repository_sha=%s gpu_uuid=%s expected_calls=2808\n' \
-    "${REPOSITORY_SHA}" "${EXPECTED_GPU_UUID}"
-  exit 0
-fi
 mapfile -d '' -t PLAN_ARGS < <(state_args)
 if [[ "${ACTION}" == run ]]; then
   [[ ! -e "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] || die "matrix is already complete"
   /usr/bin/python3 -I "${STATE_TOOL}" create-plan "${PLAN_ARGS[@]}"
 else
-  /usr/bin/python3 -I "${STATE_TOOL}" verify-plan "${PLAN_ARGS[@]}"
+  verify_selected_plan
 fi
 /usr/bin/python3 -I "${STATE_TOOL}" status --root "${MATRIX_ROOT}" >/dev/null
+if [[ "${ACTION}" == check ]]; then
+  check_idle_resources
+  printf 'PRIVILEGED_MATRIX_PRECHECK_OK repository_sha=%s source_repository_sha=%s gpu_uuid=%s expected_calls=2808 resumable=true\n' \
+    "${REPOSITORY_SHA}" "${RUN_REPOSITORY_SHA}" "${EXPECTED_GPU_UUID}"
+  exit 0
+fi
 if [[ "${ACTION}" == status ]]; then
   /usr/bin/python3 -I "${STATE_TOOL}" status --root "${MATRIX_ROOT}"
   exit 0
@@ -1178,6 +1340,7 @@ fi
 [[ "${ACTION}" == run || "${ACTION}" == resume ]] || die "invalid matrix action"
 [[ ! -e "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] ||
   die "matrix is already immutably complete"
+open_service_generation
 
 trap matrix_cleanup EXIT INT TERM HUP
 for network in baseline rtt realistic; do
@@ -1194,10 +1357,11 @@ for network in baseline rtt realistic; do
   verify_active_service
   verify_locked_identity
 done
-/usr/bin/python3 -I "${STATE_TOOL}" seal-matrix --root "${MATRIX_ROOT}"
 verify_active_service
 verify_locked_identity
 verify_admission
+close_service_generation complete || die "could not close final service-state generation"
+/usr/bin/python3 -I "${STATE_TOOL}" seal-matrix --root "${MATRIX_ROOT}"
 trap - EXIT INT TERM HUP
 cleanup 0 return || exit $?
 printf 'PRIVILEGED_MATRIX_COMPLETE root=%s expected_calls=2808\n' "${MATRIX_ROOT}"

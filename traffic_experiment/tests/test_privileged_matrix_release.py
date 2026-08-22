@@ -336,6 +336,8 @@ def test_plan_publication_and_exact_verification(tmp_path: Path) -> None:
     state.plan_action(parser.parse_args(["create-plan", *values]))
     plan = json.loads((root / "RUN_PLAN.json").read_text())
     assert plan["expected_calls"] == 2808
+    assert plan["schema"] == "commu-secure-single-matrix-plan-v2"
+    assert "service_state_sha256" not in plan
     assert len(plan["cells"]) == 12
     assert (root / "worker-topology.json").is_file()
     state.plan_action(parser.parse_args(["verify-plan", *values]))
@@ -344,6 +346,132 @@ def test_plan_publication_and_exact_verification(tmp_path: Path) -> None:
     changed = parser.parse_args(["verify-plan", *changed_values])
     with pytest.raises(ValueError, match="does not match"):
         state.plan_action(changed)
+
+
+def test_service_generations_are_snapshot_paired_closed_and_hash_chained(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt" or os.getuid() != 0:
+        pytest.skip("root POSIX ownership/mode semantics are required")
+    state = load_module("privileged_matrix_generation_test", STATE_TOOL)
+    root = tmp_path / "matrix"
+    root.mkdir(mode=0o700)
+    parser = state.parser()
+    plan_values = [
+        "--root", str(root), "--repository-sha", "a" * 40,
+        "--pilot-repository-sha", "a" * 40,
+        "--release-files-sha256", "b" * 64,
+        "--config-sha256", "c" * 64,
+        "--admission-sha256", "d" * 64,
+        "--active-config-sha256", "e" * 64,
+        "--qa-manifest-sha256", "1" * 64,
+        "--summary-manifest-sha256", "2" * 64,
+        "--run-id", "main-generation-test", "--gpu-index", "3",
+        "--gpu-uuid", "GPU-1234", "--service-uid", "0",
+        "--model", "Qwen/model", "--served-model-name", "Qwen/model",
+        "--model-revision", "3" * 40,
+    ]
+    state.plan_action(parser.parse_args(["create-plan", *plan_values]))
+
+    snapshot = root / "temporary.state"
+    snapshot.write_text("schema=commu-vllm-service-state-v2\nstatus=running\n")
+    snapshot.chmod(0o400)
+    digest = state.sha256_file(snapshot)
+    generation_values = [
+        "--root", str(root),
+        "--orchestration-repository-sha", "f" * 40,
+        "--orchestration-release-sha256", "4" * 64,
+        "--service-state-snapshot", str(snapshot),
+        "--service-state-sha256", digest,
+        "--active-config-sha256", "e" * 64,
+        "--admission-sha256", "d" * 64,
+    ]
+    state.record_generation(parser.parse_args(["record-generation", *generation_values]))
+    records = state.generation_records(root)
+    assert len(records) == 1
+    assert (root / "SERVICE_GENERATIONS/000001.state").is_file()
+    with pytest.raises(ValueError, match="still open"):
+        state.verify_generations(
+            parser.parse_args(["verify-generations", "--root", str(root)])
+        )
+    with pytest.raises(ValueError, match="still open"):
+        state.record_generation(
+            parser.parse_args(["record-generation", *generation_values])
+        )
+    state.close_generation(
+        parser.parse_args(
+            ["close-generation", "--root", str(root),
+             "--service-state-sha256", digest, "--outcome", "interrupted"]
+        )
+    )
+    first_closure = state.sha256_file(
+        root / "SERVICE_GENERATIONS/000001.closed.json"
+    )
+    state.record_generation(parser.parse_args(["record-generation", *generation_values]))
+    second = state.generation_records(root)[1][1]
+    assert second["previous_record_sha256"] == first_closure
+
+
+def test_legacy_verification_preserves_v1_plan_bytes_and_inode(tmp_path: Path) -> None:
+    if os.name == "nt" or os.getuid() != 0:
+        pytest.skip("root POSIX ownership/mode semantics are required")
+    state = load_module("privileged_matrix_legacy_test", STATE_TOOL)
+    root = tmp_path / "legacy"
+    root.mkdir(mode=0o700)
+    parser = state.parser()
+    old_sha = "a" * 40
+    release_sha = "b" * 64
+    config_sha = "c" * 64
+    admission_sha = "d" * 64
+    values = [
+        "--root", str(root), "--repository-sha", old_sha,
+        "--pilot-repository-sha", old_sha,
+        "--release-files-sha256", release_sha,
+        "--config-sha256", config_sha,
+        "--admission-sha256", admission_sha,
+        "--active-config-sha256", "e" * 64,
+        "--qa-manifest-sha256", "1" * 64,
+        "--summary-manifest-sha256", "2" * 64,
+        "--run-id", "legacy-main", "--gpu-index", "3",
+        "--gpu-uuid", "GPU-1234", "--service-uid", "0",
+        "--model", "Qwen/model", "--served-model-name", "Qwen/model",
+        "--model-revision", "3" * 40,
+    ]
+    args = parser.parse_args(
+        ["verify-legacy-plan", *values,
+         "--legacy-repository-sha", old_sha,
+         "--legacy-release-files-sha256", release_sha,
+         "--legacy-config-sha256", config_sha,
+         "--legacy-admission-sha256", admission_sha]
+    )
+    plan = state.expected_plan(args)
+    plan["schema"] = state.LEGACY_SCHEMA
+    plan["service_state_sha256"] = "9" * 64
+    state.publish(root / "worker-topology.json", state.expected_topology(args))
+    state.publish(root / "RUN_PLAN.json", plan)
+    before = (root / "RUN_PLAN.json").read_bytes()
+    inode = (root / "RUN_PLAN.json").stat().st_ino
+    state.legacy_plan_action(args)
+    assert (root / "RUN_PLAN.json").read_bytes() == before
+    assert (root / "RUN_PLAN.json").stat().st_ino == inode
+
+
+def test_existing_check_verifies_resumability_and_legacy_bridge_is_explicit() -> None:
+    text = SUPERVISOR.read_text()
+    assert "--legacy-run-repository-sha 40_HEX" in text
+    assert "configure_legacy_continuation" in text
+    assert "legacy/current measurement payloads are not byte-identical" in text
+    assert "INSTALLED_RUNTIME_FILES.sha256" in text
+    flow = text[text.index('mapfile -d \'\' -t PLAN_ARGS') :]
+    assert flow.index("verify_selected_plan") < flow.index(
+        "PRIVILEGED_MATRIX_PRECHECK_OK"
+    )
+    assert flow.index("open_service_generation") < flow.index(
+        "trap matrix_cleanup"
+    )
+    assert flow.index("close_service_generation complete") < flow.index(
+        'seal-matrix --root "${MATRIX_ROOT}"'
+    )
 
 
 def test_config_example_is_secret_free_and_fixed() -> None:
@@ -405,7 +533,7 @@ def test_supervisor_binds_selected_gpu_to_output_plan_and_admission() -> None:
     assert 'OUTPUT_ROOT="${BASE_OUTPUT_ROOT}/${scope}"' in text
     assert 'PROTOCOL_ROOT="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/${scope}/runs/protocol_validation"' in text
     admission = text[text.index("verify_admission() {") : text.index("STATE_TOOL=")]
-    source_lib = admission.index('source "${SCRIPT_DIR}/lib.sh"')
+    source_lib = admission.index('source "${MEASUREMENT_SCRIPT_DIR}/lib.sh"')
     rebase_runs = admission.index('RUNS_ROOT="${protocol_runs}"')
     rebase_manifest = admission.index('MANIFEST_PATH="${pilot_manifest}"')
     verify_marker = admission.index("verify_protocol_admission")

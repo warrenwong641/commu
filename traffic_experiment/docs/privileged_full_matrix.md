@@ -43,7 +43,7 @@ On a fresh `run`, the supervisor exclusively creates `RUN_PLAN.json` and
 
 - matrix and pilot repository SHA;
 - installed release/config/admission digests;
-- service-state and active-config digests;
+- active-config digest and an append-only service-state generation ledger;
 - both frozen manifest digests;
 - physical GPU index and UUID, worker count, ports, model, served name, and
   model revision;
@@ -52,8 +52,32 @@ On a fresh `run`, the supervisor exclusively creates `RUN_PLAN.json` and
 
 Publication uses no-overwrite, no-follow semantics and read-only mode. A
 `resume` recomputes the expected plan from the live service and release; any
-mismatch refuses the resume. This prevents accidental mixing of results from a
-different GPU, topology, code revision, manifest, model, or admission.
+mismatch refuses the resume. Lease PIDs and deadlines are intentionally not
+part of the v2 measurement identity. Instead, before any request, every lease
+activation publishes a root-owned state snapshot and immutable hash-chained
+record under `SERVICE_GENERATIONS/`. Cleanup publishes a closure record. A new
+generation is rejected while the prior generation is open, and final sealing
+binds the closed ledger head. This prevents accidental mixing of results from a
+different GPU, topology, code revision, manifest, model, or admission while
+allowing an expired lease to resume the same append-only experiment.
+
+The older v1 plan format pinned its first service-state file directly. It is
+never rewritten. A reviewed bridge release can continue such an incomplete
+root only with an explicit source SHA:
+
+```bash
+sudo "$RUNNER" check --service-state "$STATE" --run-id "$RUN_ID" \
+  --legacy-run-repository-sha c411237245e52e8efea5a12d5c651c5f26a68e39
+sudo "$RUNNER" resume --service-state "$STATE" --run-id "$RUN_ID" \
+  --legacy-run-repository-sha c411237245e52e8efea5a12d5c651c5f26a68e39
+```
+
+The bridge verifies both source release manifests, requires byte-identical
+measurement payloads, executes the source release's request/network/protocol
+tools and runtime, proves the old plan/config/admission/topology anchors, and
+records the new bridge release plus the new lease snapshot. The old v1
+`service_state_sha256` becomes the explicit generation-zero predecessor.
+Without the option—or if any proof differs—`check` and `resume` fail closed.
 
 Failed attempts remain append-only. Resume skips only immutable completed
 cells. Sealing rejects symlinks and hardlinks, verifies every result and
