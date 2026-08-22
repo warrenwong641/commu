@@ -220,7 +220,13 @@ def test_request_enters_namespace_then_drops_identity_without_lock_or_key() -> N
         "/usr/bin/setpriv --reuid"
     )
     assert "exec 8>&-" in child
-    assert "--clear-groups" in child
+    assert '--groups "$18"' in child
+    assert "--clear-groups" not in child
+    assert '"${DUMPCAP_GID}"' in child
+    assert 'group_record%%:*}" == wireshark' in text
+    assert 'cap_net_admin,cap_net_raw=eip' in text
+    assert '"$(/usr/bin/stat -c %u:%a:%h -- "${DUMPCAP}")" == 0:750:1' in text
+    assert 'verify_dumpcap_access || die "dumpcap capture identity drifted"' in text
     assert "/usr/bin/env -i" in child
     assert "API_KEY=" not in text
     assert "Authorization: Bearer" not in text

@@ -517,6 +517,124 @@ def test_capture_failure_is_retried_as_distinct_preserved_attempt(
         server.server_close()
 
 
+def test_capture_constructor_failure_is_recorded_without_observation_wait(
+    tmp_path,
+    monkeypatch,
+):
+    sleeps = []
+
+    def unexpected_request(*_args, **_kwargs):
+        raise AssertionError("request must not start after capture setup fails")
+
+    monkeypatch.setattr(
+        "traffic_experiment.traffic_measure.runner._request_once",
+        unexpected_request,
+    )
+    monkeypatch.setattr(
+        "traffic_experiment.traffic_measure.runner.time.sleep",
+        sleeps.append,
+    )
+    manifest = tmp_path / "manifest.jsonl"
+    write_jsonl(
+        manifest,
+        [
+            {
+                "request_id": "conversation-1::q1::no_compression",
+                "sample_id": "conversation-1::q1",
+                "conversation_id": "conversation-1",
+                "question_id": "q1",
+                "condition": "no_compression",
+                "messages": [{"role": "user", "content": "Where?"}],
+                "messages_sha256": "a" * 64,
+            }
+        ],
+    )
+    result = read_jsonl(
+        run_experiment(
+            RunSettings(
+                manifest_path=manifest,
+                output_dir=tmp_path / "run",
+                base_url="http://127.0.0.1:9/v1",
+                model="test-model",
+                api_key="test-key",
+                sample_limit=1,
+                repetitions=1,
+                seed=42,
+                temperature=0,
+                max_output_tokens=16,
+                request_timeout_seconds=5,
+                observation_seconds=900,
+                capture_interface="",
+                capture_filter="tcp port 8000",
+                capture_startup_delay_seconds=0,
+            )
+        )
+    )[0]
+
+    assert sleeps == []
+    assert result["completed"] is False
+    assert result["capture_file"] is None
+    assert result["error"].startswith("ValueError: capture interface is required")
+
+
+def test_intentional_no_capture_preserves_observation_wait(tmp_path, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(
+        "traffic_experiment.traffic_measure.runner._request_once",
+        lambda *_args, **_kwargs: {
+            "response_text": "Taipei",
+            "elapsed_seconds": 0.1,
+            "usage": {"prompt_tokens": 12, "completion_tokens": 2},
+        },
+    )
+    monkeypatch.setattr(
+        "traffic_experiment.traffic_measure.runner.time.sleep",
+        sleeps.append,
+    )
+    manifest = tmp_path / "manifest.jsonl"
+    write_jsonl(
+        manifest,
+        [
+            {
+                "request_id": "conversation-1::q1::no_compression",
+                "sample_id": "conversation-1::q1",
+                "conversation_id": "conversation-1",
+                "question_id": "q1",
+                "condition": "no_compression",
+                "messages": [{"role": "user", "content": "Where?"}],
+                "messages_sha256": "a" * 64,
+            }
+        ],
+    )
+    result = read_jsonl(
+        run_experiment(
+            RunSettings(
+                manifest_path=manifest,
+                output_dir=tmp_path / "run",
+                base_url="http://127.0.0.1:9/v1",
+                model="test-model",
+                api_key="test-key",
+                sample_limit=1,
+                repetitions=1,
+                seed=42,
+                temperature=0,
+                max_output_tokens=16,
+                request_timeout_seconds=5,
+                observation_seconds=900,
+                capture_interface="",
+                capture_filter="",
+                capture_startup_delay_seconds=0,
+                no_capture=True,
+            )
+        )
+    )[0]
+
+    assert sleeps == [900]
+    assert result["completed"] is True
+    assert result["capture_file"] is None
+    assert result["error"] is None
+
+
 @pytest.mark.parametrize(
     ("capture_stop_on_response", "startup_delay_seconds", "response_elapsed_seconds"),
     [

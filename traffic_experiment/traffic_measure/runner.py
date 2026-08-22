@@ -746,7 +746,11 @@ def run_experiment(settings: RunSettings) -> Path:
                             ),
                             stderr=str(exc),
                         )
-                elif not settings.no_wait_after_request and settings.observation_seconds > 0:
+                elif (
+                    settings.no_capture
+                    and not settings.no_wait_after_request
+                    and settings.observation_seconds > 0
+                ):
                     # Dry-run tests can disable this wait. Real no-capture runs preserve pacing.
                     time.sleep(settings.observation_seconds)
 

@@ -87,6 +87,8 @@ VALIDATOR="${SCRIPT_DIR}/privileged_matrix_config.py"
 CADDY_READINESS="${SCRIPT_DIR}/caddy_readiness.py"
 RUNNER_PYTHON="${EXPERIMENT_ROOT}/.venv-runner/bin/python"
 CADDY="${EXPERIMENT_ROOT}/.tools/caddy"
+DUMPCAP=/usr/bin/dumpcap
+DUMPCAP_GID=""
 LOCK_HELD=0
 LOCK_ID=""
 SERVICE_LOCK_DIR=""
@@ -135,6 +137,36 @@ root_command() {
   mode="$(/usr/bin/stat -c %a -- "${resolved}")"
   (( (8#${mode} & 8#022) == 0 )) || return 1
   printf '%s\n' "${path}"
+}
+
+verify_dumpcap_identity() {
+  local observed_gid group_record capabilities
+  [[ "$(root_command dumpcap)" == "${DUMPCAP}" ]] || return 1
+  regular_root_file "${DUMPCAP}" || return 1
+  [[ "$(/usr/bin/stat -c %u:%a:%h -- "${DUMPCAP}")" == 0:750:1 ]] ||
+    return 1
+  observed_gid="$(/usr/bin/stat -c %g -- "${DUMPCAP}")" || return 1
+  [[ "${observed_gid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ -n "${DUMPCAP_GID}" && "${observed_gid}" != "${DUMPCAP_GID}" ]]; then
+    return 1
+  fi
+  DUMPCAP_GID="${observed_gid}"
+  group_record="$(/usr/bin/getent group "${DUMPCAP_GID}")" || return 1
+  [[ "${group_record%%:*}" == wireshark ]] || return 1
+  capabilities="$(/usr/sbin/getcap -- "${DUMPCAP}")" || return 1
+  [[ "${capabilities}" == "${DUMPCAP} cap_net_admin,cap_net_raw=eip" ]]
+}
+
+verify_dumpcap_access() {
+  verify_dumpcap_identity || return 1
+  /usr/bin/id -G "${SERVICE_USER}" |
+    /usr/bin/awk -v gid="${DUMPCAP_GID}" '
+      {for (index = 1; index <= NF; index++) if ($index == gid) found = 1}
+      END {exit !found}
+    ' || return 1
+  /usr/bin/setpriv --reuid "${SERVICE_UID}" --regid "${SERVICE_GID}" \
+    --groups "${DUMPCAP_GID}" /usr/bin/bash -p -c '[[ -x "$1" ]]' \
+    dumpcap-exec-check "${DUMPCAP}"
 }
 
 metadata_value() {
@@ -348,9 +380,10 @@ release_precheck() {
     regular_root_file "${file}" || die "unsafe release file: ${file}"
   done
   case "${RELEASE_ROOT}" in /opt/commu-secure-matrix/releases/[0-9a-f][0-9a-f]*) ;; *) die "release is outside the fixed installation root" ;; esac
-  for command_name in awk bash chmod curl cut date dumpcap ethtool find flock grep hostname ip iperf3 mkdir nvidia-smi python3 readlink rm rmdir sed setpriv sha256sum sleep sort ss stat sync tail tc tee tshark uname wc; do
+  for command_name in awk bash chmod curl cut date dumpcap ethtool find flock getcap getent grep hostname id ip iperf3 mkdir nvidia-smi python3 readlink rm rmdir sed setpriv sha256sum sleep sort ss stat sync tail tc tee tshark uname wc; do
     root_command "${command_name}" >/dev/null || die "unsafe or missing system command: ${command_name}"
   done
+  verify_dumpcap_identity || die "system dumpcap identity or capabilities drifted"
   [[ -x /usr/bin/kill && "$(/usr/bin/stat -c %u -- /usr/bin/kill)" == 0 ]] ||
     die "unsafe or missing /usr/bin/kill"
   (
@@ -389,6 +422,8 @@ load_policy() {
   [[ "${SERVICE_STATE_ROOT}" = /* && "${SERVICE_STATE_ROOT}" != *$'\n'* ]] || die "unsafe service-state root"
   [[ "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*$ && "${SERVICE_UID}" =~ ^[1-9][0-9]*$ && "${SERVICE_GID}" =~ ^[1-9][0-9]*$ ]] || die "unsafe service identity policy"
   [[ "$(/usr/bin/id -u "${SERVICE_USER}")" == "${SERVICE_UID}" && "$(/usr/bin/id -g "${SERVICE_USER}")" == "${SERVICE_GID}" ]] || die "service account identity drifted"
+  verify_dumpcap_access ||
+    die "service account cannot use the fixed system dumpcap"
   [[ -d "${SERVICE_STATE_ROOT}" && ! -L "${SERVICE_STATE_ROOT}" &&
     "$(/usr/bin/readlink -e -- "${SERVICE_STATE_ROOT}")" == "${SERVICE_STATE_ROOT}" &&
     "$(/usr/bin/stat -c %u -- "${SERVICE_STATE_ROOT}")" == "${SERVICE_UID}" ]] ||
@@ -1022,6 +1057,7 @@ verify_cell_boundary() {
   verify_admission
   verify_network_inventory "$1"
   verify_caddy
+  verify_dumpcap_access || die "dumpcap capture identity drifted"
   verify_locked_identity
 }
 
@@ -1060,7 +1096,7 @@ run_cell() {
   verify_cell_boundary "${network}"
   /usr/sbin/ip netns exec llm-client /usr/bin/bash -p -c '
       exec 8>&-
-      exec /usr/bin/setpriv --reuid "$1" --regid "$2" --clear-groups \
+      exec /usr/bin/setpriv --reuid "$1" --regid "$2" --groups "$18" \
         /usr/bin/env -i HOME=/tmp LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
         PATH=/usr/sbin:/usr/bin PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
         PYTHONSAFEPATH=1 PYTHONPATH="$3" \
@@ -1079,7 +1115,7 @@ run_cell() {
       "${manifest}" "${cell}" \
       "$(config_value "${CONFIG}" VLLM_SERVED_MODEL_NAME)" "${samples}" \
       "${filter}" "${EXPECTED_GPU_UUID}" "${transport}" "${CA_FILE}" \
-      "${secure_port}" "${EXPECTED_GPU_INDEX}" ||
+      "${secure_port}" "${EXPECTED_GPU_INDEX}" "${DUMPCAP_GID}" ||
     child_status=$?
   [[ "${child_status:-0}" -eq 0 ]] ||
     die "measurement cell failed; append-only attempts remain in ${cell}"
