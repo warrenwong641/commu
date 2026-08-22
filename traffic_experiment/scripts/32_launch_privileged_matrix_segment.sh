@@ -12,6 +12,7 @@ HELPER=/usr/local/libexec/commu-vllm-service-lease
 MANAGER_SHA256=93b6123c3ced3dbe028db80848d98da7ccb1fd465950a3464b56c67c6d371760
 HELPER_SHA256=613eb7e98d7cf03871923f44a532d45b2592b9e3f10ef5ebec9fa40e29f611de
 RECORDS_ROOT=/var/lib/commu-matrix-segments
+SERVICE_RUNTIME_NAMESPACE=/var/lib/commu-matrix-runtime
 
 CLEAN_ENV_DECLARATION="$(declare -p COMMU_MATRIX_SEGMENT_CLEAN_ENV 2>/dev/null || true)"
 if [[ "${CLEAN_ENV_DECLARATION}" != 'declare -r COMMU_MATRIX_SEGMENT_CLEAN_ENV="1"' ]]; then
@@ -197,15 +198,16 @@ find_resume_plan() {
   mapfile -d '' -t plan_fields < <(/usr/bin/python3 -I - "${identity_json}" <<'PY'
 import json, sys
 identity = json.loads(sys.argv[1])
-for name in ("repository_sha", "gpu_index", "gpu_uuid", "run_plan_sha256"):
+for name in ("repository_sha", "gpu_index", "gpu_uuid", "active_config_sha256", "run_plan_sha256"):
     sys.stdout.buffer.write(str(identity[name]).encode("ascii") + b"\0")
 PY
   )
-  [[ "${#plan_fields[@]}" -eq 4 ]] || die "incomplete run-plan identity"
+  [[ "${#plan_fields[@]}" -eq 5 ]] || die "incomplete run-plan identity"
   RUN_REPOSITORY_SHA="${plan_fields[0]}"
   GPU_INDEX="${plan_fields[1]}"
   GPU_UUID="${plan_fields[2]}"
-  PLAN_SHA256="${plan_fields[3]}"
+  PLAN_ACTIVE_CONFIG_SHA256="${plan_fields[3]}"
+  PLAN_SHA256="${plan_fields[4]}"
   [[ -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" == "${RUN_REPOSITORY_SHA}" ]] ||
     die "source repository assertion differs from RUN_PLAN.json"
 }
@@ -552,7 +554,7 @@ done
   ( -z "${GPU_INDEX_ASSERTION}" || "${GPU_INDEX_ASSERTION}" =~ ^(0|[1-9][0-9]*)$ ) &&
   ( -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || usage
 
-PLAN=""; PLAN_SHA256=""; RUN_REPOSITORY_SHA=""
+PLAN=""; PLAN_SHA256=""; PLAN_ACTIVE_CONFIG_SHA256=""; RUN_REPOSITORY_SHA=""
 if [[ "${MODE}" == new ]]; then
   [[ -n "${GPU_INDEX_ASSERTION}" ]] || die "a new run requires --gpu-index"
   [[ -z "${SOURCE_REPOSITORY_SHA}" ]] || die "--source-repository-sha is only a resume assertion"
@@ -625,8 +627,12 @@ SESSION="commu-matrix-${RECORD_ID}"
 TIMER_BASE="${SESSION}-expiry"
 ATTEMPT_DIR="${SERVICE_STATE_ROOT}/qwen35-${SERVICE_REPOSITORY_SHA:0:7}/matrix-segments/${RECORD_ID}"
 /usr/bin/install -d -o "${SERVICE_UID}" -g "${SERVICE_GID}" -m 0700 "${ATTEMPT_DIR}"
-SERVICE_RUNTIME_ROOT="${ATTEMPT_DIR}/runtime"
-/usr/bin/install -d -o "${SERVICE_UID}" -g "${SERVICE_GID}" -m 0700 "${SERVICE_RUNTIME_ROOT}"
+SERVICE_RUNTIME_ROOT="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" ensure-stable-runtime-root \
+  --runtime-namespace-root "${SERVICE_RUNTIME_NAMESPACE}" \
+  --source-repository-sha "${SERVICE_REPOSITORY_SHA}" \
+  --run-id "${RUN_ID}" --gpu-index "${GPU_INDEX}" --gpu-uuid "${GPU_UUID}" \
+  --service-uid "${SERVICE_UID}" --service-gid "${SERVICE_GID}")" ||
+  die "could not derive the stable per-run service runtime root"
 STATE="${SERVICE_STATE_ROOT}/qwen35-${SERVICE_REPOSITORY_SHA:0:7}/service-matrix-${RECORD_ID}.state"
 [[ ! -e "${STATE}" && ! -L "${STATE}" ]] || die "allocated service-state path already exists"
 VLLM_LOG="${ATTEMPT_DIR}/vllm.log"
@@ -642,18 +648,28 @@ INITIAL_DELAY_SECONDS=$((CLEANUP_EPOCH - NOW_EPOCH))
 [[ "${INITIAL_DELAY_SECONDS}" -ge 600 ]] || die "lease is too short to arm reviewed cleanup"
 
 SERVICE_CONFIG="${ATTEMPT_DIR}/service.env"
+materialize_args=(
+  --template "${SERVICE_TEMPLATE}" --output "${SERVICE_CONFIG}"
+  --gpu-index "${GPU_INDEX}" --gpu-uuid "${GPU_UUID}"
+  --source-repository-sha "${RUN_REPOSITORY_SHA}"
+  --expected-vllm-bin "${EXPECTED_API_VLLM}"
+  --expected-ld-library-path "${EXPECTED_API_LD_LIBRARY_PATH}"
+  --measurement-config "${MEASUREMENT_CONFIG}"
+  --measurement-repository-sha "${RUN_REPOSITORY_SHA}"
+  --service-runtime-root "${SERVICE_RUNTIME_ROOT}"
+)
+if [[ "${MODE}" == resume ]]; then
+  materialize_args+=(--expected-active-config-sha256 "${PLAN_ACTIVE_CONFIG_SHA256}")
+fi
 /usr/bin/python3 -I "${LAUNCH_HELPER}" materialize-service-config \
-  --template "${SERVICE_TEMPLATE}" --output "${SERVICE_CONFIG}" \
-  --gpu-index "${GPU_INDEX}" --gpu-uuid "${GPU_UUID}" \
-  --source-repository-sha "${RUN_REPOSITORY_SHA}" \
-  --expected-vllm-bin "${EXPECTED_API_VLLM}" \
-  --expected-ld-library-path "${EXPECTED_API_LD_LIBRARY_PATH}" \
-  --measurement-config "${MEASUREMENT_CONFIG}" \
-  --measurement-repository-sha "${RUN_REPOSITORY_SHA}" \
-  --service-runtime-root "${SERVICE_RUNTIME_ROOT}" || die "could not materialize the service config"
+  "${materialize_args[@]}" || die "could not materialize the service config"
 /usr/bin/chown "${SERVICE_UID}:${SERVICE_GID}" "${SERVICE_CONFIG}"
 /usr/bin/chmod 0600 "${SERVICE_CONFIG}"
 SERVICE_CONFIG_SHA256="$(sha256_file "${SERVICE_CONFIG}")"
+if [[ "${MODE}" == resume ]]; then
+  [[ "${SERVICE_CONFIG_SHA256}" == "${PLAN_ACTIVE_CONFIG_SHA256}" ]] ||
+    die "service config digest differs from immutable run plan"
+fi
 
 RECORD="${RECORD_DIR}/record.state"
 {

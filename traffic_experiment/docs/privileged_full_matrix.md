@@ -186,6 +186,13 @@ old lease and `resume` appends a new generation. A GPU assertion may be supplied
 on resume, but it must match the immutable plan. To use a different GPU, choose
 a new run ID and keep its output root and analysis separate.
 
+For a new run, the launcher derives a deterministic service-runtime directory
+from the full repository SHA, run ID, GPU index, and GPU UUID. Later segments
+therefore reproduce the same service-configuration digest while their service
+state and lifecycle logs remain attempt-specific. When resuming a legacy plan,
+the launcher instead preserves an already-pinned service configuration
+byte-for-byte and verifies its SHA-256 against `RUN_PLAN.json`.
+
 For a reviewed bridge continuing an older run, optionally narrow discovery to
 the source commit:
 

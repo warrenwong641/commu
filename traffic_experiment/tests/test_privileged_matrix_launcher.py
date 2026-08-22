@@ -8,6 +8,7 @@ import re
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ def write_plan(path: Path, **changes: object) -> bytes:
         "run_id": "main-20260822t1203z",
         "gpu_index": 3,
         "gpu_uuid": "GPU-2783a59c-9574-d4f6-1d4b-bfb505341383",
+        "active_config_sha256": "e" * 64,
     }
     plan.update(changes)
     encoded = (json.dumps(plan, sort_keys=True) + "\n").encode()
@@ -191,6 +193,7 @@ def test_resume_loads_pinned_identity_and_digest(tmp_path: Path) -> None:
     assert identity.run_id == "main-20260822t1203z"
     assert identity.gpu_index == 3
     assert identity.gpu_uuid == "GPU-2783a59c-9574-d4f6-1d4b-bfb505341383"
+    assert identity.active_config_sha256 == "e" * 64
     assert identity.run_plan_sha256 == hashlib.sha256(encoded).hexdigest()
 
 
@@ -213,6 +216,7 @@ def test_resume_rejects_gpu_override_mismatch(tmp_path: Path) -> None:
         {"gpu_index": "3"},
         {"gpu_uuid": "GPU-bad-"},
         {"repository_sha": "A" * 40},
+        {"active_config_sha256": "f" * 63},
     ],
 )
 def test_resume_rejects_malformed_plan_identity(
@@ -299,6 +303,172 @@ def test_service_config_rewrites_only_gpu_and_scope_fields(tmp_path: Path) -> No
     assert template.read_text() == original
     if os.name != "nt":
         assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_legacy_resume_preserves_exact_config_bytes_and_runtime_paths(
+    tmp_path: Path,
+) -> None:
+    launch = load_module()
+    template = tmp_path / "server.gpu3.single.env"
+    measurement = tmp_path / "measurement.env"
+    output = tmp_path / "service.env"
+    write_service_template(template)
+    write_measurement_config(measurement)
+    original = template.read_bytes().replace(
+        b'CUDA_VISIBLE_DEVICES="7"', b'CUDA_VISIBLE_DEVICES="3"'
+    )
+    template.write_bytes(original)
+    digest = hashlib.sha256(original).hexdigest()
+
+    launch.materialize_service_config(
+        template,
+        output,
+        "3",
+        "GPU-2783a59c-9574-d4f6-1d4b-bfb505341383",
+        "a" * 40,
+        "/opt/vllm/bin/vllm",
+        "/opt/vllm/lib",
+        "/home/service/a-new-runtime-that-must-not-be-used",
+        measurement,
+        "a" * 40,
+        digest,
+    )
+
+    assert output.read_bytes() == original
+    assert b'RUNS_ROOT="/old/source/gpu-7/runs"' in output.read_bytes()
+    assert b'CADDY_RUN_DIR="/old/source/gpu-7/caddy"' in output.read_bytes()
+
+
+def test_resume_rejects_rendered_service_config_hash_mismatch(tmp_path: Path) -> None:
+    launch = load_module()
+    template = tmp_path / "template.env"
+    measurement = tmp_path / "measurement.env"
+    output = tmp_path / "service.env"
+    write_service_template(template)
+    write_measurement_config(measurement)
+
+    with pytest.raises(launch.LaunchConfigError, match="immutable run plan"):
+        launch.materialize_service_config(
+            template,
+            output,
+            "3",
+            "GPU-2783a59c-9574-d4f6-1d4b-bfb505341383",
+            "a" * 40,
+            "/opt/vllm/bin/vllm",
+            "/opt/vllm/lib",
+            "/home/service/stable-runtime",
+            measurement,
+            "a" * 40,
+            "f" * 64,
+        )
+    assert not output.exists()
+
+
+def test_new_run_runtime_root_and_config_are_stable_across_attempts(
+    tmp_path: Path,
+) -> None:
+    launch = load_module()
+    template = tmp_path / "template.env"
+    measurement = tmp_path / "measurement.env"
+    first = tmp_path / "attempt-1.env"
+    second = tmp_path / "attempt-2.env"
+    write_service_template(template)
+    write_measurement_config(measurement)
+    arguments = (
+        "/var/lib/commu-matrix-runtime",
+        "a" * 40,
+        "main-20260823t0000z",
+        "3",
+        "GPU-2783a59c-9574-d4f6-1d4b-bfb505341383",
+    )
+    runtime1 = launch.stable_service_runtime_root(*arguments)
+    runtime2 = launch.stable_service_runtime_root(*arguments)
+    assert runtime1 == runtime2
+    assert "attempt" not in runtime1
+    assert "a" * 40 in runtime1
+    different_run = launch.stable_service_runtime_root(
+        arguments[0], arguments[1], "main-20260823t0100z", arguments[3], arguments[4]
+    )
+    assert different_run != runtime1
+
+    for output in (first, second):
+        launch.materialize_service_config(
+            template,
+            output,
+            "3",
+            arguments[-1],
+            "a" * 40,
+            "/opt/vllm/bin/vllm",
+            "/opt/vllm/lib",
+            runtime1,
+            measurement,
+            "a" * 40,
+        )
+    assert first.read_bytes() == second.read_bytes()
+    assert hashlib.sha256(first.read_bytes()).hexdigest() == hashlib.sha256(
+        second.read_bytes()
+    ).hexdigest()
+
+
+def test_fd_snapshot_rejects_pathname_identity_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launch = load_module()
+    template = tmp_path / "template.env"
+    write_service_template(template)
+    real_stat = launch.os.stat
+
+    def changed_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if Path(path) == template and kwargs.get("follow_symlinks") is False:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+            )
+        return result
+
+    monkeypatch.setattr(launch.os, "stat", changed_stat)
+    with pytest.raises(launch.LaunchConfigError, match="pathname changed"):
+        launch._read_stable_regular_file_bytes(
+            template,
+            label="service template",
+            maximum_bytes=launch.MAX_SERVICE_CONFIG_BYTES,
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="dir_fd/no-follow semantics are POSIX")
+def test_runtime_tree_creation_rejects_precreated_symlink(tmp_path: Path) -> None:
+    launch = load_module()
+    tmp_path.chmod(0o700)
+    target = tmp_path / "outside"
+    target.mkdir(mode=0o700)
+    policy = tmp_path / "gpu-leaf"
+    policy.symlink_to(target, target_is_directory=True)
+    with pytest.raises(launch.LaunchConfigError, match="unsafe"):
+        launch._ensure_runtime_components(
+            tmp_path,
+            ("gpu-leaf",),
+            parent_uid=os.getuid(),
+            service_uid=os.getuid(),
+            service_gid=os.getgid(),
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="dir_fd ownership checks are POSIX")
+def test_runtime_tree_creation_rejects_unexpected_existing_mode(tmp_path: Path) -> None:
+    launch = load_module()
+    tmp_path.chmod(0o700)
+    leaf = tmp_path / "gpu-leaf"
+    leaf.mkdir(mode=0o755)
+    with pytest.raises(launch.LaunchConfigError, match="owner or mode"):
+        launch._ensure_runtime_components(
+            tmp_path,
+            ("gpu-leaf",),
+            parent_uid=os.getuid(),
+            service_uid=os.getuid(),
+            service_gid=os.getgid(),
+        )
 
 
 @pytest.mark.parametrize(

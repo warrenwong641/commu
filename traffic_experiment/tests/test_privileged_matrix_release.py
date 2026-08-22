@@ -68,6 +68,11 @@ def test_segment_launcher_has_gpu_portable_relative_lease_interface() -> None:
     assert timer_arm < timer_delay < timer_start
     assert "recover-open-generation" in text
     assert "/usr/bin/flock -n 8" in text
+    assert '"active_config_sha256", "run_plan_sha256"' in text
+    assert "stable-runtime-root" in text
+    assert '--expected-active-config-sha256 "${PLAN_ACTIVE_CONFIG_SHA256}"' in text
+    assert '[[ "${SERVICE_CONFIG_SHA256}" == "${PLAN_ACTIVE_CONFIG_SHA256}" ]]' in text
+    assert 'SERVICE_RUNTIME_ROOT="${ATTEMPT_DIR}/runtime"' not in text
     assert 'SEGMENT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"' in installer
     assert '/usr/bin/chmod 0555 "${SEGMENT_LAUNCHER}"' in installer
 
