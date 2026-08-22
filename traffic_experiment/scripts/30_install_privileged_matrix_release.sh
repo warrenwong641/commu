@@ -60,7 +60,7 @@ EXPECTED_SUMMARY_SHA256=f6873ec918d63c9b8d12aa17efaa460c7b1650977d73bd4585670a3e
 # Updated after committing by hashing REVIEWED_CODE_FILES.sha256 from a clean
 # git archive. This file itself is excluded; administrators authenticate this
 # installer with its separately published SHA-256.
-EXPECTED_REVIEWED_CODE_MANIFEST_SHA256=68fc8d021222ec0d041e698687b131759d5ad81f3caa6b8c74bd7dd4b71332e3
+EXPECTED_REVIEWED_CODE_MANIFEST_SHA256=3e95ee0c3b23de284b2266dee0fe97d55fba4432c3a5401511f1c7bc3e2f8ba8
 ARCHIVE="${1:-}"
 EXPECTED_ARCHIVE_SHA="${2:-}"
 EXPECTED_REPOSITORY_SHA="${3:-}"
