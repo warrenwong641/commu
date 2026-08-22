@@ -227,6 +227,8 @@ def test_request_enters_namespace_then_drops_identity_without_lock_or_key() -> N
     assert 'cap_net_admin,cap_net_raw=eip' in text
     assert '"$(/usr/bin/stat -c %u:%a:%h -- "${DUMPCAP}")" == 0:754:1' in text
     assert 'verify_dumpcap_access || die "dumpcap capture identity drifted"' in text
+    assert "for (field_number = 1; field_number <= NF; field_number++)" in text
+    assert "for (index = 1; index <= NF; index++)" not in text
     assert "/usr/bin/env -i" in child
     assert "API_KEY=" not in text
     assert "Authorization: Bearer" not in text
@@ -237,6 +239,32 @@ def test_request_enters_namespace_then_drops_identity_without_lock_or_key() -> N
     assert "LOCAL_VLLM_API_KEY=" in request
     assert "os.environ.pop(name, None)" in request
     assert 'sys.stdin = io.StringIO(credential + "\\n")' in request
+
+
+def test_dumpcap_group_membership_awk_program_accepts_only_the_exact_gid() -> None:
+    awk = shutil.which("awk")
+    if awk is None:
+        pytest.skip("awk is unavailable")
+    program = (
+        "{for (field_number = 1; field_number <= NF; field_number++) "
+        "if ($field_number == gid) found = 1} END {exit !found}"
+    )
+    accepted = subprocess.run(
+        [awk, "-v", "gid=128", program],
+        input="1007 128 999\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    rejected = subprocess.run(
+        [awk, "-v", "gid=128", program],
+        input="1007 999\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode != 0
 
 
 def test_fixed_matrix_plan_is_exactly_2808_calls() -> None:

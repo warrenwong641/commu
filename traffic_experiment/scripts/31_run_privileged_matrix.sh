@@ -161,7 +161,7 @@ verify_dumpcap_access() {
   verify_dumpcap_identity || return 1
   /usr/bin/id -G "${SERVICE_USER}" |
     /usr/bin/awk -v gid="${DUMPCAP_GID}" '
-      {for (index = 1; index <= NF; index++) if ($index == gid) found = 1}
+      {for (field_number = 1; field_number <= NF; field_number++) if ($field_number == gid) found = 1}
       END {exit !found}
     ' || return 1
   /usr/bin/setpriv --reuid "${SERVICE_UID}" --regid "${SERVICE_GID}" \
