@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 from pathlib import Path
+from pathlib import PurePosixPath
 
 
 SCHEMA = "commu-secure-single-matrix-plan-v2"
@@ -25,6 +26,22 @@ WORKLOADS = (("qa", 32), ("summary", 20))
 CONDITIONS = 3
 REPETITIONS = 3
 EXPECTED_CALLS = 2808
+MEASUREMENT_PAYLOAD_FILES = frozenset(
+    {
+        "repository/traffic_experiment/configs/Caddyfile.single",
+        "repository/traffic_experiment/scripts/privileged_matrix_request.py",
+        "repository/traffic_experiment/scripts/privileged_matrix_config.py",
+        "repository/traffic_experiment/scripts/caddy_readiness.py",
+        "repository/traffic_experiment/scripts/11_network_condition.sh",
+        "repository/traffic_experiment/scripts/lib.sh",
+        "repository/traffic_experiment/scripts/protocol_admission.sh",
+        "repository/traffic_experiment/.tools/caddy",
+    }
+)
+MEASUREMENT_PAYLOAD_DIRECTORIES = (
+    "repository/traffic_experiment/traffic_measure",
+    "wheelhouse",
+)
 
 
 def canonical(value: object) -> bytes:
@@ -59,6 +76,58 @@ def sha256_file(path: Path) -> str:
         return digest.hexdigest()
     finally:
         os.close(fd)
+
+
+def measurement_payload_inventory(release_root: Path) -> dict[str, str]:
+    """Project a verified release manifest onto measurement-time payloads."""
+    manifest = release_root / "RELEASE_FILES.sha256"
+    inventory: dict[str, str] = {}
+    seen: set[str] = set()
+    found_files: set[str] = set()
+    found_directories: set[str] = set()
+    for number, line in enumerate(
+        manifest.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        match = re.fullmatch(r"([0-9a-f]{64})  (\./[^\n]+)", line)
+        if not match:
+            raise ValueError(f"malformed release manifest line {number}: {manifest}")
+        relative = match.group(2)[2:]
+        path = PurePosixPath(relative)
+        if (
+            not relative
+            or path.is_absolute()
+            or ".." in path.parts
+            or relative in seen
+        ):
+            raise ValueError(f"unsafe/duplicate release manifest path: {relative!r}")
+        seen.add(relative)
+
+        # Bytecode is an interpreter cache, not a pinned source payload.  In
+        # particular, its embedded source filename varies with release path.
+        if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
+        if relative in MEASUREMENT_PAYLOAD_FILES:
+            inventory[relative] = match.group(1)
+            found_files.add(relative)
+        for directory in MEASUREMENT_PAYLOAD_DIRECTORIES:
+            if relative.startswith(f"{directory}/"):
+                inventory[relative] = match.group(1)
+                found_directories.add(directory)
+
+    missing = sorted(
+        (MEASUREMENT_PAYLOAD_FILES - found_files)
+        | (set(MEASUREMENT_PAYLOAD_DIRECTORIES) - found_directories)
+    )
+    if missing:
+        raise ValueError(f"release manifest lacks measurement payloads: {missing}")
+    return inventory
+
+
+def compare_measurement_payloads(args: argparse.Namespace) -> None:
+    old = measurement_payload_inventory(args.legacy_release_root)
+    new = measurement_payload_inventory(args.current_release_root)
+    if old != new:
+        raise ValueError("legacy/current measurement payloads are not byte-identical")
 
 
 def safe_directory(path: Path, uid: int | None = None) -> None:
@@ -927,6 +996,9 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--service-uid", required=True, type=int)
     command.add_argument("--gpu-uuid", required=True)
     command.add_argument("--gpu-index", required=True, type=int)
+    command = commands.add_parser("compare-measurement-payloads")
+    command.add_argument("--legacy-release-root", required=True, type=Path)
+    command.add_argument("--current-release-root", required=True, type=Path)
     for action in ("status", "seal-matrix", "verify-generations"):
         command = commands.add_parser(action)
         command.add_argument("--root", required=True, type=Path)
@@ -946,6 +1018,8 @@ def main() -> int:
             close_generation(args)
         elif args.action == "seal-cell":
             seal_cell(args)
+        elif args.action == "compare-measurement-payloads":
+            compare_measurement_payloads(args)
         elif args.action == "status":
             status(args)
         elif args.action == "verify-generations":

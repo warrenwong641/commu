@@ -75,7 +75,8 @@ sudo "$RUNNER" resume --service-state "$STATE" --run-id "$RUN_ID" \
 ```
 
 The bridge verifies both source release manifests, requires byte-identical
-measurement payloads, executes the source release's request/network/protocol
+manifest projections of the measurement payloads (excluding generated Python
+bytecode caches), executes the source release's request/network/protocol
 tools and runtime, proves the old plan/config/admission/topology anchors, and
 records the new bridge release plus the new lease snapshot. The old v1
 `service_state_sha256` becomes the explicit generation-zero predecessor.

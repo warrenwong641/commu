@@ -524,6 +524,7 @@ def test_existing_check_verifies_resumability_and_legacy_bridge_is_explicit() ->
     assert "configure_legacy_continuation" in text
     assert "legacy/current measurement payloads are not byte-identical" in text
     assert "INSTALLED_RUNTIME_FILES.sha256" in text
+    assert "compare-measurement-payloads" in text
     flow = text[text.index('mapfile -d \'\' -t PLAN_ARGS') :]
     assert flow.index("verify_selected_plan") < flow.index(
         "PRIVILEGED_MATRIX_PRECHECK_OK"
@@ -534,6 +535,64 @@ def test_existing_check_verifies_resumability_and_legacy_bridge_is_explicit() ->
     assert flow.index("close_service_generation ready-to-seal") < flow.index(
         'seal-matrix --root "${MATRIX_ROOT}"'
     )
+
+
+def test_measurement_payload_comparison_ignores_only_interpreter_caches(
+    tmp_path: Path,
+) -> None:
+    state = load_module("privileged_matrix_payload_test", STATE_TOOL)
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+
+    entries = {
+        relative: f"{number:064x}"
+        for number, relative in enumerate(
+            sorted(state.MEASUREMENT_PAYLOAD_FILES), 1
+        )
+    }
+    entries["repository/traffic_experiment/traffic_measure/client.py"] = "a" * 64
+    entries["wheelhouse/httpx-1.0-py3-none-any.whl"] = "b" * 64
+
+    def write_manifest(root: Path, values: dict[str, str]) -> None:
+        text = "".join(
+            f"{digest}  ./{relative}\n"
+            for relative, digest in sorted(values.items())
+        )
+        (root / "RELEASE_FILES.sha256").write_text(text, encoding="utf-8")
+
+    old_entries = {
+        **entries,
+        "repository/traffic_experiment/traffic_measure/__pycache__/client.cpython-312.pyc": "c" * 64,
+    }
+    new_entries = {
+        **entries,
+        "repository/traffic_experiment/traffic_measure/__pycache__/client.cpython-312.pyc": "d" * 64,
+    }
+    write_manifest(old, old_entries)
+    write_manifest(new, new_entries)
+    args = state.parser().parse_args(
+        [
+            "compare-measurement-payloads",
+            "--legacy-release-root", str(old),
+            "--current-release-root", str(new),
+        ]
+    )
+    state.compare_measurement_payloads(args)
+
+    new_entries["repository/traffic_experiment/traffic_measure/client.py"] = "e" * 64
+    write_manifest(new, new_entries)
+    with pytest.raises(
+        ValueError,
+        match="legacy/current measurement payloads are not byte-identical",
+    ):
+        state.compare_measurement_payloads(args)
+
+
+def test_installer_smoke_check_disables_bytecode_writes_explicitly() -> None:
+    text = INSTALLER.read_text()
+    assert '"${RUNTIME_PYTHON}" -B -I -P -c' in text
 
 
 def test_config_example_is_secret_free_and_fixed() -> None:

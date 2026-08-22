@@ -647,7 +647,7 @@ RUNNER="${RELEASE}/repository/traffic_experiment/scripts/31_run_privileged_matri
   die "release ownership/mode hardening failed"
 
 HOME=/root PATH="${PATH}" PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
-  "${RUNTIME_PYTHON}" -I -P -c \
+  "${RUNTIME_PYTHON}" -B -I -P -c \
   "import runpy, sys; sys.path.insert(0, '${RELEASE}/repository'); import aioquic, httpx, yaml; from traffic_experiment.traffic_measure import cli, pilot_evidence, worker_topology; from traffic_experiment.traffic_measure.http3_client import _runtime; _runtime(); runpy.run_path('${RELEASE}/repository/traffic_experiment/scripts/privileged_matrix_request.py', run_name='matrix_request_smoke'); runpy.run_path('${RELEASE}/repository/traffic_experiment/scripts/privileged_matrix_state.py', run_name='matrix_state_smoke')" ||
   die "root-owned runner runtime failed its import smoke test"
 CADDY_VERSION="$(

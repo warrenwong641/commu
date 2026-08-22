@@ -476,44 +476,13 @@ configure_legacy_continuation() {
     "$(/usr/bin/awk -F= '$1 == "pilot_repository_sha" {print $2}' "${legacy_policy}")" == "${LEGACY_RUN_REPOSITORY_SHA}" ]] ||
     die "legacy release metadata/policy identity mismatch"
 
-  # Compare every executable/data component reached during a measurement.  The
-  # new release contributes only this bridge supervisor and state ledger; the
-  # request client, protocol/network helpers, Caddy, and Python runtime remain
-  # byte-for-byte those of the immutable source release.
-  /usr/bin/python3 -I - "${LEGACY_RELEASE_ROOT}" "${RELEASE_ROOT}" <<'PY'
-import hashlib
-import os
-import sys
-from pathlib import Path
-
-old, new = map(Path, sys.argv[1:])
-roots = (
-    "repository/traffic_experiment/traffic_measure",
-    "repository/traffic_experiment/configs/Caddyfile.single",
-    "repository/traffic_experiment/scripts/privileged_matrix_request.py",
-    "repository/traffic_experiment/scripts/privileged_matrix_config.py",
-    "repository/traffic_experiment/scripts/caddy_readiness.py",
-    "repository/traffic_experiment/scripts/11_network_condition.sh",
-    "repository/traffic_experiment/scripts/lib.sh",
-    "repository/traffic_experiment/scripts/protocol_admission.sh",
-    "repository/traffic_experiment/.tools/caddy",
-    "wheelhouse",
-)
-def inventory(base):
-    result = {}
-    for relative in roots:
-        path = base / relative
-        candidates = [path] if path.is_file() else sorted(path.rglob("*"))
-        if not candidates or any(item.is_symlink() for item in candidates):
-            raise SystemExit(f"unsafe/missing measurement payload: {path}")
-        for item in candidates:
-            if item.is_file():
-                key = str(item.relative_to(base))
-                result[key] = hashlib.sha256(item.read_bytes()).hexdigest()
-    return result
-if inventory(old) != inventory(new):
-    raise SystemExit("legacy/current measurement payloads are not byte-identical")
-PY
+  # Compare the selected projection of each already-verified release manifest.
+  # Interpreter caches are deliberately outside that projection because their
+  # embedded source paths differ even when the pinned source is identical.
+  /usr/bin/python3 -I "${STATE_TOOL}" compare-measurement-payloads \
+    --legacy-release-root "${LEGACY_RELEASE_ROOT}" \
+    --current-release-root "${RELEASE_ROOT}" ||
+    die "legacy/current measurement payloads are not byte-identical"
   RUN_REPOSITORY_SHA="${LEGACY_RUN_REPOSITORY_SHA}"
   PILOT_REPOSITORY_SHA="${LEGACY_RUN_REPOSITORY_SHA}"
   CONFIG_TEMPLATE="${LEGACY_RELEASE_ROOT}/config/server.env"
