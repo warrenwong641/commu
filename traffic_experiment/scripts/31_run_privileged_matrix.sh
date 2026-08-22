@@ -143,7 +143,7 @@ verify_dumpcap_identity() {
   local observed_gid group_record capabilities
   [[ "$(root_command dumpcap)" == "${DUMPCAP}" ]] || return 1
   regular_root_file "${DUMPCAP}" || return 1
-  [[ "$(/usr/bin/stat -c %u:%a:%h -- "${DUMPCAP}")" == 0:750:1 ]] ||
+  [[ "$(/usr/bin/stat -c %u:%a:%h -- "${DUMPCAP}")" == 0:754:1 ]] ||
     return 1
   observed_gid="$(/usr/bin/stat -c %g -- "${DUMPCAP}")" || return 1
   [[ "${observed_gid}" =~ ^[1-9][0-9]*$ ]] || return 1

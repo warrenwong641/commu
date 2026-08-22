@@ -225,7 +225,7 @@ def test_request_enters_namespace_then_drops_identity_without_lock_or_key() -> N
     assert '"${DUMPCAP_GID}"' in child
     assert 'group_record%%:*}" == wireshark' in text
     assert 'cap_net_admin,cap_net_raw=eip' in text
-    assert '"$(/usr/bin/stat -c %u:%a:%h -- "${DUMPCAP}")" == 0:750:1' in text
+    assert '"$(/usr/bin/stat -c %u:%a:%h -- "${DUMPCAP}")" == 0:754:1' in text
     assert 'verify_dumpcap_access || die "dumpcap capture identity drifted"' in text
     assert "/usr/bin/env -i" in child
     assert "API_KEY=" not in text
