@@ -27,6 +27,7 @@ LEASE_DURATION = re.compile(r"(0|[1-9][0-9]*)([mh]?)")
 MIN_LEASE_MINUTES = 20
 MAX_LEASE_MINUTES = 120
 GRACEFUL_CLEANUP_MINUTES = 10
+MAX_AUTHORIZATION_WINDOW_SECONDS = 2 * 60 * 60
 MAX_RUN_PLAN_BYTES = 16 * 1024 * 1024
 MAX_SERVICE_CONFIG_BYTES = 1024 * 1024
 RUN_PLAN_SCHEMAS = {
@@ -131,6 +132,42 @@ def plan_deadlines(now_epoch: int, lease: str) -> DeadlinePlan:
         cleanup_epoch=hard_deadline - GRACEFUL_CLEANUP_MINUTES * 60,
         hard_deadline_epoch=hard_deadline,
     )
+
+
+def plan_bounded_deadlines(
+    now_epoch: int, lease: str, authorization_cutoff_epoch: int
+) -> DeadlinePlan:
+    """Fit a requested lease within one absolute authorization window.
+
+    Whole lease minutes are deliberately rounded down.  This makes the
+    resulting hard deadline no later than the caller-supplied cutoff even when
+    that cutoff is not aligned to a minute boundary.
+    """
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, int) or now_epoch < 0:
+        raise LaunchConfigError("current epoch must be a non-negative integer")
+    if (
+        isinstance(authorization_cutoff_epoch, bool)
+        or not isinstance(authorization_cutoff_epoch, int)
+        or authorization_cutoff_epoch < 0
+    ):
+        raise LaunchConfigError(
+            "authorization cutoff epoch must be a non-negative integer"
+        )
+    remaining_seconds = authorization_cutoff_epoch - now_epoch
+    if remaining_seconds <= 0:
+        raise LaunchConfigError("authorization cutoff must be later than current epoch")
+    if remaining_seconds > MAX_AUTHORIZATION_WINDOW_SECONDS:
+        raise LaunchConfigError(
+            "authorization cutoff must be no more than two hours after current epoch"
+        )
+
+    requested_minutes = parse_lease_minutes(lease)
+    lease_minutes = min(requested_minutes, remaining_seconds // 60)
+    if lease_minutes < MIN_LEASE_MINUTES:
+        raise LaunchConfigError(
+            f"authorization window must allow at least {MIN_LEASE_MINUTES} lease minutes"
+        )
+    return plan_deadlines(now_epoch, f"{lease_minutes}m")
 
 
 def parse_run_id(value: str) -> str:
@@ -674,6 +711,7 @@ def _parser() -> argparse.ArgumentParser:
     deadline = commands.add_parser("deadline")
     deadline.add_argument("--now", required=True)
     deadline.add_argument("--lease", required=True)
+    deadline.add_argument("--authorization-cutoff")
     resume = commands.add_parser("resume-identity")
     resume.add_argument("--plan", required=True, type=Path)
     resume.add_argument("--gpu-index")
@@ -713,7 +751,19 @@ def main() -> int:
         if args.action == "deadline":
             if re.fullmatch(r"0|[1-9][0-9]*", args.now) is None:
                 raise LaunchConfigError("current epoch must be canonical decimal")
-            plan = plan_deadlines(int(args.now), args.lease)
+            if args.authorization_cutoff is None:
+                plan = plan_deadlines(int(args.now), args.lease)
+            else:
+                if (
+                    re.fullmatch(r"0|[1-9][0-9]*", args.authorization_cutoff)
+                    is None
+                ):
+                    raise LaunchConfigError(
+                        "authorization cutoff epoch must be canonical decimal"
+                    )
+                plan = plan_bounded_deadlines(
+                    int(args.now), args.lease, int(args.authorization_cutoff)
+                )
             print(
                 f"{plan.now_epoch}\t{plan.lease_minutes}\t"
                 f"{plan.cleanup_epoch}\t{plan.hard_deadline_epoch}"

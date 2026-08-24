@@ -55,6 +55,7 @@ Usage:
   32_launch_privileged_matrix_segment.sh resume \
     --run-id SAFE_ID --lease 20|115m|2h \
     [--gpu-index N] [--source-repository-sha 40_HEX] \
+    [--authorization-cutoff-epoch EPOCH] \
     [--service-config-template POLICY_SCOPED_PATH]
   32_launch_privileged_matrix_segment.sh continue-on-gpu \
     --parent-run-id SAFE_ID --parent-source-repository-sha 40_HEX \
@@ -366,8 +367,16 @@ proc_args() {
   output=()
   while IFS= read -r -d '' argument; do output+=("${argument}"); done <"/proc/$1/cmdline"
 }
-tcp_port_closed() { [[ -z "$(/usr/bin/ss -H -ltn "sport = :$1" 2>/dev/null)" ]]; }
-udp_port_closed() { [[ -z "$(/usr/bin/ss -H -lun "sport = :$1" 2>/dev/null)" ]]; }
+tcp_port_closed() {
+  local listeners
+  listeners="$(/usr/bin/ss -H -ltn "sport = :$1" 2>/dev/null)" || return 1
+  [[ -z "${listeners}" ]]
+}
+udp_port_closed() {
+  local listeners
+  listeners="$(/usr/bin/ss -H -lun "sport = :$1" 2>/dev/null)" || return 1
+  [[ -z "${listeners}" ]]
+}
 
 stop_caddy_exact() {
   local state="$1" expected_caddy expected_config schema pid ticks exe config live_ticks live_state
@@ -432,7 +441,7 @@ stop_caddy_exact() {
 }
 
 cleanup_owned_resources() {
-  local network_script network_state caddy_state cleanup_failed=0 state_status="" gpu_processes active_units
+  local network_script network_state caddy_state cleanup_failed=0 state_status="" gpu_processes active_units netns_rows link_rows
   if ! stop_service; then
     printf 'WARN: verified service stop failed; continuing exact proxy/network cleanup\n' >&2
     cleanup_failed=1
@@ -445,8 +454,16 @@ cleanup_owned_resources() {
     regular_root_file "${network_script}" || die "unsafe network cleanup script"
     NETWORK_STATE_FILE="${network_state}" /usr/bin/bash -p "${network_script}" reset || cleanup_failed=1
   fi
-  /usr/bin/ip netns list | /usr/bin/grep -Eq '^llm-client([[:space:]]|$)' && cleanup_failed=1
-  /usr/bin/ip link show dev llmhost0 >/dev/null 2>&1 && cleanup_failed=1
+  if ! netns_rows="$(/usr/bin/ip netns list 2>/dev/null)"; then
+    cleanup_failed=1
+  elif /usr/bin/grep -Eq '^llm-client([[:space:]]|$)' <<<"${netns_rows}"; then
+    cleanup_failed=1
+  fi
+  if ! link_rows="$(/usr/bin/ip -o link show 2>/dev/null)"; then
+    cleanup_failed=1
+  elif /usr/bin/grep -Eq '^[0-9]+: llmhost0(@[^:[:space:]]+)?:' <<<"${link_rows}"; then
+    cleanup_failed=1
+  fi
   tcp_port_closed 8000 && tcp_port_closed 8001 && tcp_port_closed 8443 && udp_port_closed 8444 || cleanup_failed=1
   if [[ -e "${STATE}" || -L "${STATE}" ]]; then
     if [[ -f "${STATE}" && ! -L "${STATE}" &&
@@ -609,6 +626,7 @@ case "${ACTION}" in
 esac
 
 RUN_ID=""; LEASE=""; GPU_INDEX_ASSERTION=""; SOURCE_REPOSITORY_SHA=""; SERVICE_CONFIG_REQUESTED=""
+AUTHORIZATION_CUTOFF_EPOCH=""
 PARENT_RUN_ID=""; PARENT_SOURCE_REPOSITORY_SHA=""; PARENT_MATRIX_ROOT=""
 while (($#)); do
   case "$1" in
@@ -616,6 +634,7 @@ while (($#)); do
     --lease) [[ $# -ge 2 && -z "${LEASE}" ]] || usage; LEASE="$2"; shift 2 ;;
     --gpu-index) [[ $# -ge 2 && -z "${GPU_INDEX_ASSERTION}" ]] || usage; GPU_INDEX_ASSERTION="$2"; shift 2 ;;
     --source-repository-sha) [[ $# -ge 2 && -z "${SOURCE_REPOSITORY_SHA}" ]] || usage; SOURCE_REPOSITORY_SHA="$2"; shift 2 ;;
+    --authorization-cutoff-epoch) [[ $# -ge 2 && -z "${AUTHORIZATION_CUTOFF_EPOCH}" ]] || usage; AUTHORIZATION_CUTOFF_EPOCH="$2"; shift 2 ;;
     --parent-run-id) [[ $# -ge 2 && -z "${PARENT_RUN_ID}" ]] || usage; PARENT_RUN_ID="$2"; shift 2 ;;
     --parent-source-repository-sha) [[ $# -ge 2 && -z "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || usage; PARENT_SOURCE_REPOSITORY_SHA="$2"; shift 2 ;;
     --service-config-template) [[ $# -ge 2 && -z "${SERVICE_CONFIG_REQUESTED}" ]] || usage; SERVICE_CONFIG_REQUESTED="$2"; shift 2 ;;
@@ -625,11 +644,15 @@ done
 [[ "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ && "${LEASE}" =~ ^(0|[1-9][0-9]*)(m|h)?$ &&
   ( -z "${GPU_INDEX_ASSERTION}" || "${GPU_INDEX_ASSERTION}" =~ ^(0|[1-9][0-9]*)$ ) &&
   ( -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) &&
+  ( -z "${AUTHORIZATION_CUTOFF_EPOCH}" || "${AUTHORIZATION_CUTOFF_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ) &&
   ( -z "${PARENT_RUN_ID}" || "${PARENT_RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ) &&
   ( -z "${PARENT_SOURCE_REPOSITORY_SHA}" || "${PARENT_SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || usage
 if [[ "${MODE}" != continue-on-gpu &&
   ( -n "${PARENT_RUN_ID}" || -n "${PARENT_SOURCE_REPOSITORY_SHA}" ) ]]; then
   usage
+fi
+if [[ -n "${AUTHORIZATION_CUTOFF_EPOCH}" && "${MODE}" != resume ]]; then
+  die "--authorization-cutoff-epoch is only valid for resume"
 fi
 
 PLAN=""; PLAN_SHA256=""; PLAN_ACTIVE_CONFIG_SHA256=""; RUN_REPOSITORY_SHA=""
@@ -713,9 +736,13 @@ SERVICE_REPOSITORY_ROOT="$(/usr/bin/readlink -e -- "${SERVICE_REPOSITORY_ROOT}")
 gpu_processes="$(/usr/bin/nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits)" || die "cannot query GPU processes"
 /usr/bin/awk -F, -v wanted="${GPU_UUID}" '{gsub(/[[:space:]]/, "", $1); if ($1 == wanted) found=1} END {exit found ? 0 : 1}' <<<"${gpu_processes}" &&
   die "selected GPU ${GPU_INDEX} is occupied"
-/usr/bin/ss -H -lnt '( sport = :8000 or sport = :8001 or sport = :8443 )' | /usr/bin/grep -q . && die "required TCP port is occupied"
-/usr/bin/ss -H -lnu '( sport = :8444 )' | /usr/bin/grep -q . && die "required UDP port is occupied"
-/usr/bin/ip netns list | /usr/bin/grep -Eq '^llm-client([[:space:]]|$)' && die "project network namespace already exists"
+tcp_listeners="$(/usr/bin/ss -H -lnt '( sport = :8000 or sport = :8001 or sport = :8443 )')" ||
+  die "cannot query required TCP listeners"
+[[ -z "${tcp_listeners}" ]] || die "required TCP port is occupied"
+udp_listeners="$(/usr/bin/ss -H -lnu '( sport = :8444 )')" || die "cannot query required UDP listeners"
+[[ -z "${udp_listeners}" ]] || die "required UDP port is occupied"
+netns_rows="$(/usr/bin/ip netns list)" || die "cannot query network namespaces"
+/usr/bin/grep -Eq '^llm-client([[:space:]]|$)' <<<"${netns_rows}" && die "project network namespace already exists"
 
 /usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${RECORDS_ROOT}"
 for _ in $(/usr/bin/seq 1 100); do
@@ -745,8 +772,12 @@ VLLM_LOG="${ATTEMPT_DIR}/vllm.log"
 MATRIX_LOG="${RECORD_DIR}/matrix.log"
 EXPIRY_LOG="${RECORD_DIR}/expiry.log"
 NOW_EPOCH="$(/usr/bin/date +%s)"
-deadline_fields="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" deadline --now "${NOW_EPOCH}" --lease "${LEASE}")" ||
-  die "lease duration was rejected"
+deadline_args=(deadline --now "${NOW_EPOCH}" --lease "${LEASE}")
+if [[ -n "${AUTHORIZATION_CUTOFF_EPOCH}" ]]; then
+  deadline_args+=(--authorization-cutoff "${AUTHORIZATION_CUTOFF_EPOCH}")
+fi
+deadline_fields="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" "${deadline_args[@]}")" ||
+  die "lease duration or authorization cutoff was rejected"
 IFS=$'\t' read -r deadline_now LEASE_MINUTES CLEANUP_EPOCH HARD_DEADLINE_EPOCH <<<"${deadline_fields}"
 [[ "${deadline_now}" == "${NOW_EPOCH}" && "${LEASE_MINUTES}" =~ ^[0-9]+$ &&
   "${CLEANUP_EPOCH}" =~ ^[0-9]+$ && "${HARD_DEADLINE_EPOCH}" =~ ^[0-9]+$ ]] || die "deadline helper returned malformed output"

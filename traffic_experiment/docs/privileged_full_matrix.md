@@ -227,3 +227,32 @@ sudo "$LAUNCHER" resume \
 The launcher remains fail-closed when the selected GPU is occupied, its pilot
 admission is absent, required ports are in use, the repository has drifted, or
 the service configuration no longer matches the measured release.
+
+## Bounded automatic resume
+
+The installed GPU waiter can queue an ordinary resume while the immutable run
+plan's GPU is occupied. It does not reserve GPU memory and does not hold the
+shared topology lock while waiting. One root-owned `tmux` process polls the
+recorded GPU identity; an independent systemd timer stops that waiter at an
+absolute authorization cutoff. The cutoff must be at least 20 minutes and no
+more than two hours from the queue command.
+
+```bash
+WAITER=/opt/commu-secure-matrix/releases/COMMIT/repository/traffic_experiment/scripts/33_wait_for_privileged_matrix_gpu.sh
+
+sudo "$WAITER" wait-resume \
+  --run-id main-YYYYMMDDThhmmssZ \
+  --source-repository-sha RUN_PLAN_COMMIT \
+  --gpu-index 1 \
+  --authorization-cutoff-epoch EPOCH \
+  --max-lease 110m
+```
+
+`--gpu-index` is a **pinned-GPU assertion**: it must match `RUN_PLAN.json` and
+is never a request to move the run. When that exact GPU, the required ports,
+and the project namespace are free, the waiter validates current matrix state
+and submits ordinary `resume` once. The segment's hard deadline is capped at
+the same authorization cutoff. If the GPU stays busy, the matrix is already
+complete, inventory fails, or launch validation fails, the waiter exits without
+blind retries. Moving to another GPU still requires `continue-on-gpu`, a new
+immutable target root, and separate GPU provenance.

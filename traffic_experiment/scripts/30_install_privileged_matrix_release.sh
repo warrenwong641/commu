@@ -643,8 +643,10 @@ RUNTIME_MANIFEST="${RELEASE}/INSTALLED_RUNTIME_FILES.sha256"
 /usr/bin/chmod 0555 "${CADDY}"
 RUNNER="${RELEASE}/repository/traffic_experiment/scripts/31_run_privileged_matrix.sh"
 SEGMENT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"
+WAIT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/33_wait_for_privileged_matrix_gpu.sh"
 /usr/bin/chmod 0555 "${RUNNER}"
 /usr/bin/chmod 0555 "${SEGMENT_LAUNCHER}"
+/usr/bin/chmod 0555 "${WAIT_LAUNCHER}"
 [[ -z "$(/usr/bin/find "${RELEASE}" \( ! -user root -o -perm /022 \) -print -quit)" ]] ||
   die "release ownership/mode hardening failed"
 
@@ -684,12 +686,16 @@ exec 8<>"${GLOBAL_LOCK}" || die "cannot open existing shared topology lock"
 
 RUNNER="${DESTINATION}/repository/traffic_experiment/scripts/31_run_privileged_matrix.sh"
 SEGMENT_LAUNCHER="${DESTINATION}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"
+WAIT_LAUNCHER="${DESTINATION}/repository/traffic_experiment/scripts/33_wait_for_privileged_matrix_gpu.sh"
 [[ -f "${RUNNER}" && -x "${RUNNER}" ]] || die "release runner is missing"
 [[ -f "${SEGMENT_LAUNCHER}" && -x "${SEGMENT_LAUNCHER}" ]] ||
   die "release segment launcher is missing"
+[[ -f "${WAIT_LAUNCHER}" && -x "${WAIT_LAUNCHER}" ]] ||
+  die "release GPU waiter is missing"
 trap - EXIT
 /usr/bin/find "${INSTALL_ROOT}" -depth -delete
 printf 'PRIVILEGED_MATRIX_RELEASE_INSTALLED repository_sha=%s\n' "${REPOSITORY_SHA}"
 printf 'release_root=%s\n' "${DESTINATION}"
 printf 'run_command=sudo %s run --service-state /absolute/path/to/service.state --run-id SAFE_ID\n' "${RUNNER}"
 printf 'segment_command=sudo %s new --run-id SAFE_ID --gpu-index N --lease 2h\n' "${SEGMENT_LAUNCHER}"
+printf 'wait_command=sudo %s wait-resume --run-id SAFE_ID --source-repository-sha 40_HEX --gpu-index N --authorization-cutoff-epoch EPOCH\n' "${WAIT_LAUNCHER}"

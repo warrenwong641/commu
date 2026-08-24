@@ -17,6 +17,7 @@ BUILDER = SCRIPTS / "29_create_privileged_matrix_bundle.sh"
 INSTALLER = SCRIPTS / "30_install_privileged_matrix_release.sh"
 SUPERVISOR = SCRIPTS / "31_run_privileged_matrix.sh"
 SEGMENT_LAUNCHER = SCRIPTS / "32_launch_privileged_matrix_segment.sh"
+WAIT_LAUNCHER = SCRIPTS / "33_wait_for_privileged_matrix_gpu.sh"
 STATE_TOOL = SCRIPTS / "privileged_matrix_state.py"
 REQUEST_TOOL = SCRIPTS / "privileged_matrix_request.py"
 CONFIG_TOOL = SCRIPTS / "privileged_matrix_config.py"
@@ -77,6 +78,63 @@ def test_segment_launcher_has_gpu_portable_relative_lease_interface() -> None:
     assert 'SERVICE_RUNTIME_ROOT="${ATTEMPT_DIR}/runtime"' not in text
     assert 'SEGMENT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"' in installer
     assert '/usr/bin/chmod 0555 "${SEGMENT_LAUNCHER}"' in installer
+    assert '--authorization-cutoff "${AUTHORIZATION_CUTOFF_EPOCH}"' in text
+
+
+def test_gpu_waiter_is_bounded_detached_and_pinned_to_the_run_plan() -> None:
+    text = WAIT_LAUNCHER.read_text()
+    installer = INSTALLER.read_text()
+    assert "wait-resume" in text
+    assert "--authorization-cutoff-epoch EPOCH" in text
+    assert "--gpu-index is an assertion" in text
+    assert "this script never changes it" in text
+    assert '/usr/bin/timeout --signal=TERM --kill-after=2s 10s /usr/bin/nvidia-smi' in text
+    assert '"${inventory}" == "${GPU_UUID}"' in text
+    assert "vllm-topology" not in text
+    assert 'exec 8<>"${TARGET_LOCK}"' in text
+    assert '/usr/bin/flock -n 8' in text
+    assert 'set -o noclobber; : >"${TARGET_LOCK}"' in text
+    assert 'schema=commu-matrix-waiter-active-v1' in text
+    assert '"${ACTIVE_REGISTRATION}" == "${WAIT_LOCK_ROOT}/active-${TARGET_ID}.state"' in text
+    assert 'die "this immutable run target already has a bounded waiter registration"' in text
+    assert "remove_active_registration_locked" in text
+    assert 'WAIT_RESUME_EXPIRED_WITHOUT_LAUNCH' in text
+    assert 'die "authoritative matrix resume launch failed; it was not retried"' in text
+    worker = text[text.index("wait_main() {") : text.index("expire_wait_main() {")]
+    assert worker.count('if "${LAUNCHER}" "${launch_args[@]}"; then') == 1
+    assert '--authorization-cutoff-epoch "${AUTHORIZATION_CUTOFF_EPOCH}"' in worker
+    timer_start = text.index('/usr/bin/systemd-run --unit="${TIMER_BASE}"')
+    waiter_start = text.index('/usr/bin/tmux new-session -d -s "${SESSION}"')
+    assert timer_start < waiter_start
+    runtime_check = text[text.index("shared_runtime_is_free() {") : text.index("wait_main() {")]
+    assert 'tcp_listeners="$(/usr/bin/ss' in runtime_check
+    assert 'udp_listeners="$(/usr/bin/ss' in runtime_check
+    assert 'netns_rows="$(/usr/bin/ip netns list)" || die' in runtime_check
+    assert "| /usr/bin/grep" not in runtime_check
+    assert text.index('if [[ "${ACTION}" == _expire-wait ]]') < text.index("release_precheck\ncase")
+    assert 'load_expiry_record "${id}"' in text
+    expiry = text[text.index("expire_wait_main() {") : text.index('ACTION="${1:-}"')]
+    assert "load_wait_record" not in expiry
+    assert "outcome.state" in text
+    assert "MATRIX_WAIT_RESUME_FINISHED_EARLY" in text
+    assert '/usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${WAITERS_ROOT}"' in text
+    assert '/usr/bin/install -o root -g "${SERVICE_GID}" -m 0640 /dev/null "${WAIT_LOG}"' in text
+    assert 'WAIT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/33_wait_for_privileged_matrix_gpu.sh"' in installer
+    assert '/usr/bin/chmod 0555 "${WAIT_LAUNCHER}"' in installer
+    assert '[[ -f "${WAIT_LAUNCHER}" && -x "${WAIT_LAUNCHER}" ]]' in installer
+
+
+def test_gpu_waiter_clean_environment_marker_is_shell_local() -> None:
+    text = WAIT_LAUNCHER.read_text()
+    marker = 'declare -r COMMU_MATRIX_WAITER_CLEAN_ENV="1"'
+    assert f'"${{CLEAN_ENV_DECLARATION}}" != \'{marker}\'' in text
+    assert "readonly COMMU_MATRIX_WAITER_CLEAN_ENV=1" in text
+    assert f"'{marker}'" in text
+    clean_exec = text.split("fi\nPATH=", 1)[0]
+    assert "/usr/bin/env -i" in clean_exec
+    assert "/usr/bin/bash -p -c" in clean_exec
+    assert 'source "${waiter}" "$@"' in clean_exec
+    assert 'COMMU_MATRIX_WAITER_CLEAN_ENV=1 \\' not in clean_exec
 
 
 def test_segment_launcher_clean_environment_marker_is_shell_local() -> None:

@@ -123,6 +123,10 @@ the weighted average is 5,250 input tokens per call.
   installer for the separate matrix release.
 - scripts/31_run_privileged_matrix.sh: GPU-scoped 2,808-call root supervisor
   with immutable plan, strict resume identity, and sealed results.
+- scripts/32_launch_privileged_matrix_segment.sh: bounded segment launcher with
+  independent cleanup and immutable GPU identity checks.
+- scripts/33_wait_for_privileged_matrix_gpu.sh: detached, bounded resume queue
+  that waits without reserving the run plan's pinned GPU.
 - `scripts/discover_capture_interface.sh`: capture-interface discovery.
 - `scripts/run_physical_client.sh`: physical-client pilot runner.
 

@@ -142,6 +142,51 @@ def test_deadlines_are_derived_from_one_clock_reading() -> None:
     assert plan.hard_deadline_epoch == 1_787_405_400
 
 
+def test_bounded_deadline_caps_requested_lease_at_authorization_cutoff() -> None:
+    launch = load_module()
+    plan = launch.plan_bounded_deadlines(1_000, "110m", 4_661)
+    assert plan.now_epoch == 1_000
+    assert plan.lease_minutes == 61
+    assert plan.cleanup_epoch == 4_060
+    assert plan.hard_deadline_epoch == 4_660
+    assert plan.hard_deadline_epoch <= 4_661
+
+
+def test_bounded_deadline_preserves_shorter_requested_lease() -> None:
+    launch = load_module()
+    plan = launch.plan_bounded_deadlines(1_000, "30m", 5_000)
+    assert plan.lease_minutes == 30
+    assert plan.cleanup_epoch == 2_200
+    assert plan.hard_deadline_epoch == 2_800
+
+
+@pytest.mark.parametrize(
+    "now, cutoff, match",
+    [
+        (1_000, 1_000, "later than"),
+        (1_000, 999, "later than"),
+        (1_000, 2_199, "at least 20"),
+        (1_000, 8_201, "no more than two hours"),
+    ],
+)
+def test_bounded_deadline_rejects_invalid_authorization_window(
+    now: int, cutoff: int, match: str
+) -> None:
+    launch = load_module()
+    with pytest.raises(launch.LaunchConfigError, match=match):
+        launch.plan_bounded_deadlines(now, "110m", cutoff)
+
+
+def test_bounded_deadline_accepts_exact_policy_boundaries() -> None:
+    launch = load_module()
+    minimum = launch.plan_bounded_deadlines(1_000, "120m", 2_200)
+    maximum = launch.plan_bounded_deadlines(1_000, "120m", 8_200)
+    assert minimum.lease_minutes == 20
+    assert minimum.hard_deadline_epoch == 2_200
+    assert maximum.lease_minutes == 120
+    assert maximum.hard_deadline_epoch == 8_200
+
+
 @pytest.mark.parametrize("value", ["main-1", "main.20260822", "a", "0_safe"])
 def test_run_id_accepts_safe_single_path_components(value: str) -> None:
     launch = load_module()
@@ -625,6 +670,29 @@ def test_deadline_and_resume_cli_outputs(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert json.loads(result.stdout)["gpu_uuid"].startswith("GPU-2783")
+
+
+def test_deadline_cli_applies_absolute_authorization_cutoff() -> None:
+    result = run_cli(
+        "deadline",
+        "--now", "1000",
+        "--lease", "110m",
+        "--authorization-cutoff", "4661",
+    )
+    assert result.returncode == 0
+    assert result.stdout == "1000\t61\t4060\t4660\n"
+
+
+def test_deadline_cli_rejects_noncanonical_authorization_cutoff() -> None:
+    result = run_cli(
+        "deadline",
+        "--now", "1000",
+        "--lease", "30m",
+        "--authorization-cutoff", "04661",
+    )
+    assert result.returncode == 2
+    assert not result.stdout
+    assert "canonical decimal" in result.stderr
 
 
 def test_materialize_cli_output(tmp_path: Path) -> None:
