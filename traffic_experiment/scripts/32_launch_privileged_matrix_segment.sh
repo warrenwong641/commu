@@ -58,14 +58,19 @@ Usage:
     [--authorization-cutoff-epoch EPOCH] \
     [--service-config-template POLICY_SCOPED_PATH]
   32_launch_privileged_matrix_segment.sh continue-on-gpu \
-    --parent-run-id SAFE_ID --parent-source-repository-sha 40_HEX \
+    --parent-run-id SAFE_ID --parent-run-repository-sha 40_HEX \
     --run-id NEW_SAFE_ID --gpu-index N --lease 20|115m|2h \
+    [--authorization-cutoff-epoch EPOCH] \
+    [--bootstrap-admission-if-missing] \
     [--service-config-template POLICY_SCOPED_PATH]
 
 For resume, --gpu-index is an assertion only. The immutable RUN_PLAN.json
 selects the GPU. A new run must use a new run ID.
 continue-on-gpu is the only cross-GPU path: it creates a separate target root,
 snapshots the immutable parent ledger, and never writes the parent run.
+--parent-source-repository-sha remains a compatibility alias for
+--parent-run-repository-sha.  The launcher derives the frozen service/pilot
+source from the immutable parent plan instead of trusting a caller override.
 EOF
   exit 2
 }
@@ -176,6 +181,8 @@ verify_measurement_source() {
     "$(kv_value repository_sha "${source_pilot}/RELEASE_METADATA")" == "${source_sha}" &&
     "$(kv_value repository_sha "${source_pilot}/policy/service.state")" == "${source_sha}" ]] ||
     die "source matrix/pilot release identity mismatch"
+  SOURCE_PILOT_RUNNER="${source_pilot}/repository/traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh"
+  regular_root_file "${SOURCE_PILOT_RUNNER}" || die "unsafe source pilot runner"
   MEASUREMENT_RELEASE_ROOT="${source_matrix}"
   MEASUREMENT_CONFIG="${source_matrix}/config/server.env"
   MEASUREMENT_CONFIG_SHA256="$(sha256_file "${MEASUREMENT_CONFIG}")"
@@ -207,19 +214,20 @@ import json, sys
 identity = json.loads(sys.argv[1])
 for name in ("repository_sha", "gpu_index", "gpu_uuid", "active_config_sha256", "run_plan_sha256"):
     sys.stdout.buffer.write(str(identity[name]).encode("ascii") + b"\0")
-for name in ("parent_matrix_root", "parent_repository_sha"):
+for name in ("parent_matrix_root", "parent_repository_sha", "service_repository_sha"):
     value = identity[name]
     sys.stdout.buffer.write(("" if value is None else str(value)).encode("ascii") + b"\0")
 PY
   )
-  [[ "${#plan_fields[@]}" -eq 7 ]] || die "incomplete run-plan identity"
+  [[ "${#plan_fields[@]}" -eq 8 ]] || die "incomplete run-plan identity"
   RUN_REPOSITORY_SHA="${plan_fields[0]}"
   GPU_INDEX="${plan_fields[1]}"
   GPU_UUID="${plan_fields[2]}"
   PLAN_ACTIVE_CONFIG_SHA256="${plan_fields[3]}"
   PLAN_SHA256="${plan_fields[4]}"
   PARENT_MATRIX_ROOT="${plan_fields[5]}"
-  PARENT_SOURCE_REPOSITORY_SHA="${plan_fields[6]}"
+  PARENT_RUN_REPOSITORY_SHA="${plan_fields[6]}"
+  SERVICE_REPOSITORY_SHA="${plan_fields[7]}"
   [[ -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" == "${RUN_REPOSITORY_SHA}" ]] ||
     die "source repository assertion differs from RUN_PLAN.json"
 }
@@ -231,7 +239,7 @@ find_parent_plan() {
     parent="$(/usr/bin/basename -- "$(/usr/bin/dirname -- "${candidate}")")"
     [[ "${parent}" == "${PARENT_RUN_ID}" ]] || continue
     case "${candidate}" in
-      "/var/lib/commu-secure-matrix/${PARENT_SOURCE_REPOSITORY_SHA}/"*/runs/"${PARENT_RUN_ID}"/RUN_PLAN.json) ;;
+      "/var/lib/commu-secure-matrix/${PARENT_RUN_REPOSITORY_SHA}/"*/runs/"${PARENT_RUN_ID}"/RUN_PLAN.json) ;;
       *) continue ;;
     esac
     candidates+=("${candidate}")
@@ -246,14 +254,15 @@ find_parent_plan() {
   mapfile -d '' -t parent_fields < <(/usr/bin/python3 -I - "${identity_json}" <<'PY'
 import json, sys
 identity = json.loads(sys.argv[1])
-for name in ("repository_sha", "run_id", "gpu_index", "gpu_uuid"):
+for name in ("repository_sha", "run_id", "gpu_index", "gpu_uuid", "service_repository_sha"):
     sys.stdout.buffer.write(str(identity[name]).encode("ascii") + b"\0")
 PY
   )
-  [[ "${#parent_fields[@]}" -eq 4 && "${parent_fields[0]}" == "${PARENT_SOURCE_REPOSITORY_SHA}" &&
+  [[ "${#parent_fields[@]}" -eq 5 && "${parent_fields[0]}" == "${PARENT_RUN_REPOSITORY_SHA}" &&
     "${parent_fields[1]}" == "${PARENT_RUN_ID}" ]] || die "parent run/source assertion differs from RUN_PLAN.json"
   PARENT_GPU_INDEX="${parent_fields[2]}"
   PARENT_GPU_UUID="${parent_fields[3]}"
+  SERVICE_REPOSITORY_SHA="${parent_fields[4]}"
   PARENT_MATRIX_ROOT="$(/usr/bin/dirname -- "${PARENT_PLAN}")"
 }
 
@@ -316,8 +325,12 @@ load_record() {
   GPU_INDEX="$(record_value gpu_index)"; GPU_UUID="$(record_value gpu_uuid)"
   RUN_REPOSITORY_SHA="$(record_value run_repository_sha)"
   SERVICE_REPOSITORY_SHA="$(record_value service_repository_sha)"
+  PARENT_RUN_REPOSITORY_SHA="$(record_value parent_run_repository_sha)"
   MEASUREMENT_REPOSITORY_SHA="$(record_value measurement_repository_sha)"
   PARENT_MATRIX_ROOT="$(record_value parent_matrix_root)"
+  BOOTSTRAP_ADMISSION="$(record_value bootstrap_admission)"
+  SOURCE_PILOT_RUNNER="$(record_value source_pilot_runner)"
+  PILOT_UNIT="$(record_value pilot_unit)"
   MEASUREMENT_CONFIG="$(record_value measurement_config)"
   HARD_DEADLINE_EPOCH="$(record_value hard_deadline_epoch)"
   SERVICE_REPOSITORY_ROOT="$(record_value service_repository_root)"
@@ -327,20 +340,42 @@ load_record() {
     "${GPU_INDEX}" =~ ^(0|[1-9][0-9]*)$ && "${GPU_UUID}" =~ ^GPU-[0-9A-Fa-f-]+$ &&
     "${RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ && "${SERVICE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
     "${MEASUREMENT_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
+    ( "${PARENT_RUN_REPOSITORY_SHA}" == none || "${PARENT_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) &&
+    "${BOOTSTRAP_ADMISSION}" =~ ^[01]$ &&
     "${HARD_DEADLINE_EPOCH}" =~ ^[0-9]+$ && "${MEASUREMENT_CONFIG}" == "/opt/commu-secure-matrix/releases/${MEASUREMENT_REPOSITORY_SHA}/config/server.env" &&
     "${MATRIX_ROOT}" == "/var/lib/commu-secure-matrix/${RUN_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/${RUN_ID}" ]] ||
     die "segment record contains unsafe values"
   if [[ "${PARENT_MATRIX_ROOT}" == none ]]; then
-    [[ "${MODE}" != continue-on-gpu ]] || die "continuation record has no parent"
+    [[ "${MODE}" != continue-on-gpu && "${PARENT_RUN_REPOSITORY_SHA}" == none ]] ||
+      die "continuation record has no parent"
   else
     case "${PARENT_MATRIX_ROOT}" in
-      "/var/lib/commu-secure-matrix/${SERVICE_REPOSITORY_SHA}"/gpu-[0-9]*-GPU-*/runs/*) ;;
+      "/var/lib/commu-secure-matrix/${PARENT_RUN_REPOSITORY_SHA}"/gpu-[0-9]*-GPU-*/runs/*) ;;
       *) die "segment record has an unsafe parent matrix root" ;;
     esac
     [[ "${MODE}" != new && "${RUN_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" &&
       "${MEASUREMENT_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" ]] ||
       die "continuation segment release identities are inconsistent"
   fi
+  if [[ "${BOOTSTRAP_ADMISSION}" == 1 ]]; then
+    [[ "${MODE}" == continue-on-gpu &&
+      "${SOURCE_PILOT_RUNNER}" == "/opt/commu-protocol-pilots/releases/${SERVICE_REPOSITORY_SHA}/repository/traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh" &&
+      "${PILOT_UNIT}" == "commu-matrix-${RECORD_ID}-pilot.service" ]] ||
+      die "segment record has an unsafe pilot-bootstrap identity"
+    regular_root_file "${SOURCE_PILOT_RUNNER}" || die "segment pilot runner is unsafe"
+  else
+    [[ "${SOURCE_PILOT_RUNNER}" == none && "${PILOT_UNIT}" == none ]] ||
+      die "unexpected pilot runner in segment record"
+  fi
+}
+
+pilot_main() {
+  local id="$1"
+  load_record "${id}"
+  [[ "${BOOTSTRAP_ADMISSION}" == 1 ]] || die "pilot worker record does not request admission bootstrap"
+  "${SOURCE_PILOT_RUNNER}" check --service-state "${STATE}"
+  "${SOURCE_PILOT_RUNNER}" run --service-state "${STATE}"
+  "${SOURCE_PILOT_RUNNER}" admission --service-state "${STATE}"
 }
 
 stop_service() {
@@ -440,12 +475,168 @@ stop_caddy_exact() {
   /usr/bin/rm -- "${state}"
 }
 
+stop_pilot_unit() {
+  local active
+  [[ "${BOOTSTRAP_ADMISSION}" == 1 ]] || return 0
+  active="$(/usr/bin/systemctl is-active "${PILOT_UNIT}" 2>/dev/null || true)"
+  case "${active}" in
+    active|activating|deactivating)
+      /usr/bin/systemctl stop "${PILOT_UNIT}" || return 1
+      ;;
+    inactive|failed|unknown|"") ;;
+    *) return 1 ;;
+  esac
+  ! /usr/bin/systemctl is-active --quiet "${PILOT_UNIT}" 2>/dev/null
+}
+
+stop_pilot_caddy_exact() {
+  local lifecycle="$1" expected_caddy expected_config owner_pid network_owned namespace host_veth
+  local caddy_owned worker_count pid ticks config live_ticks live_state index
+  local -a args=() expected=() keys=() expected_keys=(
+    owner_pid network_owned namespace host_veth caddy_owned worker_count
+    caddy_pid caddy_start_ticks caddy_config
+  )
+  expected_caddy="/opt/commu-protocol-pilots/releases/${SERVICE_REPOSITORY_SHA}/repository/traffic_experiment/.tools/caddy"
+  expected_config="/opt/commu-protocol-pilots/releases/${SERVICE_REPOSITORY_SHA}/repository/traffic_experiment/configs/Caddyfile.single"
+  [[ -f "${lifecycle}" && ! -L "${lifecycle}" &&
+    "$(/usr/bin/stat -c %u:%g:%a:%h -- "${lifecycle}")" == 0:0:600:1 ]] ||
+    die "pilot lifecycle state is unsafe"
+  mapfile -t keys < <(/usr/bin/awk -F= '{print $1}' "${lifecycle}")
+  [[ "${#keys[@]}" -eq "${#expected_keys[@]}" ]] || die "pilot lifecycle key count is malformed"
+  for index in "${!expected_keys[@]}"; do
+    [[ "${keys[index]}" == "${expected_keys[index]}" ]] || die "pilot lifecycle keys are malformed"
+  done
+  owner_pid="$(kv_value owner_pid "${lifecycle}")"
+  network_owned="$(kv_value network_owned "${lifecycle}")"
+  namespace="$(kv_value namespace "${lifecycle}")"
+  host_veth="$(kv_value host_veth "${lifecycle}")"
+  caddy_owned="$(kv_value caddy_owned "${lifecycle}")"
+  worker_count="$(kv_value worker_count "${lifecycle}")"
+  pid="$(kv_value caddy_pid "${lifecycle}")"
+  ticks="$(kv_value caddy_start_ticks "${lifecycle}")"
+  config="$(kv_value caddy_config "${lifecycle}")"
+  [[ "${owner_pid}" =~ ^[1-9][0-9]*$ && "${network_owned}" =~ ^[01]$ &&
+    "${namespace}" == llm-client && "${host_veth}" == llmhost0 &&
+    "${caddy_owned}" =~ ^[01]$ && "${worker_count}" == 1 &&
+    "${config}" == "${expected_config}" ]] || die "pilot lifecycle identity is malformed"
+  regular_root_file "${expected_caddy}" && regular_root_file "${expected_config}" ||
+    die "source-pilot Caddy files are unsafe"
+  if [[ "${caddy_owned}" == 0 ]]; then
+    [[ -z "${pid}" && -z "${ticks}" ]] || die "unowned pilot Caddy has process identity"
+    return 0
+  fi
+  [[ "${pid}" =~ ^[1-9][0-9]*$ && "${ticks}" =~ ^[1-9][0-9]*$ ]] ||
+    die "owned pilot Caddy identity is malformed"
+  if [[ ! -r "/proc/${pid}/stat" ]]; then
+    return 0
+  fi
+  live_ticks="$(proc_ticks "${pid}" 2>/dev/null || true)"
+  live_state="$(proc_state "${pid}" 2>/dev/null || true)"
+  if [[ "${live_ticks}" != "${ticks}" || "${live_state}" == Z ]]; then
+    return 0
+  fi
+  proc_args "${pid}" args || die "cannot read recorded pilot Caddy arguments"
+  expected=("${expected_caddy}" run --config "${expected_config}" --adapter caddyfile)
+  [[ "$(proc_uid "${pid}")" == 0 && "$(proc_exe "${pid}")" == "${expected_caddy}" &&
+    "${#args[@]}" -eq "${#expected[@]}" ]] || die "live pilot Caddy identity is ambiguous"
+  for index in "${!expected[@]}"; do
+    [[ "${args[index]}" == "${expected[index]}" ]] || die "live pilot Caddy arguments are ambiguous"
+  done
+  [[ "$(proc_ticks "${pid}" 2>/dev/null || true)" == "${ticks}" &&
+    "$(proc_uid "${pid}")" == 0 && "$(proc_exe "${pid}")" == "${expected_caddy}" ]] ||
+    die "pilot Caddy identity changed before SIGTERM"
+  /usr/bin/kill -TERM "${pid}"
+  for _ in $(/usr/bin/seq 1 100); do
+    [[ "$(proc_ticks "${pid}" 2>/dev/null || true)" != "${ticks}" ||
+      "$(proc_state "${pid}" 2>/dev/null || true)" == Z ]] && break
+    /usr/bin/sleep .1
+  done
+  if [[ "$(proc_ticks "${pid}" 2>/dev/null || true)" == "${ticks}" &&
+    "$(proc_state "${pid}" 2>/dev/null || true)" != Z ]]; then
+    [[ "$(proc_uid "${pid}")" == 0 && "$(proc_exe "${pid}")" == "${expected_caddy}" ]] ||
+      die "pilot Caddy identity changed before forced stop"
+    /usr/bin/kill -KILL "${pid}"
+    for _ in $(/usr/bin/seq 1 100); do
+      [[ "$(proc_ticks "${pid}" 2>/dev/null || true)" != "${ticks}" ||
+        "$(proc_state "${pid}" 2>/dev/null || true)" == Z ]] && break
+      /usr/bin/sleep .1
+    done
+  fi
+  [[ "$(proc_ticks "${pid}" 2>/dev/null || true)" != "${ticks}" ||
+    "$(proc_state "${pid}" 2>/dev/null || true)" == Z ]] ||
+    die "exact pilot Caddy process did not stop"
+}
+
+cleanup_pilot_bootstrap_resources() {
+  local pilot_scope protocol_root network_state network_script global_lock netns_rows link_rows lifecycle
+  local -a lifecycle_states=()
+  [[ "${BOOTSTRAP_ADMISSION}" == 1 ]] || return 0
+  pilot_scope="/var/lib/commu-protocol-pilots/${SERVICE_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}"
+  protocol_root="${pilot_scope}/runs/protocol_validation"
+  network_state="${pilot_scope}/network_state/llm-client.llmhost0.state"
+  network_script="/opt/commu-protocol-pilots/releases/${SERVICE_REPOSITORY_SHA}/repository/traffic_experiment/scripts/11_network_condition.sh"
+  global_lock="/run/lock/commu-protocol-pilots/vllm-topology-${SERVICE_UID}.lock"
+  [[ -f "${global_lock}" && ! -L "${global_lock}" &&
+    "$(/usr/bin/stat -c %u:%g:%a:%h -- "${global_lock}")" == "0:${SERVICE_GID}:660:1" ]] ||
+    die "pilot cleanup topology lock is unsafe"
+  exec 6<>"${global_lock}" || die "cannot open pilot cleanup topology lock"
+  /usr/bin/flock -w 30 6 || { exec 6>&-; die "pilot cleanup topology remained busy for 30 seconds"; }
+  if [[ -e "${protocol_root}" || -L "${protocol_root}" ]]; then
+    [[ -d "${protocol_root}" && ! -L "${protocol_root}" &&
+      "$(/usr/bin/stat -c %u:%g:%a -- "${protocol_root}")" == 0:0:700 ]] ||
+      die "pilot protocol root is unsafe during cleanup"
+    mapfile -d '' -t lifecycle_states < <(/usr/bin/find -P "${protocol_root}" -mindepth 1 -maxdepth 1 \
+      -type f -name '.lifecycle-[0-9]*.state' -print0)
+  fi
+  for lifecycle in "${lifecycle_states[@]}"; do
+    stop_pilot_caddy_exact "${lifecycle}"
+  done
+  if [[ -e "${network_state}" || -L "${network_state}" ]]; then
+    [[ -f "${network_state}" && ! -L "${network_state}" &&
+      "$(/usr/bin/stat -c %u:%g:%a:%h -- "${network_state}")" == 0:0:600:1 ]] ||
+      die "pilot network ownership state is unsafe"
+    regular_root_file "${network_script}" || die "source-pilot network cleanup script is unsafe"
+    /usr/bin/env -i HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC PATH="${FIXED_PATH}" \
+      CLIENT_NETNS=llm-client HOST_VETH=llmhost0 CLIENT_VETH=llmclient0 NETWORK_MTU=1500 \
+      NETWORK_STATE_FILE="${network_state}" /usr/bin/bash -p "${network_script}" reset ||
+      die "verified pilot network cleanup failed"
+  fi
+  netns_rows="$(/usr/bin/ip netns list)" || die "cannot verify pilot network namespace cleanup"
+  ! /usr/bin/grep -Eq '^llm-client([[:space:]]|$)' <<<"${netns_rows}" ||
+    die "pilot network namespace remains after cleanup"
+  link_rows="$(/usr/bin/ip -o link show)" || die "cannot verify pilot network link cleanup"
+  ! /usr/bin/grep -Eq '^[0-9]+: llmhost0(@[^:[:space:]]+)?:' <<<"${link_rows}" ||
+    die "pilot host link remains after cleanup"
+  tcp_port_closed 443 && udp_port_closed 443 &&
+    tcp_port_closed 8443 && udp_port_closed 8443 &&
+    tcp_port_closed 8444 && udp_port_closed 8444 &&
+    tcp_port_closed 8543 && udp_port_closed 8543 &&
+    tcp_port_closed 8544 && udp_port_closed 8544 ||
+    die "protected listener remains after pilot cleanup"
+  for lifecycle in "${lifecycle_states[@]}"; do
+    /usr/bin/rm -- "${lifecycle}"
+  done
+  /usr/bin/flock -u 6 || { exec 6>&-; die "could not release pilot cleanup topology lock"; }
+  exec 6>&-
+}
+
 cleanup_owned_resources() {
-  local network_script network_state caddy_state cleanup_failed=0 state_status="" gpu_processes active_units netns_rows link_rows
+  local network_script network_state caddy_state cleanup_failed=0 pilot_unit_stopped=1
+  local state_status="" gpu_processes active_units netns_rows link_rows
+  if ! stop_pilot_unit; then
+    printf 'WARN: pilot bootstrap unit stop could not be proved; preserving its state\n' >&2
+    pilot_unit_stopped=0
+    cleanup_failed=1
+  fi
   if ! stop_service; then
     printf 'WARN: verified service stop failed; continuing exact proxy/network cleanup\n' >&2
     cleanup_failed=1
   fi
+  # A completed bootstrap and the measured matrix use the same protected
+  # listener names, but never at the same time.  Tear down any matrix-owned
+  # proxy/network state first; only then inspect the pilot namespace for
+  # leftovers.  Otherwise an interrupted matrix Caddy could be mistaken for a
+  # failed pilot cleanup and prevent its own exact teardown.
   caddy_state="/var/lib/commu-secure-matrix/${RUN_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/caddy/matrix-caddy.state"
   stop_caddy_exact "${caddy_state}"
   network_script="/opt/commu-secure-matrix/releases/${MEASUREMENT_REPOSITORY_SHA}/repository/traffic_experiment/scripts/11_network_condition.sh"
@@ -453,6 +644,16 @@ cleanup_owned_resources() {
   if [[ -f "${network_state}" && ! -L "${network_state}" ]]; then
     regular_root_file "${network_script}" || die "unsafe network cleanup script"
     NETWORK_STATE_FILE="${network_state}" /usr/bin/bash -p "${network_script}" reset || cleanup_failed=1
+  fi
+  if (( pilot_unit_stopped == 1 )); then
+    # Isolate the strict pilot cleanup so an ambiguous pilot artifact is
+    # preserved and reported without aborting the independent matrix/service
+    # verification below.  Any flock file descriptor is also closed when the
+    # subshell returns.
+    if ! (cleanup_pilot_bootstrap_resources); then
+      printf 'WARN: verified pilot-bootstrap cleanup failed; preserving its state\n' >&2
+      cleanup_failed=1
+    fi
   fi
   if ! netns_rows="$(/usr/bin/ip netns list 2>/dev/null)"; then
     cleanup_failed=1
@@ -571,9 +772,15 @@ segment_main() {
     --state "${STATE}" --repository-root "${SERVICE_REPOSITORY_ROOT}" \
     --config "${SERVICE_CONFIG}" --log "${VLLM_LOG}" \
     --deadline-epoch "${HARD_DEADLINE_EPOCH}" --timeout 600
+  if [[ "${BOOTSTRAP_ADMISSION}" == 1 ]]; then
+    /usr/bin/systemd-run --quiet --wait --pipe --collect --service-type=exec \
+      --property=KillMode=control-group --unit="${PILOT_UNIT%.service}" \
+      /usr/bin/bash -p "${SELF}" _pilot --record-id "${id}"
+  fi
   runner_args=(--service-state "${STATE}" --run-id "${RUN_ID}")
   if [[ "${PARENT_MATRIX_ROOT}" != none ]]; then
     runner_args+=(--source-parent-repository-sha "${SERVICE_REPOSITORY_SHA}" \
+      --parent-run-repository-sha "${PARENT_RUN_REPOSITORY_SHA}" \
       --parent-matrix-root "${PARENT_MATRIX_ROOT}")
   elif [[ "${SERVICE_REPOSITORY_SHA}" != "${REPOSITORY_SHA}" ]]; then
     runner_args+=(--legacy-run-repository-sha "${SERVICE_REPOSITORY_SHA}")
@@ -616,9 +823,15 @@ ACTION="${1:-}"
 [[ -n "${ACTION}" ]] && shift || true
 release_precheck
 case "${ACTION}" in
-  _segment|_expire)
+  _segment|_expire|_pilot)
     [[ $# -eq 2 && "$1" == --record-id && "$2" =~ ^[0-9a-f]{16}$ ]] || die "invalid internal invocation"
-    if [[ "${ACTION}" == _segment ]]; then segment_main "$2"; else expire_main "$2"; fi
+    if [[ "${ACTION}" == _segment ]]; then
+      segment_main "$2"
+    elif [[ "${ACTION}" == _pilot ]]; then
+      pilot_main "$2"
+    else
+      expire_main "$2"
+    fi
     exit
     ;;
   new|resume|continue-on-gpu) MODE="${ACTION}" ;;
@@ -627,7 +840,8 @@ esac
 
 RUN_ID=""; LEASE=""; GPU_INDEX_ASSERTION=""; SOURCE_REPOSITORY_SHA=""; SERVICE_CONFIG_REQUESTED=""
 AUTHORIZATION_CUTOFF_EPOCH=""
-PARENT_RUN_ID=""; PARENT_SOURCE_REPOSITORY_SHA=""; PARENT_MATRIX_ROOT=""
+PARENT_RUN_ID=""; PARENT_RUN_REPOSITORY_SHA=""; PARENT_MATRIX_ROOT=""
+BOOTSTRAP_ADMISSION=0; BOOTSTRAP_ADMISSION_SET=0; SOURCE_PILOT_RUNNER=none
 while (($#)); do
   case "$1" in
     --run-id) [[ $# -ge 2 && -z "${RUN_ID}" ]] || usage; RUN_ID="$2"; shift 2 ;;
@@ -636,7 +850,12 @@ while (($#)); do
     --source-repository-sha) [[ $# -ge 2 && -z "${SOURCE_REPOSITORY_SHA}" ]] || usage; SOURCE_REPOSITORY_SHA="$2"; shift 2 ;;
     --authorization-cutoff-epoch) [[ $# -ge 2 && -z "${AUTHORIZATION_CUTOFF_EPOCH}" ]] || usage; AUTHORIZATION_CUTOFF_EPOCH="$2"; shift 2 ;;
     --parent-run-id) [[ $# -ge 2 && -z "${PARENT_RUN_ID}" ]] || usage; PARENT_RUN_ID="$2"; shift 2 ;;
-    --parent-source-repository-sha) [[ $# -ge 2 && -z "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || usage; PARENT_SOURCE_REPOSITORY_SHA="$2"; shift 2 ;;
+    --parent-run-repository-sha|--parent-source-repository-sha)
+      [[ $# -ge 2 && -z "${PARENT_RUN_REPOSITORY_SHA}" ]] || usage
+      PARENT_RUN_REPOSITORY_SHA="$2"; shift 2 ;;
+    --bootstrap-admission-if-missing)
+      [[ "${BOOTSTRAP_ADMISSION_SET}" -eq 0 ]] || usage
+      BOOTSTRAP_ADMISSION=1; BOOTSTRAP_ADMISSION_SET=1; shift ;;
     --service-config-template) [[ $# -ge 2 && -z "${SERVICE_CONFIG_REQUESTED}" ]] || usage; SERVICE_CONFIG_REQUESTED="$2"; shift 2 ;;
     *) usage ;;
   esac
@@ -646,13 +865,13 @@ done
   ( -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) &&
   ( -z "${AUTHORIZATION_CUTOFF_EPOCH}" || "${AUTHORIZATION_CUTOFF_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ) &&
   ( -z "${PARENT_RUN_ID}" || "${PARENT_RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ) &&
-  ( -z "${PARENT_SOURCE_REPOSITORY_SHA}" || "${PARENT_SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || usage
+  ( -z "${PARENT_RUN_REPOSITORY_SHA}" || "${PARENT_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || usage
 if [[ "${MODE}" != continue-on-gpu &&
-  ( -n "${PARENT_RUN_ID}" || -n "${PARENT_SOURCE_REPOSITORY_SHA}" ) ]]; then
+  ( -n "${PARENT_RUN_ID}" || -n "${PARENT_RUN_REPOSITORY_SHA}" || "${BOOTSTRAP_ADMISSION}" -eq 1 ) ]]; then
   usage
 fi
-if [[ -n "${AUTHORIZATION_CUTOFF_EPOCH}" && "${MODE}" != resume ]]; then
-  die "--authorization-cutoff-epoch is only valid for resume"
+if [[ -n "${AUTHORIZATION_CUTOFF_EPOCH}" && "${MODE}" != resume && "${MODE}" != continue-on-gpu ]]; then
+  die "--authorization-cutoff-epoch is only valid for resume or continue-on-gpu"
 fi
 
 PLAN=""; PLAN_SHA256=""; PLAN_ACTIVE_CONFIG_SHA256=""; RUN_REPOSITORY_SHA=""
@@ -664,8 +883,8 @@ if [[ "${MODE}" == new ]]; then
   RUN_REPOSITORY_SHA="${REPOSITORY_SHA}"
 elif [[ "${MODE}" == continue-on-gpu ]]; then
   [[ -n "${GPU_INDEX_ASSERTION}" && -n "${PARENT_RUN_ID}" &&
-    -n "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || die "continue-on-gpu requires parent run/source and target GPU"
-  [[ -z "${SOURCE_REPOSITORY_SHA}" ]] || die "use --parent-source-repository-sha for continue-on-gpu"
+    -n "${PARENT_RUN_REPOSITORY_SHA}" ]] || die "continue-on-gpu requires parent run/source and target GPU"
+  [[ -z "${SOURCE_REPOSITORY_SHA}" ]] || die "use --parent-run-repository-sha for continue-on-gpu"
   [[ "${RUN_ID}" != "${PARENT_RUN_ID}" ]] || die "target run ID must differ from parent run ID"
   find_parent_plan
   GPU_INDEX="${GPU_INDEX_ASSERTION}"
@@ -673,17 +892,17 @@ elif [[ "${MODE}" == continue-on-gpu ]]; then
   [[ "${GPU_UUID}" != "${PARENT_GPU_UUID}" ]] || die "target GPU must differ from the immutable parent GPU"
   RUN_REPOSITORY_SHA="${REPOSITORY_SHA}"
 else
-  [[ -z "${PARENT_RUN_ID}" && -z "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || usage
+  [[ -z "${PARENT_RUN_ID}" && -z "${PARENT_RUN_REPOSITORY_SHA}" ]] || usage
   find_resume_plan
   live_plan_uuid="${GPU_UUID}"
   resolve_gpu
   [[ "${GPU_UUID}" == "${live_plan_uuid}" ]] || die "physical GPU UUID differs from immutable RUN_PLAN.json"
 fi
 if [[ "${MODE}" == continue-on-gpu ]]; then
-  SERVICE_REPOSITORY_SHA="${PARENT_SOURCE_REPOSITORY_SHA}"
+  [[ "${SERVICE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ]] || die "parent plan has no frozen service source identity"
 elif [[ -n "${PARENT_MATRIX_ROOT}" ]]; then
-  [[ -n "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || die "continuation plan has no parent source identity"
-  SERVICE_REPOSITORY_SHA="${PARENT_SOURCE_REPOSITORY_SHA}"
+  [[ "${SERVICE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ && "${PARENT_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+    die "continuation plan has no parent/source identity"
 else
   SERVICE_REPOSITORY_SHA="${RUN_REPOSITORY_SHA}"
 fi
@@ -707,9 +926,20 @@ if [[ -n "${PARENT_MATRIX_ROOT}" ]]; then
   MEASUREMENT_CONFIG_SHA256="$(sha256_file "${MEASUREMENT_CONFIG}")"
 fi
 ADMISSION="/var/lib/commu-protocol-pilots/${SERVICE_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/protocol_validation/PROTOCOL_VALIDATION_OK"
-[[ -f "${ADMISSION}" && ! -L "${ADMISSION}" &&
-  "$(/usr/bin/stat -c %u:%a:%h -- "${ADMISSION}")" == 0:444:1 ]] ||
+if [[ -e "${ADMISSION}" || -L "${ADMISSION}" ]]; then
+  [[ -f "${ADMISSION}" && ! -L "${ADMISSION}" &&
+    "$(/usr/bin/stat -c %u:%a:%h -- "${ADMISSION}")" == 0:444:1 ]] ||
+    die "selected source/GPU protocol admission path is unsafe"
+  BOOTSTRAP_ADMISSION=0
+  SOURCE_PILOT_RUNNER=none
+elif [[ "${BOOTSTRAP_ADMISSION}" == 1 ]]; then
+  [[ "${MODE}" == continue-on-gpu &&
+    "${SOURCE_PILOT_RUNNER}" == "/opt/commu-protocol-pilots/releases/${SERVICE_REPOSITORY_SHA}/repository/traffic_experiment/scripts/28_run_privileged_protocol_pilots.sh" ]] ||
+    die "pilot bootstrap identity is not the frozen service source"
+  regular_root_file "${SOURCE_PILOT_RUNNER}" || die "source pilot runner is unsafe"
+else
   die "selected source/GPU has no safe protocol admission marker; run the pilot first"
+fi
 
 if [[ -z "${SERVICE_CONFIG_REQUESTED}" ]]; then
   SERVICE_CONFIG_REQUESTED="${SERVICE_STATE_ROOT}/qwen35-${SERVICE_REPOSITORY_SHA:0:7}/server.gpu${GPU_INDEX}.single.env"
@@ -736,13 +966,23 @@ SERVICE_REPOSITORY_ROOT="$(/usr/bin/readlink -e -- "${SERVICE_REPOSITORY_ROOT}")
 gpu_processes="$(/usr/bin/nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits)" || die "cannot query GPU processes"
 /usr/bin/awk -F, -v wanted="${GPU_UUID}" '{gsub(/[[:space:]]/, "", $1); if ($1 == wanted) found=1} END {exit found ? 0 : 1}' <<<"${gpu_processes}" &&
   die "selected GPU ${GPU_INDEX} is occupied"
-tcp_listeners="$(/usr/bin/ss -H -lnt '( sport = :8000 or sport = :8001 or sport = :8443 )')" ||
-  die "cannot query required TCP listeners"
-[[ -z "${tcp_listeners}" ]] || die "required TCP port is occupied"
-udp_listeners="$(/usr/bin/ss -H -lnu '( sport = :8444 )')" || die "cannot query required UDP listeners"
-[[ -z "${udp_listeners}" ]] || die "required UDP port is occupied"
+tcp_listeners="$(/usr/bin/ss -H -lnt)" || die "cannot query required TCP listeners"
+udp_listeners="$(/usr/bin/ss -H -lnu)" || die "cannot query required UDP listeners"
+for protected_port in 443 8443 8444 8543 8544; do
+  ! /usr/bin/grep -Eq ":${protected_port}[[:space:]]" <<<"${tcp_listeners}" ||
+    die "protected TCP port ${protected_port} is occupied"
+  ! /usr/bin/grep -Eq ":${protected_port}[[:space:]]" <<<"${udp_listeners}" ||
+    die "protected UDP port ${protected_port} is occupied"
+done
+for service_port in 8000 8001; do
+  ! /usr/bin/grep -Eq ":${service_port}[[:space:]]" <<<"${tcp_listeners}" ||
+    die "required service TCP port ${service_port} is occupied"
+done
 netns_rows="$(/usr/bin/ip netns list)" || die "cannot query network namespaces"
 /usr/bin/grep -Eq '^llm-client([[:space:]]|$)' <<<"${netns_rows}" && die "project network namespace already exists"
+link_rows="$(/usr/bin/ip -o link show)" || die "cannot query network links"
+/usr/bin/awk -F': ' '{name=$2; sub(/@.*/, "", name); print name}' <<<"${link_rows}" |
+  /usr/bin/grep -Fxq llmhost0 && die "project host link already exists"
 
 /usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${RECORDS_ROOT}"
 for _ in $(/usr/bin/seq 1 100); do
@@ -758,6 +998,11 @@ done
 /usr/bin/install -o root -g root -m 0600 /dev/null "${RECORD_DIR}/cleanup.lock"
 SESSION="commu-matrix-${RECORD_ID}"
 TIMER_BASE="${SESSION}-expiry"
+if [[ "${BOOTSTRAP_ADMISSION}" == 1 ]]; then
+  PILOT_UNIT="${SESSION}-pilot.service"
+else
+  PILOT_UNIT=none
+fi
 ATTEMPT_DIR="${SERVICE_STATE_ROOT}/qwen35-${SERVICE_REPOSITORY_SHA:0:7}/matrix-segments/${RECORD_ID}"
 /usr/bin/install -d -o "${SERVICE_UID}" -g "${SERVICE_GID}" -m 0700 "${ATTEMPT_DIR}"
 SERVICE_RUNTIME_ROOT="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" ensure-stable-runtime-root \
@@ -813,6 +1058,9 @@ RECORD="${RECORD_DIR}/record.state"
   printf 'schema=commu-matrix-segment-record-v1\nrecord_id=%s\nsession=%s\ntimer_base=%s\n' "${RECORD_ID}" "${SESSION}" "${TIMER_BASE}"
   printf 'release_repository_sha=%s\nrun_repository_sha=%s\nservice_repository_sha=%s\nrun_id=%s\nmode=%s\n' "${REPOSITORY_SHA}" "${RUN_REPOSITORY_SHA}" "${SERVICE_REPOSITORY_SHA}" "${RUN_ID}" "${MODE}"
   printf 'parent_matrix_root=%s\n' "${PARENT_MATRIX_ROOT:-none}"
+  printf 'parent_run_repository_sha=%s\n' "${PARENT_RUN_REPOSITORY_SHA:-none}"
+  printf 'bootstrap_admission=%s\nsource_pilot_runner=%s\npilot_unit=%s\n' \
+    "${BOOTSTRAP_ADMISSION}" "${SOURCE_PILOT_RUNNER}" "${PILOT_UNIT}"
   printf 'measurement_repository_sha=%s\n' "${MEASUREMENT_REPOSITORY_SHA}"
   printf 'gpu_index=%s\ngpu_uuid=%s\nplan_sha256=%s\n' "${GPU_INDEX}" "${GPU_UUID}" "${PLAN_SHA256:-none}"
   printf 'service_repository_root=%s\nservice_config=%s\nservice_config_sha256=%s\nservice_state=%s\n' "${SERVICE_REPOSITORY_ROOT}" "${SERVICE_CONFIG}" "${SERVICE_CONFIG_SHA256}" "${STATE}"

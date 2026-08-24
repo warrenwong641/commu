@@ -60,6 +60,7 @@ RUN_ID=""
 LEGACY_RUN_REPOSITORY_SHA=""
 PARENT_MATRIX_ROOT_REQUESTED=""
 SOURCE_PARENT_REPOSITORY_SHA=""
+PARENT_RUN_REPOSITORY_SHA=""
 while (($#)); do
   case "$1" in
     --service-state) [[ $# -ge 2 && -z "${SERVICE_STATE_REQUESTED}" ]] || break; SERVICE_STATE_REQUESTED="$2"; shift 2 ;;
@@ -67,6 +68,7 @@ while (($#)); do
     --legacy-run-repository-sha) [[ $# -ge 2 && -z "${LEGACY_RUN_REPOSITORY_SHA}" ]] || break; LEGACY_RUN_REPOSITORY_SHA="$2"; shift 2 ;;
     --parent-matrix-root) [[ $# -ge 2 && -z "${PARENT_MATRIX_ROOT_REQUESTED}" ]] || break; PARENT_MATRIX_ROOT_REQUESTED="$2"; shift 2 ;;
     --source-parent-repository-sha) [[ $# -ge 2 && -z "${SOURCE_PARENT_REPOSITORY_SHA}" ]] || break; SOURCE_PARENT_REPOSITORY_SHA="$2"; shift 2 ;;
+    --parent-run-repository-sha) [[ $# -ge 2 && -z "${PARENT_RUN_REPOSITORY_SHA}" ]] || break; PARENT_RUN_REPOSITORY_SHA="$2"; shift 2 ;;
     *) break ;;
   esac
 done
@@ -75,7 +77,7 @@ case "${ACTION}" in check|status|run|resume|continue-on-gpu) ;;
 esac
 if [[ -z "${ACTION}" || -z "${SERVICE_STATE_REQUESTED}" ||
   ! "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ || $# -ne 0 ]]; then
-  printf 'usage: %s {check|status|run|resume|continue-on-gpu} --service-state /absolute/path/to/service.state --run-id SAFE_ID [--legacy-run-repository-sha 40_HEX] [--parent-matrix-root /var/lib/commu-secure-matrix/SHA/gpu-N-GPU-UUID/runs/PARENT_ID --source-parent-repository-sha 40_HEX]\n' "$0" >&2
+  printf 'usage: %s {check|status|run|resume|continue-on-gpu} --service-state /absolute/path/to/service.state --run-id SAFE_ID [--legacy-run-repository-sha 40_HEX] [--parent-matrix-root /var/lib/commu-secure-matrix/SHA/gpu-N-GPU-UUID/runs/PARENT_ID --source-parent-repository-sha 40_HEX [--parent-run-repository-sha 40_HEX]]\n' "$0" >&2
   exit 2
 fi
 [[ -z "${LEGACY_RUN_REPOSITORY_SHA}" ||
@@ -90,11 +92,14 @@ fi
   exit 2
 }
 [[ ( -n "${PARENT_MATRIX_ROOT_REQUESTED}" && "${SOURCE_PARENT_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
+      ( -z "${PARENT_RUN_REPOSITORY_SHA}" || "${PARENT_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) &&
       -z "${LEGACY_RUN_REPOSITORY_SHA}" ) ||
-  ( -z "${PARENT_MATRIX_ROOT_REQUESTED}" && -z "${SOURCE_PARENT_REPOSITORY_SHA}" ) ]] || {
+  ( -z "${PARENT_MATRIX_ROOT_REQUESTED}" && -z "${SOURCE_PARENT_REPOSITORY_SHA}" &&
+    -z "${PARENT_RUN_REPOSITORY_SHA}" ) ]] || {
   printf 'ERROR: continuation parent root/source must be supplied together and cannot use legacy resume mode\n' >&2
   exit 2
 }
+PARENT_RUN_REPOSITORY_SHA="${PARENT_RUN_REPOSITORY_SHA:-${SOURCE_PARENT_REPOSITORY_SHA}}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -1179,7 +1184,7 @@ verify_parent_matrix_root() {
   resolved="$(/usr/bin/readlink -e -- "${PARENT_MATRIX_ROOT_REQUESTED}")" ||
     die "parent matrix root does not exist"
   case "${resolved}" in
-    "/var/lib/commu-secure-matrix/${SOURCE_PARENT_REPOSITORY_SHA}"/gpu-[0-9]*-GPU-*/runs/*) ;;
+    "/var/lib/commu-secure-matrix/${PARENT_RUN_REPOSITORY_SHA}"/gpu-[0-9]*-GPU-*/runs/*) ;;
     *) die "parent matrix root is outside the selected source/GPU hierarchy" ;;
   esac
   [[ "${resolved}" != "${MATRIX_ROOT}" && -d "${resolved}" && ! -L "${resolved}" &&

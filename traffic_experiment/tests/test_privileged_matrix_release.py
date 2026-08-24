@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,7 +61,7 @@ def test_segment_launcher_has_gpu_portable_relative_lease_interface() -> None:
     assert "--gpu-index is an assertion only" in text
     assert "A new run must use a new run ID" in text
     assert "continue-on-gpu is the only cross-GPU path" in text
-    assert "--parent-run-id SAFE_ID --parent-source-repository-sha 40_HEX" in text
+    assert "--parent-run-id SAFE_ID --parent-run-repository-sha 40_HEX" in text
     assert "privileged_matrix_launch.py" in text
     assert "PROTOCOL_VALIDATION_OK" in text
     assert "matrix-caddy.state" in text
@@ -79,6 +80,44 @@ def test_segment_launcher_has_gpu_portable_relative_lease_interface() -> None:
     assert 'SEGMENT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/32_launch_privileged_matrix_segment.sh"' in installer
     assert '/usr/bin/chmod 0555 "${SEGMENT_LAUNCHER}"' in installer
     assert '--authorization-cutoff "${AUTHORIZATION_CUTOFF_EPOCH}"' in text
+
+
+def test_segment_resume_identity_heredoc_is_valid_python() -> None:
+    text = SEGMENT_LAUNCHER.read_text()
+    block_start = text.index(
+        "import json, sys",
+        text.index("mapfile -d '' -t plan_fields"),
+    )
+    block_end = text.index("\nPY\n", block_start)
+    program = text[block_start:block_end]
+    payload = {
+        "repository_sha": "a" * 40,
+        "gpu_index": 6,
+        "gpu_uuid": "GPU-1234",
+        "active_config_sha256": "b" * 64,
+        "run_plan_sha256": "c" * 64,
+        "parent_matrix_root": "/var/lib/parent",
+        "parent_repository_sha": "d" * 40,
+        "service_repository_sha": "e" * 40,
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(payload)],
+        check=True,
+        capture_output=True,
+    )
+    assert result.stdout.split(b"\0")[:-1] == [
+        str(payload[name]).encode("ascii")
+        for name in (
+            "repository_sha",
+            "gpu_index",
+            "gpu_uuid",
+            "active_config_sha256",
+            "run_plan_sha256",
+            "parent_matrix_root",
+            "parent_repository_sha",
+            "service_repository_sha",
+        )
+    ]
 
 
 def test_gpu_waiter_is_bounded_detached_and_pinned_to_the_run_plan() -> None:
@@ -107,9 +146,15 @@ def test_gpu_waiter_is_bounded_detached_and_pinned_to_the_run_plan() -> None:
     waiter_start = text.index('/usr/bin/tmux new-session -d -s "${SESSION}"')
     assert timer_start < waiter_start
     runtime_check = text[text.index("shared_runtime_is_free() {") : text.index("wait_main() {")]
-    assert 'tcp_listeners="$(/usr/bin/ss' in runtime_check
-    assert 'udp_listeners="$(/usr/bin/ss' in runtime_check
+    assert 'tcp_service="$(/usr/bin/ss' in runtime_check
+    assert 'tcp_protected="$(/usr/bin/ss' in runtime_check
+    assert 'udp_protected="$(/usr/bin/ss' in runtime_check
+    for port in ("443", "8443", "8444", "8543", "8544"):
+        assert f"sport = :{port}" in runtime_check
+    assert "sport = :8000 or sport = :8001" in runtime_check
     assert 'netns_rows="$(/usr/bin/ip netns list)" || die' in runtime_check
+    assert 'link_rows="$(/usr/bin/ip -o link show)" || die' in runtime_check
+    assert "llmhost0" in runtime_check
     assert "| /usr/bin/grep" not in runtime_check
     assert text.index('if [[ "${ACTION}" == _expire-wait ]]') < text.index("release_precheck\ncase")
     assert 'load_expiry_record "${id}"' in text
@@ -122,6 +167,43 @@ def test_gpu_waiter_is_bounded_detached_and_pinned_to_the_run_plan() -> None:
     assert 'WAIT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/33_wait_for_privileged_matrix_gpu.sh"' in installer
     assert '/usr/bin/chmod 0555 "${WAIT_LAUNCHER}"' in installer
     assert '[[ -f "${WAIT_LAUNCHER}" && -x "${WAIT_LAUNCHER}" ]]' in installer
+
+
+def test_gpu_waiter_can_queue_one_pinned_cross_gpu_continuation() -> None:
+    text = WAIT_LAUNCHER.read_text()
+    assert "wait-continue-on-gpu" in text
+    assert "--parent-run-id SAFE_ID --parent-run-repository-sha 40_HEX" in text
+    assert "schema=commu-matrix-waiter-record-v2" in text
+    assert "parent_run_id=%s" in text
+    assert "parent_run_repository_sha=%s" in text
+    assert '"$(sha256_file "${PLAN}")" == "${PLAN_SHA256}"' in text
+    assert '[[ "${GPU_UUID}" != "${PARENT_GPU_UUID}" ]]' in text
+    assert "find_pinned_parent_plan" in text
+    worker = text[text.index("wait_main() {") : text.index("expire_wait_main() {")]
+    assert worker.count('if "${LAUNCHER}" "${launch_args[@]}"; then') == 1
+    assert "continue-on-gpu --bootstrap-admission-if-missing" in worker
+    assert '--parent-run-id "${PARENT_RUN_ID}"' in worker
+    assert '--parent-run-repository-sha "${PARENT_RUN_REPOSITORY_SHA}"' in worker
+    assert '--authorization-cutoff-epoch "${AUTHORIZATION_CUTOFF_EPOCH}"' in worker
+
+
+def test_segment_bootstrap_pilot_is_cgroup_bound_and_cleanup_is_ordered() -> None:
+    text = SEGMENT_LAUNCHER.read_text()
+    segment = text[text.index("segment_main() {") : text.index("expire_main() {")]
+    assert "/usr/bin/systemd-run --quiet --wait --pipe --collect --service-type=exec" in segment
+    assert "--property=KillMode=control-group" in segment
+    assert '"${SELF}" _pilot --record-id "${id}"' in segment
+
+    cleanup = text[
+        text.index("cleanup_owned_resources() {") : text.index("recover_generation_if_needed() {")
+    ]
+    matrix_caddy = cleanup.index('stop_caddy_exact "${caddy_state}"')
+    matrix_network = cleanup.index('NETWORK_STATE_FILE="${network_state}"')
+    pilot_cleanup = cleanup.index("if ! (cleanup_pilot_bootstrap_resources); then")
+    assert matrix_caddy < matrix_network < pilot_cleanup
+    assert "if (( pilot_unit_stopped == 1 )); then" in cleanup
+    assert "pilot bootstrap unit stop could not be proved; preserving its state" in cleanup
+    assert "/usr/bin/flock -w 30 6" in text
 
 
 def test_gpu_waiter_clean_environment_marker_is_shell_local() -> None:

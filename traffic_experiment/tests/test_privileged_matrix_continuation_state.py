@@ -39,7 +39,11 @@ def test_continuation_cli_contract_is_explicit() -> None:
     assert state.CONTINUATION_SCHEMA == (
         "commu-secure-single-matrix-continuation-plan-v1"
     )
+    assert state.CONTINUATION_SCHEMA_V2 == (
+        "commu-secure-single-matrix-continuation-plan-v2"
+    )
     assert state.PARENT_LEDGER_SCHEMA == "commu-matrix-parent-ledger-v1"
+    assert state.PARENT_LEDGER_SCHEMA_V2 == "commu-matrix-parent-ledger-v2"
     assert "revalidate_parent=False" in inspect.getsource(state.seal_cell)
     assert "revalidate_parent=True" in inspect.getsource(state.verify_matrix_marker)
 
@@ -82,6 +86,9 @@ def test_continuation_union_rejects_overlap_and_reused_attempts() -> None:
     assert state.validate_continuation_union(
         rows, ledger, "baseline/qa/tls13", "qa"
     ) == (1, 287)
+    assert state.validate_continuation_union(
+        rows[:1], ledger, "baseline/qa/tls13", "qa", require_complete=False
+    ) == (1, 1)
 
     with pytest.raises(ValueError, match="overlaps parent"):
         overlap_job = state._job_id("qa-000", 1)
@@ -244,8 +251,79 @@ def test_parent_snapshot_is_separate_immutable_and_tamper_evident(tmp_path: Path
         parser.parse_args(["verify-continuation-plan", *continuation_values])
     )
 
+    # A later GPU may use this continuation as its immediate parent.  The new
+    # ledger flattens the inherited GPU-3 row and the immediate GPU-4 row while
+    # retaining both physical-GPU identities and anchoring the prior ledger.
+    target_cell = target / "cells/baseline/qa/tls13"
+    target_captures = target_cell / "captures"
+    target_captures.mkdir(parents=True)
+    target_request_id, target_repetition = "qa-001", 1
+    target_job_id = state._job_id(target_request_id, target_repetition)
+    target_attempt_id = f"{target_job_id}-attempt-001-87654321"
+    target_capture = target_captures / f"{target_attempt_id}.pcapng"
+    target_capture.write_bytes(b"second-pcap")
+    target_row = {
+        "request_id": target_request_id, "repetition": target_repetition,
+        "job_id": target_job_id, "attempt": 1, "attempt_id": target_attempt_id,
+        "manifest_sha256": qa_sha, "worker_count": 1, "worker_index": 0,
+        "worker_gpu_index": 4, "worker_gpu_uuid": "GPU-4234",
+        "topology_worker_index": 0, "transport": "tls13",
+        "connection_mode": "warm", "backend_port": 8443,
+        "completed": True, "capture_file": str(target_capture),
+        "capture_sha256": hashlib.sha256(b"second-pcap").hexdigest(),
+    }
+    (target_cell / "results.jsonl").write_text(
+        json.dumps(target_row) + "\n", encoding="utf-8"
+    )
+    nested = tmp_path / "nested-target"
+    nested.mkdir()
+    nested_values = _plan_values(
+        nested, qa_sha, summary_sha, gpu=6, repository="8" * 40,
+        run_id="nested-continuation-run",
+    )
+    nested_continuation_values = [
+        *nested_values, "--parent-root", str(target),
+        "--qa-manifest", str(qa), "--summary-manifest", str(summary),
+    ]
+    state.continuation_plan_action(
+        parser.parse_args(
+            ["create-continuation-plan", *nested_continuation_values]
+        )
+    )
+    nested_plan = json.loads((nested / "RUN_PLAN.json").read_text())
+    nested_ledger = json.loads((nested / "PARENT_LEDGER.json").read_text())
+    assert nested_plan["schema"] == state.CONTINUATION_SCHEMA_V2
+    assert nested_plan["source_parent_repository_sha"] == "a" * 40
+    assert nested_plan["parent_run_repository_sha"] == "9" * 40
+    assert nested_plan["target_expected_calls"] == state.EXPECTED_CALLS - 2
+    assert nested_ledger["schema"] == state.PARENT_LEDGER_SCHEMA_V2
+    assert nested_ledger["parent_repository_sha"] == "9" * 40
+    assert nested_ledger["parent_service_repository_sha"] == "a" * 40
+    assert nested_ledger["parent_ledger_sha256"] == state.sha256_file(
+        target / "PARENT_LEDGER.json"
+    )
+    assert nested_ledger["continuation_depth"] == 2
+    flattened = nested_ledger["cells"]["baseline/qa/tls13"]["completed"]
+    assert [(item["gpu_index"], item["gpu_uuid"]) for item in flattened] == [
+        (3, "GPU-3234"), (4, "GPU-4234")
+    ]
+    state.continuation_plan_action(
+        parser.parse_args(
+            ["verify-continuation-plan", *nested_continuation_values]
+        )
+    )
+
     results.write_text(results.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="changed after continuation snapshot"):
         state.continuation_plan_action(
             parser.parse_args(["verify-continuation-plan", *continuation_values])
+        )
+    with pytest.raises(
+        ValueError,
+        match="parent changed after immutable snapshot|changed after continuation snapshot",
+    ):
+        state.continuation_plan_action(
+            parser.parse_args(
+                ["verify-continuation-plan", *nested_continuation_values]
+            )
         )

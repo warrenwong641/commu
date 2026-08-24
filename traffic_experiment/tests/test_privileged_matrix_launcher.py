@@ -242,6 +242,7 @@ def test_resume_loads_pinned_identity_and_digest(tmp_path: Path) -> None:
     assert identity.run_plan_sha256 == hashlib.sha256(encoded).hexdigest()
     assert identity.parent_matrix_root is None
     assert identity.parent_repository_sha is None
+    assert identity.service_repository_sha == "a" * 40
 
 
 def test_resume_loads_cross_gpu_continuation_parent_identity(tmp_path: Path) -> None:
@@ -260,12 +261,61 @@ def test_resume_loads_cross_gpu_continuation_parent_identity(tmp_path: Path) -> 
             "run_root": parent_root,
             "repository_sha": parent_sha,
         },
+        source_parent_repository_sha=parent_sha,
     )
 
     identity = launch.load_resume_identity(plan_path)
 
     assert identity.parent_matrix_root == parent_root
     assert identity.parent_repository_sha == parent_sha
+    assert identity.service_repository_sha == parent_sha
+
+
+def test_resume_rejects_v1_continuation_with_split_parent_and_service_sources(
+    tmp_path: Path,
+) -> None:
+    launch = load_module()
+    plan_path = tmp_path / "RUN_PLAN.json"
+    parent_sha = "b" * 40
+    parent_root = (
+        f"/var/lib/commu-secure-matrix/{parent_sha}/"
+        "gpu-3-GPU-2783a59c-9574-d4f6-1d4b-bfb505341383/"
+        "runs/main-parent"
+    )
+    write_plan(
+        plan_path,
+        schema="commu-secure-single-matrix-continuation-plan-v1",
+        parent_snapshot={"run_root": parent_root, "repository_sha": parent_sha},
+        source_parent_repository_sha="c" * 40,
+    )
+
+    with pytest.raises(launch.LaunchConfigError, match="parent identity is unsafe"):
+        launch.load_resume_identity(plan_path)
+
+
+def test_resume_loads_nested_continuation_run_and_service_identities(tmp_path: Path) -> None:
+    launch = load_module()
+    plan_path = tmp_path / "RUN_PLAN.json"
+    parent_sha = "b" * 40
+    service_sha = "c" * 40
+    parent_root = (
+        f"/var/lib/commu-secure-matrix/{parent_sha}/"
+        "gpu-1-GPU-948f0023-dd20-92a4-3f50-37d369d9bd56/"
+        "runs/main-gpu1-cont1"
+    )
+    write_plan(
+        plan_path,
+        schema="commu-secure-single-matrix-continuation-plan-v2",
+        parent_snapshot={"run_root": parent_root, "repository_sha": parent_sha},
+        parent_run_repository_sha=parent_sha,
+        source_parent_repository_sha=service_sha,
+    )
+
+    identity = launch.load_resume_identity(plan_path)
+
+    assert identity.parent_matrix_root == parent_root
+    assert identity.parent_repository_sha == parent_sha
+    assert identity.service_repository_sha == service_sha
 
 
 def test_resume_rejects_noncanonical_continuation_parent_root(tmp_path: Path) -> None:

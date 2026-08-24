@@ -228,7 +228,7 @@ The launcher remains fail-closed when the selected GPU is occupied, its pilot
 admission is absent, required ports are in use, the repository has drifted, or
 the service configuration no longer matches the measured release.
 
-## Bounded automatic resume
+## Bounded automatic GPU wait
 
 The installed GPU waiter can queue an ordinary resume while the immutable run
 plan's GPU is occupied. It does not reserve GPU memory and does not hold the
@@ -256,3 +256,24 @@ the same authorization cutoff. If the GPU stays busy, the matrix is already
 complete, inventory fails, or launch validation fails, the waiter exits without
 blind retries. Moving to another GPU still requires `continue-on-gpu`, a new
 immutable target root, and separate GPU provenance.
+
+To queue that deliberate GPU change instead, pin the immediate parent plan and
+choose a new target run ID:
+
+```bash
+sudo "$WAITER" wait-continue-on-gpu \
+  --parent-run-id main-YYYYMMDDThhmmssZ \
+  --parent-run-repository-sha PARENT_PLAN_COMMIT \
+  --run-id main-YYYYMMDDThhmmssZ-gpu6-cont1 \
+  --gpu-index 6 \
+  --authorization-cutoff-epoch EPOCH \
+  --max-lease 110m
+```
+
+This mode records the parent `RUN_PLAN.json` path and SHA-256 plus the target
+GPU index/UUID before detaching.  It waits without taking the topology lock,
+then invokes launcher 32 exactly once as `continue-on-gpu` with
+`--bootstrap-admission-if-missing` and the same absolute authorization cutoff.
+The launcher must create a new immutable continuation root and may bootstrap
+the target GPU's protocol admission inside that one bounded launch.  Any
+identity drift or launch failure is recorded and is not blindly retried.

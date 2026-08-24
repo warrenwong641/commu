@@ -17,7 +17,10 @@ from pathlib import PurePosixPath
 SCHEMA = "commu-secure-single-matrix-plan-v2"
 LEGACY_SCHEMA = "commu-secure-single-matrix-plan-v1"
 CONTINUATION_SCHEMA = "commu-secure-single-matrix-continuation-plan-v1"
+CONTINUATION_SCHEMA_V2 = "commu-secure-single-matrix-continuation-plan-v2"
+CONTINUATION_SCHEMAS = (CONTINUATION_SCHEMA, CONTINUATION_SCHEMA_V2)
 PARENT_LEDGER_SCHEMA = "commu-matrix-parent-ledger-v1"
+PARENT_LEDGER_SCHEMA_V2 = "commu-matrix-parent-ledger-v2"
 GENERATION_SCHEMA = "commu-secure-single-matrix-service-generation-v1"
 GENERATION_CLOSE_SCHEMA = "commu-secure-single-matrix-service-generation-close-v1"
 CELL_SCHEMA = "commu-secure-single-matrix-cell-v1"
@@ -407,9 +410,14 @@ def continuation_plan_action(args: argparse.Namespace) -> None:
         ):
             raise ValueError("continuation target differs from frozen parent workload")
         publish(ledger_path, ledger)
-        expected["schema"] = CONTINUATION_SCHEMA
+        nested = ledger["schema"] == PARENT_LEDGER_SCHEMA_V2
+        expected["schema"] = CONTINUATION_SCHEMA_V2 if nested else CONTINUATION_SCHEMA
         expected["analysis_role"] = "secondary-post-hoc"
-        expected["source_parent_repository_sha"] = ledger["parent_repository_sha"]
+        expected["source_parent_repository_sha"] = ledger.get(
+            "parent_service_repository_sha", ledger["parent_repository_sha"]
+        )
+        if nested:
+            expected["parent_run_repository_sha"] = ledger["parent_repository_sha"]
         expected["target_orchestration_repository_sha"] = expected["repository_sha"]
         expected["parent_snapshot"] = {
             "ledger_path": "PARENT_LEDGER.json",
@@ -430,13 +438,20 @@ def continuation_plan_action(args: argparse.Namespace) -> None:
         publish(plan_path, expected)
     else:
         plan = read_json(plan_path)
-        if plan.get("schema") != CONTINUATION_SCHEMA:
+        if plan.get("schema") not in CONTINUATION_SCHEMAS:
             raise ValueError("run is not an explicit cross-GPU continuation")
         for key, value in expected.items():
             if key != "schema" and plan.get(key) != value:
                 raise ValueError(f"continuation target identity differs at {key}")
         ledger = read_json(ledger_path)
         validate_parent_ledger_shape(ledger)
+        expected_schema = (
+            CONTINUATION_SCHEMA_V2
+            if ledger["schema"] == PARENT_LEDGER_SCHEMA_V2
+            else CONTINUATION_SCHEMA
+        )
+        if plan.get("schema") != expected_schema:
+            raise ValueError("continuation schema does not match parent ledger generation")
         snapshot = plan.get("parent_snapshot")
         if (
             not isinstance(snapshot, dict)
@@ -462,9 +477,14 @@ def continuation_plan_action(args: argparse.Namespace) -> None:
             != EXPECTED_CALLS - ledger["completed_calls"]
             or plan.get("analysis_role") != "secondary-post-hoc"
             or plan.get("source_parent_repository_sha")
-            != ledger["parent_repository_sha"]
+            != ledger.get("parent_service_repository_sha", ledger["parent_repository_sha"])
             or plan.get("target_orchestration_repository_sha")
             != expected["repository_sha"]
+            or (
+                plan.get("schema") == CONTINUATION_SCHEMA_V2
+                and plan.get("parent_run_repository_sha")
+                != ledger["parent_repository_sha"]
+            )
         ):
             raise ValueError("continuation parent snapshot identity differs")
         if Path(ledger["parent_root"]) == root:
@@ -596,7 +616,7 @@ def generation_is_closed(path: Path, value: dict) -> bool:
 def record_generation(args: argparse.Namespace) -> None:
     root = args.root.resolve(strict=True)
     plan = read_json(root / "RUN_PLAN.json")
-    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA, CONTINUATION_SCHEMA):
+    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA, *CONTINUATION_SCHEMAS):
         raise ValueError("unsupported run-plan schema for service generation")
     directory = generation_directory(root)
     if not directory.exists():
@@ -800,8 +820,8 @@ def _job_id(request_id: str, repetition: int) -> str:
 
 
 def _validate_parent_plan(plan: dict, topology: dict) -> None:
-    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA):
-        raise ValueError("parent must be an original single-GPU matrix plan")
+    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA, *CONTINUATION_SCHEMAS):
+        raise ValueError("parent must be a recognized single-GPU matrix plan")
     canonical_cells = [
         {
             "network": network,
@@ -851,10 +871,15 @@ def validate_parent_ledger_shape(ledger: dict) -> None:
         "parent_model", "parent_served_model_name", "parent_model_revision",
         "expected_keys", "completed_calls", "cells",
     }
+    if ledger.get("schema") == PARENT_LEDGER_SCHEMA_V2:
+        expected_top |= {
+            "parent_ledger_sha256", "parent_service_repository_sha",
+            "continuation_depth",
+        }
     if (
         not isinstance(ledger, dict)
         or set(ledger) != expected_top
-        or ledger.get("schema") != PARENT_LEDGER_SCHEMA
+        or ledger.get("schema") not in (PARENT_LEDGER_SCHEMA, PARENT_LEDGER_SCHEMA_V2)
         or not isinstance(ledger.get("completed_calls"), int)
         or not isinstance(ledger.get("cells"), dict)
         or not isinstance(ledger.get("expected_keys"), dict)
@@ -866,6 +891,15 @@ def validate_parent_ledger_shape(ledger: dict) -> None:
         or not Path(str(ledger.get("parent_root", ""))).is_absolute()
         or not Path(str(ledger.get("qa_manifest_path", ""))).is_absolute()
         or not Path(str(ledger.get("summary_manifest_path", ""))).is_absolute()
+        or (
+            ledger.get("schema") == PARENT_LEDGER_SCHEMA_V2
+            and (
+                re.fullmatch(r"[0-9a-f]{64}", str(ledger.get("parent_ledger_sha256", ""))) is None
+                or re.fullmatch(r"[0-9a-f]{40}", str(ledger.get("parent_service_repository_sha", ""))) is None
+                or not isinstance(ledger.get("continuation_depth"), int)
+                or ledger["continuation_depth"] < 2
+            )
+        )
     ):
         raise ValueError("parent ledger is malformed")
     for workload, keys in ledger["expected_keys"].items():
@@ -950,6 +984,11 @@ def build_parent_ledger(
     plan = read_json(parent_plan_path)
     topology = read_json(topology_path)
     _validate_parent_plan(plan, topology)
+    inherited = (
+        continuation_ledger(parent_root, plan, revalidate_parent=True)
+        if plan.get("schema") in CONTINUATION_SCHEMAS
+        else None
+    )
     if (
         sha256_file(topology_path) != plan.get("worker_topology_sha256")
     ):
@@ -984,6 +1023,7 @@ def build_parent_ledger(
         seen_attempt_ids: set[str] = set()
         seen_attempt_numbers: set[tuple[str, int, int]] = set()
         referenced_captures: set[Path] = set()
+        result_rows: list[dict] = []
         if cell.exists() or cell.is_symlink():
             if cell.resolve(strict=True) != cell:
                 raise ValueError(f"parent cell path contains a symlink: {cell}")
@@ -1000,6 +1040,7 @@ def build_parent_ledger(
                 if not line:
                     continue
                 row = json.loads(line)
+                result_rows.append(row)
                 key = (str(row.get("request_id", "")), int(row.get("repetition", 0)))
                 if key not in expected_set:
                     raise ValueError(f"parent result key is outside the frozen manifest: {key}")
@@ -1101,6 +1142,37 @@ def build_parent_ledger(
                 orphan_counts[match.group(1)] = max(
                     orphan_counts.get(match.group(1), 0), int(match.group(2))
                 )
+        if inherited is not None:
+            validate_continuation_union(
+                result_rows, inherited, name, workload, require_complete=False
+            )
+            inherited_cell = inherited["cells"][name]
+            inherited_attempts = {
+                (item["request_id"], item["repetition"]): item["count"]
+                for item in inherited_cell["attempt_counts"]
+            }
+            inherited_orphans = {
+                item["job_id"]: item["count"]
+                for item in inherited_cell["orphan_attempt_counts"]
+            }
+            key_by_job = {_job_id(*key): key for key in expected_set}
+            for job_id, count in orphan_counts.items():
+                key = key_by_job[job_id]
+                if count <= max(
+                    inherited_attempts.get(key, 0),
+                    inherited_orphans.get(job_id, 0),
+                ):
+                    raise ValueError(
+                        f"target orphan attempt does not continue parent ledger: {key}"
+                    )
+            completed.extend(inherited_cell["completed"])
+            for item in inherited_cell["attempt_counts"]:
+                key = (item["request_id"], item["repetition"])
+                attempts[key] = max(attempts.get(key, 0), item["count"])
+            for item in inherited_cell["orphan_attempt_counts"]:
+                orphan_counts[item["job_id"]] = max(
+                    orphan_counts.get(item["job_id"], 0), item["count"]
+                )
         completed.sort(key=lambda item: (item["request_id"], item["repetition"]))
         all_completed += len(completed)
         cells[name] = {
@@ -1115,7 +1187,7 @@ def build_parent_ledger(
             ],
         }
     ledger = {
-        "schema": PARENT_LEDGER_SCHEMA,
+        "schema": PARENT_LEDGER_SCHEMA_V2 if inherited is not None else PARENT_LEDGER_SCHEMA,
         "parent_root": str(parent_root),
         "parent_run_plan_sha256": sha256_file(parent_plan_path),
         "parent_repository_sha": plan["repository_sha"],
@@ -1139,12 +1211,20 @@ def build_parent_ledger(
         "completed_calls": all_completed,
         "cells": cells,
     }
+    if inherited is not None:
+        ledger.update(
+            {
+                "parent_ledger_sha256": sha256_file(parent_root / "PARENT_LEDGER.json"),
+                "parent_service_repository_sha": plan["source_parent_repository_sha"],
+                "continuation_depth": inherited.get("continuation_depth", 1) + 1,
+            }
+        )
     validate_parent_ledger_shape(ledger)
     return ledger
 
 
 def continuation_ledger(root: Path, plan: dict, *, revalidate_parent: bool) -> dict:
-    if plan.get("schema") != CONTINUATION_SCHEMA:
+    if plan.get("schema") not in CONTINUATION_SCHEMAS:
         raise ValueError("run is not a continuation")
     ledger_path = root / "PARENT_LEDGER.json"
     ledger = read_json(ledger_path)
@@ -1162,8 +1242,12 @@ def continuation_ledger(root: Path, plan: dict, *, revalidate_parent: bool) -> d
         or snapshot.get("served_model_name") != ledger["parent_served_model_name"]
         or snapshot.get("model_revision") != ledger["parent_model_revision"]
         or plan.get("source_parent_repository_sha")
-        != ledger["parent_repository_sha"]
+        != ledger.get("parent_service_repository_sha", ledger["parent_repository_sha"])
         or plan.get("target_orchestration_repository_sha") != plan.get("repository_sha")
+        or (
+            plan.get("schema") == CONTINUATION_SCHEMA_V2
+            and plan.get("parent_run_repository_sha") != ledger["parent_repository_sha"]
+        )
     ):
         raise ValueError("continuation ledger differs from run plan")
     if revalidate_parent:
@@ -1178,7 +1262,8 @@ def continuation_ledger(root: Path, plan: dict, *, revalidate_parent: bool) -> d
 
 
 def validate_continuation_union(
-    rows: list[dict], ledger: dict, cell_name: str, workload: str
+    rows: list[dict], ledger: dict, cell_name: str, workload: str,
+    *, require_complete: bool = True,
 ) -> tuple[int, int]:
     entry = ledger["cells"][cell_name]
     parent_completed = {
@@ -1229,7 +1314,7 @@ def validate_continuation_union(
             target_completed.add(key)
     if parent_completed & target_completed:
         raise ValueError(f"parent/target successful keys overlap: {cell_name}")
-    if parent_completed | target_completed != expected:
+    if require_complete and parent_completed | target_completed != expected:
         raise ValueError(f"parent/target union is incomplete: {cell_name}")
     return len(parent_completed), len(target_completed)
 
@@ -1346,7 +1431,7 @@ def seal_cell(args: argparse.Namespace) -> None:
     if original_marker.exists() or original_marker.is_symlink():
         raise ValueError("cell completion marker already exists")
     full_expected = dict(WORKLOADS)[args.workload] * CONDITIONS * REPETITIONS
-    continuation = plan.get("schema") == CONTINUATION_SCHEMA
+    continuation = plan.get("schema") in CONTINUATION_SCHEMAS
     ledger = continuation_ledger(root, plan, revalidate_parent=False) if continuation else None
     cell_name = f"{args.network}/{args.workload}/{args.transport}"
     parent_completed = (
@@ -1473,7 +1558,7 @@ def verify_cell_marker(root: Path, plan: dict, cell_plan: dict) -> dict:
         if cell_plan["workload"] == "qa"
         else plan["summary_manifest_sha256"]
     )
-    continuation = plan.get("schema") == CONTINUATION_SCHEMA
+    continuation = plan.get("schema") in CONTINUATION_SCHEMAS
     ledger = continuation_ledger(root, plan, revalidate_parent=False) if continuation else None
     expected_keys = {
         "schema",
@@ -1582,7 +1667,7 @@ def verify_cell_marker(root: Path, plan: dict, cell_plan: dict) -> dict:
 def status(args: argparse.Namespace) -> None:
     root = args.root.resolve(strict=True)
     plan = read_json(root / "RUN_PLAN.json")
-    if plan.get("schema") == CONTINUATION_SCHEMA:
+    if plan.get("schema") in CONTINUATION_SCHEMAS:
         continuation_ledger(root, plan, revalidate_parent=False)
     sealing_root = root / ".sealing"
     if sealing_root.exists():
@@ -1629,7 +1714,7 @@ def verify_matrix_marker(root: Path, plan: dict) -> dict:
         expected_cells.append(
             {"path": str(path.relative_to(root)), "sha256": sha256_file(path)}
         )
-    continuation = plan.get("schema") == CONTINUATION_SCHEMA
+    continuation = plan.get("schema") in CONTINUATION_SCHEMAS
     ledger = continuation_ledger(root, plan, revalidate_parent=True) if continuation else None
     expected = {
         "schema": CONTINUATION_COMPLETE_SCHEMA if continuation else COMPLETE_SCHEMA,
@@ -1672,7 +1757,7 @@ def seal_matrix(args: argparse.Namespace) -> None:
     plan = read_json(root / "RUN_PLAN.json")
     ledger = (
         continuation_ledger(root, plan, revalidate_parent=True)
-        if plan.get("schema") == CONTINUATION_SCHEMA
+        if plan.get("schema") in CONTINUATION_SCHEMAS
         else None
     )
     marker = root / "MATRIX_COMPLETE.json"

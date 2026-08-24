@@ -3,8 +3,10 @@ set -euo pipefail
 set +x
 umask 077
 
-# Queue one bounded resume without reserving a GPU while it is occupied.
-# The immutable RUN_PLAN.json selects the exact GPU; this script never changes it.
+# Queue one bounded matrix action without reserving a GPU while it is occupied.
+# Ordinary resume is pinned to its immutable run GPU.  Cross-GPU continuation
+# pins both the immutable parent plan and a new target GPU identity.
+# The immutable RUN_PLAN.json selects the exact resume GPU; this script never changes it.
 
 FIXED_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 WAITERS_ROOT=/var/lib/commu-matrix-waiters
@@ -51,10 +53,17 @@ Usage:
     --run-id SAFE_ID --source-repository-sha 40_HEX --gpu-index N \
     --authorization-cutoff-epoch EPOCH [--max-lease 110m] \
     [--service-config-template POLICY_SCOPED_PATH]
+  33_wait_for_privileged_matrix_gpu.sh wait-continue-on-gpu \
+    --parent-run-id SAFE_ID --parent-run-repository-sha 40_HEX \
+    --run-id NEW_SAFE_ID --gpu-index N \
+    --authorization-cutoff-epoch EPOCH [--max-lease 110m] \
+    [--service-config-template POLICY_SCOPED_PATH]
 
-The immutable run plan selects the GPU. --gpu-index is an assertion, not an
-override. The waiter holds no GPU or topology lock while polling, starts one
-ordinary resume at most once, and expires at the absolute authorization cutoff.
+For wait-resume, the immutable run plan selects the GPU.
+--gpu-index is an assertion, not an override.  wait-continue-on-gpu pins the immutable parent
+plan and target GPU, then invokes continue-on-gpu with admission bootstrap at
+most once.  Neither mode holds a GPU or topology lock while polling, and both
+expire at the absolute authorization cutoff.
 EOF
   exit 2
 }
@@ -77,6 +86,41 @@ trusted_root_dir() {
     "$(/usr/bin/stat -c %u:%g -- "${path}")" == 0:0 ]] || return 1
   mode="$(/usr/bin/stat -c %a -- "${path}")" || return 1
   (( (8#${mode} & 8#022) == 0 ))
+}
+find_pinned_parent_plan() {
+  local candidate parent identity_json
+  local -a candidates=() parent_fields=()
+  while IFS= read -r -d '' candidate; do
+    parent="$(/usr/bin/basename -- "$(/usr/bin/dirname -- "${candidate}")")"
+    [[ "${parent}" == "${PARENT_RUN_ID}" ]] || continue
+    case "${candidate}" in
+      "/var/lib/commu-secure-matrix/${PARENT_RUN_REPOSITORY_SHA}/"*/runs/"${PARENT_RUN_ID}"/RUN_PLAN.json) ;;
+      *) continue ;;
+    esac
+    candidates+=("${candidate}")
+  done < <(/usr/bin/find -P /var/lib/commu-secure-matrix -mindepth 5 -maxdepth 5 \
+    -type f -name RUN_PLAN.json -print0)
+  [[ "${#candidates[@]}" -eq 1 ]] ||
+    die "continuation wait requires exactly one immutable parent RUN_PLAN.json; found ${#candidates[@]}"
+  PLAN="${candidates[0]}"
+  regular_root_file "${PLAN}" && [[ "$(/usr/bin/stat -c %a -- "${PLAN}")" == 444 ]] ||
+    die "parent RUN_PLAN.json is not immutable root-owned release state"
+  identity_json="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" resume-identity --plan "${PLAN}")" ||
+    die "could not validate immutable parent identity"
+  mapfile -d '' -t parent_fields < <(/usr/bin/python3 -I - "${identity_json}" <<'PY'
+import json, sys
+identity = json.loads(sys.argv[1])
+for name in ("repository_sha", "run_id", "gpu_index", "gpu_uuid", "run_plan_sha256"):
+    sys.stdout.buffer.write(str(identity[name]).encode("ascii") + b"\0")
+PY
+  )
+  [[ "${#parent_fields[@]}" -eq 5 &&
+    "${parent_fields[0]}" == "${PARENT_RUN_REPOSITORY_SHA}" &&
+    "${parent_fields[1]}" == "${PARENT_RUN_ID}" ]] ||
+    die "parent run/source assertion differs from RUN_PLAN.json"
+  PARENT_GPU_INDEX="${parent_fields[2]}"
+  PARENT_GPU_UUID="${parent_fields[3]}"
+  PLAN_SHA256="${parent_fields[4]}"
 }
 
 SELF="$(/usr/bin/readlink -e -- "${BASH_SOURCE[0]}")" || die "cannot resolve waiter"
@@ -121,7 +165,7 @@ release_precheck() {
   [[ "$(/usr/bin/id -u "${SERVICE_USER}")" == "${SERVICE_UID}" &&
     "$(/usr/bin/id -g "${SERVICE_USER}")" == "${SERVICE_GID}" ]] || die "service account identity drifted"
   for executable in /usr/bin/awk /usr/bin/basename /usr/bin/chmod /usr/bin/chown \
-    /usr/bin/date /usr/bin/dirname /usr/bin/flock /usr/bin/grep /usr/bin/id /usr/bin/install \
+    /usr/bin/date /usr/bin/dirname /usr/bin/find /usr/bin/flock /usr/bin/grep /usr/bin/id /usr/bin/install \
     /usr/bin/ip /usr/bin/mkdir /usr/bin/mv /usr/bin/nvidia-smi /usr/bin/openssl /usr/bin/python3 \
     /usr/bin/readlink /usr/bin/rm /usr/bin/seq /usr/bin/sha256sum /usr/bin/sleep /usr/bin/ss \
     /usr/bin/stat /usr/bin/systemctl /usr/bin/systemd-run /usr/bin/timeout /usr/bin/tmux; do
@@ -163,7 +207,7 @@ load_expiry_record() {
   SESSION="$(record_value session)"; TIMER_BASE="$(record_value timer_base)"
   AUTHORIZATION_CUTOFF_EPOCH="$(record_value authorization_cutoff_epoch)"
   WAIT_LOG="${RECORD_DIR}/wait.log"; OUTCOME="${RECORD_DIR}/outcome.state"
-  [[ "${RECORD_SCHEMA}" == commu-matrix-waiter-record-v1 && "${RECORD_ID}" == "${id}" &&
+  [[ "${RECORD_SCHEMA}" =~ ^commu-matrix-waiter-record-v(1|2)$ && "${RECORD_ID}" == "${id}" &&
     "${TARGET_ID}" =~ ^[0-9a-f]{16}$ && "${SESSION}" == "commu-matrix-wait-${RECORD_ID}" &&
     "${TIMER_BASE}" == "${SESSION}-expiry" && "${AUTHORIZATION_CUTOFF_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ]] ||
     die "minimal waiter expiry identity is malformed"
@@ -175,6 +219,15 @@ load_expiry_record() {
 load_wait_record() {
   local id="$1"
   load_expiry_record "${id}"
+  if [[ "${RECORD_SCHEMA}" == commu-matrix-waiter-record-v2 ]]; then
+    QUEUE_MODE="$(record_value queue_mode)"
+    PARENT_RUN_ID="$(record_value parent_run_id)"
+    PARENT_RUN_REPOSITORY_SHA="$(record_value parent_run_repository_sha)"
+  else
+    QUEUE_MODE=resume
+    PARENT_RUN_ID=none
+    PARENT_RUN_REPOSITORY_SHA=none
+  fi
   RELEASE_REPOSITORY_SHA="$(record_value release_repository_sha)"
   RUN_ID="$(record_value run_id)"; SOURCE_REPOSITORY_SHA="$(record_value source_repository_sha)"
   GPU_INDEX="$(record_value gpu_index)"; GPU_UUID="$(record_value gpu_uuid)"
@@ -182,16 +235,29 @@ load_wait_record() {
   MAX_LEASE="$(record_value max_lease)"; SERVICE_CONFIG_TEMPLATE="$(record_value service_config_template)"
   TARGET_LOCK="$(record_value target_lock)"; ACTIVE_REGISTRATION="$(record_value active_registration)"
   MATRIX_ROOT="$(/usr/bin/dirname -- "${PLAN}")"
-  [[ "${RECORD_SCHEMA}" == commu-matrix-waiter-record-v1 &&
+  [[ "${QUEUE_MODE}" =~ ^(resume|continue-on-gpu)$ &&
     "${RELEASE_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" &&
     "${RECORD_ID}" == "${id}" &&
     "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ && "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
     "${GPU_INDEX}" =~ ^(0|[1-9][0-9]*)$ && "${GPU_UUID}" =~ ^GPU-[0-9A-Fa-f-]+$ &&
-    "${PLAN}" == "/var/lib/commu-secure-matrix/${SOURCE_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/${RUN_ID}/RUN_PLAN.json" &&
     "${PLAN_SHA256}" =~ ^[0-9a-f]{64}$ && "${AUTHORIZATION_CUTOFF_EPOCH}" =~ ^(0|[1-9][0-9]*)$ &&
     "${MAX_LEASE}" =~ ^(0|[1-9][0-9]*)(m|h)?$ &&
     "${TARGET_LOCK}" == "${WAIT_LOCK_ROOT}/target-${TARGET_ID}.lock" &&
     "${ACTIVE_REGISTRATION}" == "${WAIT_LOCK_ROOT}/active-${TARGET_ID}.state" ]] || die "waiter record identity is malformed"
+  if [[ "${QUEUE_MODE}" == resume ]]; then
+    [[ "${RECORD_SCHEMA}" =~ ^commu-matrix-waiter-record-v(1|2)$ &&
+      "${PARENT_RUN_ID}" == none && "${PARENT_RUN_REPOSITORY_SHA}" == none &&
+      "${PLAN}" == "/var/lib/commu-secure-matrix/${SOURCE_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/${RUN_ID}/RUN_PLAN.json" ]] ||
+      die "resume waiter record identity is malformed"
+  else
+    [[ "${RECORD_SCHEMA}" == commu-matrix-waiter-record-v2 &&
+      "${PARENT_RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ &&
+      "${PARENT_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
+      "${SOURCE_REPOSITORY_SHA}" == "${PARENT_RUN_REPOSITORY_SHA}" &&
+      "${RUN_ID}" != "${PARENT_RUN_ID}" &&
+      "${PLAN}" == "/var/lib/commu-secure-matrix/${PARENT_RUN_REPOSITORY_SHA}/"*/runs/"${PARENT_RUN_ID}"/RUN_PLAN.json ]] ||
+      die "continuation waiter record identity is malformed"
+  fi
   [[ "${SERVICE_CONFIG_TEMPLATE}" == none ||
     ( "${SERVICE_CONFIG_TEMPLATE}" = /* && "${SERVICE_CONFIG_TEMPLATE}" != *$'\n'* ) ]] ||
     die "waiter service-template record is malformed"
@@ -237,14 +303,22 @@ gpu_is_free() {
 }
 
 shared_runtime_is_free() {
-  local tcp_listeners udp_listeners netns_rows
-  tcp_listeners="$(/usr/bin/ss -H -lnt '( sport = :8000 or sport = :8001 or sport = :8443 )')" ||
-    die "TCP listener query failed while waiting"
-  udp_listeners="$(/usr/bin/ss -H -lnu '( sport = :8444 )')" ||
-    die "UDP listener query failed while waiting"
+  local tcp_service tcp_protected udp_protected netns_rows link_rows
+  tcp_service="$(/usr/bin/ss -H -lnt '( sport = :8000 or sport = :8001 )')" ||
+    die "service TCP listener query failed while waiting"
+  tcp_protected="$(/usr/bin/ss -H -lnt \
+    '( sport = :443 or sport = :8443 or sport = :8444 or sport = :8543 or sport = :8544 )')" ||
+    die "protected TCP listener query failed while waiting"
+  udp_protected="$(/usr/bin/ss -H -lnu \
+    '( sport = :443 or sport = :8443 or sport = :8444 or sport = :8543 or sport = :8544 )')" ||
+    die "protected UDP listener query failed while waiting"
   netns_rows="$(/usr/bin/ip netns list)" || die "network namespace query failed while waiting"
-  [[ -z "${tcp_listeners}" && -z "${udp_listeners}" ]] || return 1
+  link_rows="$(/usr/bin/ip -o link show)" || die "network link query failed while waiting"
+  [[ -z "${tcp_service}" && -z "${tcp_protected}" && -z "${udp_protected}" ]] || return 1
   if /usr/bin/grep -Eq '^llm-client([[:space:]]|$)' <<<"${netns_rows}"; then
+    return 1
+  fi
+  if /usr/bin/grep -Eq '^[0-9]+: llmhost0(@[^:[:space:]]+)?:' <<<"${link_rows}"; then
     return 1
   fi
   return 0
@@ -276,9 +350,9 @@ wait_main() {
   /usr/bin/flock -n 8 || die "another waiter already owns this immutable run target"
   target_lock_acquired=1
   set_wait_outcome waiting || die "could not record waiter start"
-  /usr/bin/date '+WAIT_RESUME_START %F %T %z epoch=%s'
-  printf 'run_id=%s gpu_index=%s gpu_uuid=%s cutoff_epoch=%s\n' \
-    "${RUN_ID}" "${GPU_INDEX}" "${GPU_UUID}" "${AUTHORIZATION_CUTOFF_EPOCH}"
+  /usr/bin/date '+MATRIX_WAITER_START %F %T %z epoch=%s'
+  printf 'queue_mode=%s run_id=%s gpu_index=%s gpu_uuid=%s cutoff_epoch=%s\n' \
+    "${QUEUE_MODE}" "${RUN_ID}" "${GPU_INDEX}" "${GPU_UUID}" "${AUTHORIZATION_CUTOFF_EPOCH}"
 
   while true; do
     now="$(/usr/bin/date +%s)"
@@ -299,14 +373,16 @@ wait_main() {
       continue
     fi
 
-    status_json="$(/usr/bin/python3 -I "${STATE_TOOL}" status --root "${MATRIX_ROOT}")" ||
-      die "immutable matrix state validation failed while GPU was free"
-    if [[ "${status_json}" == *'"state": "complete"'* ]]; then
-      set_wait_outcome not_needed || die "could not record completed outcome"
-      printf 'WAIT_RESUME_NOT_NEEDED matrix_state=complete\n'
-      exit 0
+    if [[ "${QUEUE_MODE}" == resume ]]; then
+      status_json="$(/usr/bin/python3 -I "${STATE_TOOL}" status --root "${MATRIX_ROOT}")" ||
+        die "immutable matrix state validation failed while GPU was free"
+      if [[ "${status_json}" == *'"state": "complete"'* ]]; then
+        set_wait_outcome not_needed || die "could not record completed outcome"
+        printf 'WAIT_RESUME_NOT_NEEDED matrix_state=complete\n'
+        exit 0
+      fi
+      [[ "${status_json}" == *'"state": "in-progress"'* ]] || die "matrix state is not resumable"
     fi
-    [[ "${status_json}" == *'"state": "in-progress"'* ]] || die "matrix state is not resumable"
 
     now="$(/usr/bin/date +%s)"
     deadline_fields="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" deadline \
@@ -323,22 +399,37 @@ wait_main() {
       "${hard_deadline_epoch}" -le "${AUTHORIZATION_CUTOFF_EPOCH}" ]] ||
       die "bounded deadline helper returned malformed output"
 
-    launch_args=(resume --run-id "${RUN_ID}" --source-repository-sha "${SOURCE_REPOSITORY_SHA}"
-      --gpu-index "${GPU_INDEX}" --lease "${lease_minutes}m"
-      --authorization-cutoff-epoch "${AUTHORIZATION_CUTOFF_EPOCH}")
+    if [[ "${QUEUE_MODE}" == resume ]]; then
+      launch_args=(resume --run-id "${RUN_ID}" --source-repository-sha "${SOURCE_REPOSITORY_SHA}"
+        --gpu-index "${GPU_INDEX}" --lease "${lease_minutes}m"
+        --authorization-cutoff-epoch "${AUTHORIZATION_CUTOFF_EPOCH}")
+    else
+      launch_args=(continue-on-gpu --bootstrap-admission-if-missing
+        --parent-run-id "${PARENT_RUN_ID}"
+        --parent-run-repository-sha "${PARENT_RUN_REPOSITORY_SHA}"
+        --run-id "${RUN_ID}" --gpu-index "${GPU_INDEX}" --lease "${lease_minutes}m"
+        --authorization-cutoff-epoch "${AUTHORIZATION_CUTOFF_EPOCH}")
+    fi
     if [[ "${SERVICE_CONFIG_TEMPLATE}" != none ]]; then
       launch_args+=(--service-config-template "${SERVICE_CONFIG_TEMPLATE}")
     fi
-    printf 'WAIT_RESUME_GPU_FREE epoch=%s lease_minutes=%s hard_deadline_epoch=%s\n' \
-      "${now}" "${lease_minutes}" "${hard_deadline_epoch}"
+    printf 'MATRIX_WAITER_GPU_FREE queue_mode=%s epoch=%s lease_minutes=%s hard_deadline_epoch=%s\n' \
+      "${QUEUE_MODE}" "${now}" "${lease_minutes}" "${hard_deadline_epoch}"
     set_wait_outcome launching || die "could not record launch attempt"
     if "${LAUNCHER}" "${launch_args[@]}"; then
       launch_was_submitted=1
       set_wait_outcome submitted || die "could not record submitted launch"
-      printf 'WAIT_RESUME_LAUNCH_SUBMITTED\n'
+      if [[ "${QUEUE_MODE}" == resume ]]; then
+        printf 'WAIT_RESUME_LAUNCH_SUBMITTED\n'
+      else
+        printf 'WAIT_CONTINUE_LAUNCH_SUBMITTED\n'
+      fi
       exit 0
     fi
-    die "authoritative matrix resume launch failed; it was not retried"
+    if [[ "${QUEUE_MODE}" == resume ]]; then
+      die "authoritative matrix resume launch failed; it was not retried"
+    fi
+    die "authoritative matrix continuation launch failed; it was not retried"
   done
 }
 
@@ -379,16 +470,22 @@ case "${ACTION}" in
     wait_main "$2"
     exit
     ;;
-  wait-resume) ;;
+  wait-resume) QUEUE_MODE=resume ;;
+  wait-continue-on-gpu) QUEUE_MODE=continue-on-gpu ;;
   *) usage ;;
 esac
 
 RUN_ID=""; SOURCE_REPOSITORY_SHA=""; GPU_INDEX=""; AUTHORIZATION_CUTOFF_EPOCH=""
+PARENT_RUN_ID=""; PARENT_RUN_REPOSITORY_SHA=""
 MAX_LEASE=110m; SERVICE_CONFIG_TEMPLATE=none; MAX_LEASE_SET=0; SERVICE_CONFIG_SET=0
 while (($#)); do
   case "$1" in
     --run-id) [[ $# -ge 2 && -z "${RUN_ID}" ]] || usage; RUN_ID="$2"; shift 2 ;;
     --source-repository-sha) [[ $# -ge 2 && -z "${SOURCE_REPOSITORY_SHA}" ]] || usage; SOURCE_REPOSITORY_SHA="$2"; shift 2 ;;
+    --parent-run-id) [[ $# -ge 2 && -z "${PARENT_RUN_ID}" ]] || usage; PARENT_RUN_ID="$2"; shift 2 ;;
+    --parent-run-repository-sha|--parent-source-repository-sha)
+      [[ $# -ge 2 && -z "${PARENT_RUN_REPOSITORY_SHA}" ]] || usage
+      PARENT_RUN_REPOSITORY_SHA="$2"; shift 2 ;;
     --gpu-index) [[ $# -ge 2 && -z "${GPU_INDEX}" ]] || usage; GPU_INDEX="$2"; shift 2 ;;
     --authorization-cutoff-epoch) [[ $# -ge 2 && -z "${AUTHORIZATION_CUTOFF_EPOCH}" ]] || usage; AUTHORIZATION_CUTOFF_EPOCH="$2"; shift 2 ;;
     --max-lease) [[ $# -ge 2 && "${MAX_LEASE_SET}" -eq 0 ]] || usage; MAX_LEASE="$2"; MAX_LEASE_SET=1; shift 2 ;;
@@ -396,9 +493,21 @@ while (($#)); do
     *) usage ;;
   esac
 done
-[[ "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ && "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
+[[ "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ &&
   "${GPU_INDEX}" =~ ^(0|[1-9][0-9]*)$ && "${AUTHORIZATION_CUTOFF_EPOCH}" =~ ^(0|[1-9][0-9]*)$ &&
   "${MAX_LEASE}" =~ ^(0|[1-9][0-9]*)(m|h)?$ ]] || usage
+if [[ "${QUEUE_MODE}" == resume ]]; then
+  [[ "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ && -z "${PARENT_RUN_ID}" &&
+    -z "${PARENT_RUN_REPOSITORY_SHA}" ]] || usage
+  PARENT_RUN_ID=none
+  PARENT_RUN_REPOSITORY_SHA=none
+else
+  [[ -z "${SOURCE_REPOSITORY_SHA}" &&
+    "${PARENT_RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ &&
+    "${PARENT_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
+    "${RUN_ID}" != "${PARENT_RUN_ID}" ]] || usage
+  SOURCE_REPOSITORY_SHA="${PARENT_RUN_REPOSITORY_SHA}"
+fi
 [[ "${SERVICE_CONFIG_TEMPLATE}" == none ||
   ( "${SERVICE_CONFIG_TEMPLATE}" = /* && "${SERVICE_CONFIG_TEMPLATE}" != *$'\n'* ) ]] || usage
 
@@ -410,22 +519,27 @@ GPU_UUID="$(/usr/bin/timeout --signal=TERM --kill-after=2s 10s /usr/bin/nvidia-s
   -i "${GPU_INDEX}" --query-gpu=uuid --format=csv,noheader,nounits 2>/dev/null)" ||
   die "GPU inventory query failed or timed out"
 [[ "${GPU_UUID}" =~ ^GPU-[0-9A-Fa-f-]+$ ]] || die "GPU inventory returned an unsafe UUID"
-PLAN="/var/lib/commu-secure-matrix/${SOURCE_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/${RUN_ID}/RUN_PLAN.json"
-regular_root_file "${PLAN}" && [[ "$(/usr/bin/stat -c %a -- "${PLAN}")" == 444 ]] ||
-  die "the asserted run has no immutable RUN_PLAN.json on GPU ${GPU_INDEX}"
-identity_json="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" resume-identity --plan "${PLAN}" \
-  --gpu-index "${GPU_INDEX}" --gpu-uuid-output "${GPU_UUID}")" || die "could not validate immutable run identity"
-mapfile -d '' -t identity_fields < <(/usr/bin/python3 -I - "${identity_json}" <<'PY'
+if [[ "${QUEUE_MODE}" == resume ]]; then
+  PLAN="/var/lib/commu-secure-matrix/${SOURCE_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/${RUN_ID}/RUN_PLAN.json"
+  regular_root_file "${PLAN}" && [[ "$(/usr/bin/stat -c %a -- "${PLAN}")" == 444 ]] ||
+    die "the asserted run has no immutable RUN_PLAN.json on GPU ${GPU_INDEX}"
+  identity_json="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" resume-identity --plan "${PLAN}" \
+    --gpu-index "${GPU_INDEX}" --gpu-uuid-output "${GPU_UUID}")" || die "could not validate immutable run identity"
+  mapfile -d '' -t identity_fields < <(/usr/bin/python3 -I - "${identity_json}" <<'PY'
 import json, sys
 identity = json.loads(sys.argv[1])
 for name in ("repository_sha", "run_id", "gpu_index", "gpu_uuid", "run_plan_sha256"):
     sys.stdout.buffer.write(str(identity[name]).encode("ascii") + b"\0")
 PY
-)
-[[ "${#identity_fields[@]}" -eq 5 && "${identity_fields[0]}" == "${SOURCE_REPOSITORY_SHA}" &&
-  "${identity_fields[1]}" == "${RUN_ID}" && "${identity_fields[2]}" == "${GPU_INDEX}" &&
-  "${identity_fields[3]}" == "${GPU_UUID}" ]] || die "run-plan identity differs from queue assertions"
-PLAN_SHA256="${identity_fields[4]}"
+  )
+  [[ "${#identity_fields[@]}" -eq 5 && "${identity_fields[0]}" == "${SOURCE_REPOSITORY_SHA}" &&
+    "${identity_fields[1]}" == "${RUN_ID}" && "${identity_fields[2]}" == "${GPU_INDEX}" &&
+    "${identity_fields[3]}" == "${GPU_UUID}" ]] || die "run-plan identity differs from queue assertions"
+  PLAN_SHA256="${identity_fields[4]}"
+else
+  find_pinned_parent_plan
+  [[ "${GPU_UUID}" != "${PARENT_GPU_UUID}" ]] || die "target GPU must differ from immutable parent GPU"
+fi
 
 if [[ "${SERVICE_CONFIG_TEMPLATE}" != none ]]; then
   SERVICE_CONFIG_TEMPLATE="$(/usr/bin/readlink -e -- "${SERVICE_CONFIG_TEMPLATE}")" || die "service template does not exist"
@@ -439,7 +553,13 @@ if [[ ! -e "${WAIT_LOCK_ROOT}" && ! -L "${WAIT_LOCK_ROOT}" ]]; then
   /usr/bin/mkdir --mode=0755 -- "${WAIT_LOCK_ROOT}" 2>/dev/null || true
 fi
 trusted_root_dir "${WAIT_LOCK_ROOT}" || die "unsafe waiter lock root"
-TARGET_ID="$(printf '%s\0%s\0%s\0%s\0' "${SOURCE_REPOSITORY_SHA}" "${RUN_ID}" "${GPU_INDEX}" "${GPU_UUID}" |
+if [[ "${QUEUE_MODE}" == resume ]]; then
+  TARGET_NAMESPACE_SHA="${SOURCE_REPOSITORY_SHA}"
+else
+  TARGET_NAMESPACE_SHA="${REPOSITORY_SHA}"
+fi
+TARGET_ID="$(printf '%s\0%s\0%s\0%s\0' "${TARGET_NAMESPACE_SHA}" "${RUN_ID}" \
+  "${GPU_INDEX}" "${GPU_UUID}" |
   /usr/bin/sha256sum | /usr/bin/awk '{print substr($1, 1, 16)}')"
 [[ "${TARGET_ID}" =~ ^[0-9a-f]{16}$ ]] || die "could not derive waiter target identity"
 TARGET_LOCK="${WAIT_LOCK_ROOT}/target-${TARGET_ID}.lock"
@@ -469,8 +589,10 @@ WAIT_LOG="${RECORD_DIR}/wait.log"
 OUTCOME="${RECORD_DIR}/outcome.state"
 RECORD="${RECORD_DIR}/record.state"
 {
-  printf 'schema=commu-matrix-waiter-record-v1\nrecord_id=%s\ntarget_id=%s\nsession=%s\ntimer_base=%s\n' \
+  printf 'schema=commu-matrix-waiter-record-v2\nrecord_id=%s\ntarget_id=%s\nsession=%s\ntimer_base=%s\n' \
     "${RECORD_ID}" "${TARGET_ID}" "${SESSION}" "${TIMER_BASE}"
+  printf 'queue_mode=%s\nparent_run_id=%s\nparent_run_repository_sha=%s\n' \
+    "${QUEUE_MODE}" "${PARENT_RUN_ID}" "${PARENT_RUN_REPOSITORY_SHA}"
   printf 'release_repository_sha=%s\nsource_repository_sha=%s\nrun_id=%s\n' \
     "${REPOSITORY_SHA}" "${SOURCE_REPOSITORY_SHA}" "${RUN_ID}"
   printf 'gpu_index=%s\ngpu_uuid=%s\nplan=%s\nplan_sha256=%s\n' \
@@ -557,7 +679,11 @@ if ! /usr/bin/tmux has-session -t "${SESSION}" 2>/dev/null; then
       registration_owned=0
       timer_armed=0
       trap - EXIT INT TERM HUP
-      printf 'MATRIX_WAIT_RESUME_FINISHED_EARLY outcome=%s wait_log=%s\n' "${early_outcome}" "${WAIT_LOG}"
+      if [[ "${QUEUE_MODE}" == resume ]]; then
+        printf 'MATRIX_WAIT_RESUME_FINISHED_EARLY outcome=%s wait_log=%s\n' "${early_outcome}" "${WAIT_LOG}"
+      else
+        printf 'MATRIX_WAIT_CONTINUE_FINISHED_EARLY outcome=%s wait_log=%s\n' "${early_outcome}" "${WAIT_LOG}"
+      fi
       exit 0
       ;;
     *) die "waiter exited immediately with outcome ${early_outcome:-unknown}; inspect ${WAIT_LOG}" ;;
@@ -568,9 +694,13 @@ registration_owned=0
 timer_armed=0
 trap - EXIT INT TERM HUP
 
-printf 'MATRIX_WAIT_RESUME_SUBMITTED session=%s record=%s\n' "${SESSION}" "${RECORD}"
-printf 'run_id=%s gpu_index=%s gpu_uuid=%s poll_seconds=%s\n' \
-  "${RUN_ID}" "${GPU_INDEX}" "${GPU_UUID}" "${POLL_SECONDS}"
+if [[ "${QUEUE_MODE}" == resume ]]; then
+  printf 'MATRIX_WAIT_RESUME_SUBMITTED session=%s record=%s\n' "${SESSION}" "${RECORD}"
+else
+  printf 'MATRIX_WAIT_CONTINUE_SUBMITTED session=%s record=%s\n' "${SESSION}" "${RECORD}"
+fi
+printf 'run_id=%s gpu_index=%s gpu_uuid=%s poll_seconds=%s plan=%s plan_sha256=%s\n' \
+  "${RUN_ID}" "${GPU_INDEX}" "${GPU_UUID}" "${POLL_SECONDS}" "${PLAN}" "${PLAN_SHA256}"
 printf 'authorization_cutoff_local=%s authorization_cutoff_epoch=%s\n' \
   "$(/usr/bin/date -d "@${AUTHORIZATION_CUTOFF_EPOCH}" '+%F %T %z')" "${AUTHORIZATION_CUTOFF_EPOCH}"
 printf 'wait_log=%s\n' "${WAIT_LOG}"
