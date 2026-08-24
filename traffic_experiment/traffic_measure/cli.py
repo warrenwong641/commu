@@ -89,6 +89,8 @@ def _parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run measured requests")
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--output-dir", type=Path, required=True)
+    run.add_argument("--prior-ledger", type=Path, help=argparse.SUPPRESS)
+    run.add_argument("--prior-ledger-cell", help=argparse.SUPPRESS)
     run.add_argument("--base-url")
     run.add_argument("--model", default="Qwen/Qwen3-8B")
     run.add_argument(
@@ -433,6 +435,8 @@ def main() -> int:
             request_start_interval_seconds=args.request_start_interval_seconds,
             session_budget_seconds=args.session_budget_seconds,
             condition=args.condition,
+            prior_ledger_path=args.prior_ledger,
+            prior_ledger_cell=args.prior_ledger_cell,
         )
         _remove_credentials_from_environment()
         results = run_experiment(settings)

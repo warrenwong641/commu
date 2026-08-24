@@ -956,6 +956,155 @@ def test_runner_filters_to_one_compression_condition(tmp_path):
         server.server_close()
 
 
+def test_parent_ledger_skips_completed_and_counts_orphan_attempt(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _VllmLikeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        manifest = tmp_path / "manifest.jsonl"
+        request_ids = [
+            "conversation-1::q1::no_compression",
+            "conversation-2::q1::no_compression",
+        ]
+        write_jsonl(
+            manifest,
+            [
+                {
+                    "request_id": request_id,
+                    "sample_id": f"conversation-{index}::q1",
+                    "conversation_id": f"conversation-{index}",
+                    "question_id": "q1",
+                    "condition": "no_compression",
+                    "messages": [{"role": "user", "content": "Where?"}],
+                    "messages_sha256": str(index) * 64,
+                }
+                for index, request_id in enumerate(request_ids, 1)
+            ],
+        )
+        orphan_job = _job_id(request_ids[1], 1)
+        ledger = tmp_path / "PARENT_LEDGER.json"
+        ledger.write_text(
+            json.dumps(
+                {
+                    "schema": "commu-matrix-parent-ledger-v1",
+                    "cells": {
+                        "rtt/qa/tls13": {
+                            "completed": [
+                                {"request_id": request_ids[0], "repetition": 1}
+                            ],
+                            "attempt_counts": [
+                                {
+                                    "request_id": request_ids[1],
+                                    "repetition": 1,
+                                    "count": 2,
+                                }
+                            ],
+                            "orphan_attempt_counts": [
+                                {"job_id": orphan_job, "count": 3}
+                            ],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        results_path = run_experiment(
+            RunSettings(
+                manifest_path=manifest,
+                output_dir=tmp_path / "target",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                model="test-model",
+                api_key="test-key",
+                sample_limit=2,
+                repetitions=1,
+                seed=42,
+                temperature=0,
+                max_output_tokens=16,
+                request_timeout_seconds=5,
+                observation_seconds=0,
+                capture_interface="",
+                capture_filter="",
+                capture_startup_delay_seconds=0,
+                no_capture=True,
+                no_wait_after_request=True,
+                prior_ledger_path=ledger,
+                prior_ledger_cell="rtt/qa/tls13",
+            )
+        )
+        rows = read_jsonl(results_path)
+        assert len(rows) == 1
+        assert rows[0]["request_id"] == request_ids[1]
+        assert rows[0]["attempt"] == 4
+        assert "-attempt-004-" in rows[0]["attempt_id"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_parent_ledger_rejects_target_completed_overlap(tmp_path):
+    manifest = tmp_path / "manifest.jsonl"
+    request_id = "conversation-1::q1::no_compression"
+    write_jsonl(
+        manifest,
+        [
+            {
+                "request_id": request_id,
+                "sample_id": "conversation-1::q1",
+                "conversation_id": "conversation-1",
+                "question_id": "q1",
+                "condition": "no_compression",
+                "messages": [{"role": "user", "content": "Where?"}],
+                "messages_sha256": "a" * 64,
+            }
+        ],
+    )
+    output = tmp_path / "target"
+    output.mkdir()
+    write_jsonl(
+        output / "results.jsonl",
+        [{"request_id": request_id, "repetition": 1, "completed": True}],
+    )
+    ledger = tmp_path / "PARENT_LEDGER.json"
+    ledger.write_text(
+        json.dumps(
+            {
+                "schema": "commu-matrix-parent-ledger-v1",
+                "cells": {
+                    "baseline/qa/tls13": {
+                        "completed": [{"request_id": request_id, "repetition": 1}],
+                        "attempt_counts": [],
+                        "orphan_attempt_counts": [],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = RunSettings(
+        manifest_path=manifest,
+        output_dir=output,
+        base_url="http://127.0.0.1:1/v1",
+        model="test-model",
+        api_key="test-key",
+        sample_limit=1,
+        repetitions=1,
+        seed=42,
+        temperature=0,
+        max_output_tokens=16,
+        request_timeout_seconds=5,
+        observation_seconds=0,
+        capture_interface="",
+        capture_filter="",
+        capture_startup_delay_seconds=0,
+        no_capture=True,
+        no_wait_after_request=True,
+        prior_ledger_path=ledger,
+        prior_ledger_cell="baseline/qa/tls13",
+    )
+    with pytest.raises(ValueError, match="overlap immutable parent"):
+        run_experiment(settings)
+
+
 def test_session_budget_finishes_first_response_but_admits_no_late_second(tmp_path):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _VllmLikeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

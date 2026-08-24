@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import re
 import socket
 import ssl
 import statistics
@@ -67,6 +68,8 @@ class RunSettings:
     request_start_interval_seconds: float = 0.0
     session_budget_seconds: float = 0.0
     condition: str | None = None
+    prior_ledger_path: Path | None = None
+    prior_ledger_cell: str | None = None
 
 
 def parse_sse_lines(lines: Iterable[str]) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -137,6 +140,51 @@ def _attempt_counts(results_path: Path) -> dict[tuple[str, int], int]:
         attempt = int(recorded) if recorded is not None else counts.get(key, 0) + 1
         counts[key] = max(counts.get(key, 0), attempt)
     return counts
+
+
+def _prior_progress(
+    path: Path | None, cell: str | None
+) -> tuple[set[tuple[str, int]], dict[tuple[str, int], int], dict[str, int]]:
+    """Load the immutable cross-GPU continuation ledger for one matrix cell."""
+    if path is None and cell is None:
+        return set(), {}, {}
+    if path is None or cell is None:
+        raise ValueError("prior ledger path and cell must be supplied together")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if value.get("schema") != "commu-matrix-parent-ledger-v1":
+        raise ValueError("prior ledger has an unsupported schema")
+    cells = value.get("cells")
+    if not isinstance(cells, dict) or cell not in cells:
+        raise ValueError(f"prior ledger has no canonical cell {cell!r}")
+    entry = cells[cell]
+    if not isinstance(entry, dict) or set(entry) != {
+        "attempt_counts", "completed", "orphan_attempt_counts"
+    }:
+        raise ValueError("prior ledger cell is malformed")
+    completed: set[tuple[str, int]] = set()
+    attempts: dict[tuple[str, int], int] = {}
+    orphans: dict[str, int] = {}
+    for item in entry["completed"]:
+        key = (str(item["request_id"]), int(item["repetition"]))
+        if key in completed:
+            raise ValueError(f"duplicate prior completed key: {key}")
+        completed.add(key)
+    for item in entry["attempt_counts"]:
+        key = (str(item["request_id"]), int(item["repetition"]))
+        count = int(item["count"])
+        if count < 1 or key in attempts:
+            raise ValueError(f"invalid prior attempt count: {key}")
+        attempts[key] = count
+    for item in entry["orphan_attempt_counts"]:
+        job_id, count = str(item["job_id"]), int(item["count"])
+        if (
+            not re.fullmatch(r"[0-9a-f]{24}", job_id)
+            or count < 1
+            or job_id in orphans
+        ):
+            raise ValueError("invalid prior orphan-attempt count")
+        orphans[job_id] = count
+    return completed, attempts, orphans
 
 
 def _job_id(request_id: str, repetition: int) -> str:
@@ -557,6 +605,14 @@ def run_experiment(settings: RunSettings) -> Path:
     captures_dir = output_dir / "captures"
     completed = _completed_keys(results_path)
     attempt_counts = _attempt_counts(results_path)
+    prior_completed, prior_attempt_counts, prior_orphans = _prior_progress(
+        settings.prior_ledger_path, settings.prior_ledger_cell
+    )
+    if completed & prior_completed:
+        raise ValueError("target results overlap immutable parent completed keys")
+    completed.update(prior_completed)
+    for key, count in prior_attempt_counts.items():
+        attempt_counts[key] = max(attempt_counts.get(key, 0), count)
     backend_ip, backend_port = _resolved_backend(settings.base_url)
     if settings.transport not in {"http1", "tls13", "http3"}:
         raise ValueError("transport must be http1, tls13, or http3")
@@ -635,7 +691,9 @@ def run_experiment(settings: RunSettings) -> Path:
 
             run_uuid = uuid.uuid4().hex
             job_id = _job_id(key[0], repetition)
-            attempt = attempt_counts.get(key, 0) + 1
+            attempt = max(
+                attempt_counts.get(key, 0), prior_orphans.get(job_id, 0)
+            ) + 1
             attempt_counts[key] = attempt
             attempt_id = f"{job_id}-attempt-{attempt:03d}-{run_uuid[:8]}"
             capture_path = captures_dir / f"{attempt_id}.pcapng"
