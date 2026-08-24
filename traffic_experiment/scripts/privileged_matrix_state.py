@@ -16,10 +16,14 @@ from pathlib import PurePosixPath
 
 SCHEMA = "commu-secure-single-matrix-plan-v2"
 LEGACY_SCHEMA = "commu-secure-single-matrix-plan-v1"
+CONTINUATION_SCHEMA = "commu-secure-single-matrix-continuation-plan-v1"
+PARENT_LEDGER_SCHEMA = "commu-matrix-parent-ledger-v1"
 GENERATION_SCHEMA = "commu-secure-single-matrix-service-generation-v1"
 GENERATION_CLOSE_SCHEMA = "commu-secure-single-matrix-service-generation-close-v1"
 CELL_SCHEMA = "commu-secure-single-matrix-cell-v1"
 COMPLETE_SCHEMA = "commu-secure-single-matrix-complete-v2"
+CONTINUATION_CELL_SCHEMA = "commu-secure-single-matrix-continuation-cell-v1"
+CONTINUATION_COMPLETE_SCHEMA = "commu-secure-single-matrix-continuation-complete-v1"
 NETWORKS = ("baseline", "rtt", "realistic")
 TRANSPORTS = ("tls13", "http3")
 WORKLOADS = (("qa", 32), ("summary", 20))
@@ -128,6 +132,25 @@ def compare_measurement_payloads(args: argparse.Namespace) -> None:
     new = measurement_payload_inventory(args.current_release_root)
     if old != new:
         raise ValueError("legacy/current measurement payloads are not byte-identical")
+
+
+def compare_continuation_payloads(args: argparse.Namespace) -> None:
+    """Allow only reviewed continuation-ledger plumbing to differ."""
+    old = measurement_payload_inventory(args.parent_release_root)
+    new = measurement_payload_inventory(args.current_release_root)
+    allowed = {
+        "repository/traffic_experiment/traffic_measure/cli.py",
+        "repository/traffic_experiment/traffic_measure/runner.py",
+    }
+    if not allowed <= set(old) or not allowed <= set(new):
+        raise ValueError("continuation releases lack reviewed runner payloads")
+    changed = {key for key in set(old) | set(new) if old.get(key) != new.get(key)}
+    if changed != allowed or {key: value for key, value in old.items() if key not in allowed} != {
+        key: value for key, value in new.items() if key not in allowed
+    }:
+        raise ValueError(
+            "parent/continuation measurement payloads differ outside reviewed ledger plumbing"
+        )
 
 
 def safe_directory(path: Path, uid: int | None = None) -> None:
@@ -343,6 +366,127 @@ def legacy_plan_action(args: argparse.Namespace) -> None:
     print(sha256_file(root / "RUN_PLAN.json"))
 
 
+def continuation_plan_action(args: argparse.Namespace) -> None:
+    """Create or re-verify a separate-root, cross-GPU continuation."""
+    root = args.root.resolve(strict=True)
+    safe_directory(root, 0)
+    plan_path = root / "RUN_PLAN.json"
+    topology_path = root / "worker-topology.json"
+    ledger_path = root / "PARENT_LEDGER.json"
+    expected = expected_plan(args)
+    topology = expected_topology(args)
+
+    if args.action == "create-continuation-plan":
+        if any(
+            path.exists() or path.is_symlink()
+            for path in (plan_path, topology_path, ledger_path)
+        ):
+            raise ValueError("continuation plan/topology/ledger already exists")
+        ledger = build_parent_ledger(
+            args.parent_root, args.qa_manifest, args.summary_manifest
+        )
+        if not 0 < ledger["completed_calls"] < EXPECTED_CALLS:
+            raise ValueError("parent snapshot must be incomplete with accepted progress")
+        if root == Path(ledger["parent_root"]):
+            raise ValueError("continuation target must use a separate run root")
+        if (
+            expected["gpu_index"] == ledger["parent_gpu_index"]
+            or expected["gpu_uuid"] == ledger["parent_gpu_uuid"]
+        ):
+            raise ValueError("continuation target must use a different physical GPU")
+        if expected["run_id"] == ledger["parent_run_id"]:
+            raise ValueError("continuation target must use a distinct run ID")
+        if (
+            expected["qa_manifest_sha256"] != ledger["qa_manifest_sha256"]
+            or expected["summary_manifest_sha256"]
+            != ledger["summary_manifest_sha256"]
+            or expected["service_uid"] != ledger["parent_service_uid"]
+            or topology["model"] != ledger["parent_model"]
+            or topology["served_model_name"] != ledger["parent_served_model_name"]
+            or topology["model_revision"] != ledger["parent_model_revision"]
+        ):
+            raise ValueError("continuation target differs from frozen parent workload")
+        publish(ledger_path, ledger)
+        expected["schema"] = CONTINUATION_SCHEMA
+        expected["analysis_role"] = "secondary-post-hoc"
+        expected["source_parent_repository_sha"] = ledger["parent_repository_sha"]
+        expected["target_orchestration_repository_sha"] = expected["repository_sha"]
+        expected["parent_snapshot"] = {
+            "ledger_path": "PARENT_LEDGER.json",
+            "ledger_sha256": sha256_file(ledger_path),
+            "run_root": ledger["parent_root"],
+            "run_plan_sha256": ledger["parent_run_plan_sha256"],
+            "repository_sha": ledger["parent_repository_sha"],
+            "run_id": ledger["parent_run_id"],
+            "gpu_index": ledger["parent_gpu_index"],
+            "gpu_uuid": ledger["parent_gpu_uuid"],
+            "completed_calls": ledger["completed_calls"],
+            "model": ledger["parent_model"],
+            "served_model_name": ledger["parent_served_model_name"],
+            "model_revision": ledger["parent_model_revision"],
+        }
+        expected["target_expected_calls"] = EXPECTED_CALLS - ledger["completed_calls"]
+        publish(topology_path, topology)
+        publish(plan_path, expected)
+    else:
+        plan = read_json(plan_path)
+        if plan.get("schema") != CONTINUATION_SCHEMA:
+            raise ValueError("run is not an explicit cross-GPU continuation")
+        for key, value in expected.items():
+            if key != "schema" and plan.get(key) != value:
+                raise ValueError(f"continuation target identity differs at {key}")
+        ledger = read_json(ledger_path)
+        validate_parent_ledger_shape(ledger)
+        snapshot = plan.get("parent_snapshot")
+        if (
+            not isinstance(snapshot, dict)
+            or set(snapshot)
+            != {
+                "ledger_path", "ledger_sha256", "run_root", "run_plan_sha256",
+                "repository_sha", "run_id", "gpu_index", "gpu_uuid",
+                "completed_calls", "model", "served_model_name", "model_revision",
+            }
+            or snapshot["ledger_path"] != "PARENT_LEDGER.json"
+            or snapshot["ledger_sha256"] != sha256_file(ledger_path)
+            or snapshot["run_root"] != ledger["parent_root"]
+            or snapshot["run_plan_sha256"] != ledger["parent_run_plan_sha256"]
+            or snapshot["repository_sha"] != ledger["parent_repository_sha"]
+            or snapshot["run_id"] != ledger["parent_run_id"]
+            or snapshot["gpu_index"] != ledger["parent_gpu_index"]
+            or snapshot["gpu_uuid"] != ledger["parent_gpu_uuid"]
+            or snapshot["completed_calls"] != ledger["completed_calls"]
+            or snapshot["model"] != ledger["parent_model"]
+            or snapshot["served_model_name"] != ledger["parent_served_model_name"]
+            or snapshot["model_revision"] != ledger["parent_model_revision"]
+            or plan.get("target_expected_calls")
+            != EXPECTED_CALLS - ledger["completed_calls"]
+            or plan.get("analysis_role") != "secondary-post-hoc"
+            or plan.get("source_parent_repository_sha")
+            != ledger["parent_repository_sha"]
+            or plan.get("target_orchestration_repository_sha")
+            != expected["repository_sha"]
+        ):
+            raise ValueError("continuation parent snapshot identity differs")
+        if Path(ledger["parent_root"]) == root:
+            raise ValueError("continuation target aliases its parent root")
+        if (
+            plan["gpu_index"] == ledger["parent_gpu_index"]
+            or plan["gpu_uuid"] == ledger["parent_gpu_uuid"]
+        ):
+            raise ValueError("continuation target aliases its parent GPU")
+        rebuilt = build_parent_ledger(
+            args.parent_root, args.qa_manifest, args.summary_manifest
+        )
+        if rebuilt != ledger:
+            raise ValueError("parent results/captures changed after continuation snapshot")
+        if (
+            read_json(topology_path) != topology
+            or sha256_file(topology_path) != plan["worker_topology_sha256"]
+        ):
+            raise ValueError("continuation worker topology differs")
+    print(sha256_file(plan_path))
+
+
 def generation_directory(root: Path) -> Path:
     return root / "SERVICE_GENERATIONS"
 
@@ -452,7 +596,7 @@ def generation_is_closed(path: Path, value: dict) -> bool:
 def record_generation(args: argparse.Namespace) -> None:
     root = args.root.resolve(strict=True)
     plan = read_json(root / "RUN_PLAN.json")
-    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA):
+    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA, CONTINUATION_SCHEMA):
         raise ValueError("unsupported run-plan schema for service generation")
     directory = generation_directory(root)
     if not directory.exists():
@@ -591,6 +735,505 @@ def cell_path(root: Path, network: str, workload: str, transport: str) -> Path:
     return root / "cells" / network / workload / transport
 
 
+def _stable_parent_bytes(path: Path, service_uid: int) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid not in (0, service_uid)
+            or before.st_nlink != 1
+        ):
+            raise ValueError(f"unsafe parent result/capture file: {path}")
+        chunks = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ValueError(f"parent file changed while reading: {path}")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _expected_manifest_keys(
+    manifest: Path, manifest_sha256: str, service_uid: int
+) -> list[tuple[str, int]]:
+    supplied = manifest.absolute()
+    manifest = manifest.resolve(strict=True)
+    if supplied != manifest:
+        raise ValueError(f"manifest path contains a symlink: {supplied}")
+    data = _stable_parent_bytes(manifest, service_uid)
+    if hashlib.sha256(data).hexdigest() != manifest_sha256:
+        raise ValueError(f"manifest digest mismatch: {manifest}")
+    request_ids = []
+    for number, line in enumerate(data.decode("utf-8").splitlines(), 1):
+        if not line:
+            continue
+        value = json.loads(line)
+        request_id = value.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError(f"manifest request ID is invalid at {manifest}:{number}")
+        request_ids.append(request_id)
+    if len(request_ids) != len(set(request_ids)):
+        raise ValueError(f"manifest contains duplicate request IDs: {manifest}")
+    return sorted(
+        (request_id, repetition)
+        for request_id in request_ids
+        for repetition in range(1, REPETITIONS + 1)
+    )
+
+
+def _job_id(request_id: str, repetition: int) -> str:
+    value = json.dumps(
+        {"repetition": repetition, "request_id": request_id},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()[:24]
+
+
+def _validate_parent_plan(plan: dict, topology: dict) -> None:
+    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA):
+        raise ValueError("parent must be an original single-GPU matrix plan")
+    canonical_cells = [
+        {
+            "network": network,
+            "transport": transport,
+            "workload": workload,
+            "samples": samples,
+            "repetitions": REPETITIONS,
+            "calls": samples * CONDITIONS * REPETITIONS,
+        }
+        for network in NETWORKS
+        for workload, samples in WORKLOADS
+        for transport in TRANSPORTS
+    ]
+    if (
+        plan.get("cells") != canonical_cells
+        or plan.get("expected_calls") != EXPECTED_CALLS
+        or plan.get("worker_count") != 1
+        or plan.get("networks") != list(NETWORKS)
+        or plan.get("transports") != list(TRANSPORTS)
+        or plan.get("workloads") != [item[0] for item in WORKLOADS]
+        or plan.get("conditions_per_sample") != CONDITIONS
+        or plan.get("repetitions") != REPETITIONS
+        or not isinstance(plan.get("service_uid"), int)
+        or not isinstance(plan.get("gpu_index"), int)
+        or re.fullmatch(r"GPU-[0-9A-Fa-f-]+", str(plan.get("gpu_uuid", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(plan.get("repository_sha", ""))) is None
+        or topology.get("worker_count") != 1
+        or topology.get("schema_version") != 1
+        or not isinstance(topology.get("model"), str)
+        or not topology.get("model")
+        or not isinstance(topology.get("served_model_name"), str)
+        or not topology.get("served_model_name")
+        or re.fullmatch(r"[0-9a-f]{40}", str(topology.get("model_revision", ""))) is None
+        or len(topology.get("workers", [])) != 1
+        or topology["workers"][0].get("gpu_index") != plan["gpu_index"]
+        or topology["workers"][0].get("gpu_uuid") != plan["gpu_uuid"]
+    ):
+        raise ValueError("parent run plan/topology is non-canonical")
+
+
+def validate_parent_ledger_shape(ledger: dict) -> None:
+    expected_top = {
+        "schema", "parent_root", "parent_run_plan_sha256",
+        "parent_repository_sha", "parent_run_id", "parent_gpu_index",
+        "parent_gpu_uuid", "parent_service_uid", "qa_manifest_sha256",
+        "summary_manifest_sha256", "qa_manifest_path", "summary_manifest_path",
+        "parent_model", "parent_served_model_name", "parent_model_revision",
+        "expected_keys", "completed_calls", "cells",
+    }
+    if (
+        not isinstance(ledger, dict)
+        or set(ledger) != expected_top
+        or ledger.get("schema") != PARENT_LEDGER_SCHEMA
+        or not isinstance(ledger.get("completed_calls"), int)
+        or not isinstance(ledger.get("cells"), dict)
+        or not isinstance(ledger.get("expected_keys"), dict)
+        or set(ledger.get("expected_keys", {})) != {"qa", "summary"}
+        or re.fullmatch(r"[0-9a-f]{64}", str(ledger.get("parent_run_plan_sha256", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(ledger.get("parent_repository_sha", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(ledger.get("qa_manifest_sha256", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(ledger.get("summary_manifest_sha256", ""))) is None
+        or not Path(str(ledger.get("parent_root", ""))).is_absolute()
+        or not Path(str(ledger.get("qa_manifest_path", ""))).is_absolute()
+        or not Path(str(ledger.get("summary_manifest_path", ""))).is_absolute()
+    ):
+        raise ValueError("parent ledger is malformed")
+    for workload, keys in ledger["expected_keys"].items():
+        normalized = []
+        malformed = not isinstance(keys, list)
+        for item in keys if isinstance(keys, list) else []:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"request_id", "repetition"}
+                or not isinstance(item["request_id"], str)
+                or not item["request_id"]
+                or not isinstance(item["repetition"], int)
+                or item["repetition"] not in range(1, REPETITIONS + 1)
+            ):
+                malformed = True
+                continue
+            normalized.append((item["request_id"], item["repetition"]))
+        if (
+            malformed
+            or len(normalized) != len(keys)
+            or normalized != sorted(set(normalized))
+            or len(normalized)
+            != dict(WORKLOADS)[workload] * CONDITIONS * REPETITIONS
+        ):
+            raise ValueError(f"parent ledger expected keys are malformed: {workload}")
+    expected_cell_names = {
+        f"{network}/{workload}/{transport}"
+        for network in NETWORKS
+        for workload, _samples in WORKLOADS
+        for transport in TRANSPORTS
+    }
+    if set(ledger["cells"]) != expected_cell_names:
+        raise ValueError("parent ledger cell coverage is non-canonical")
+    total = 0
+    for name, cell in ledger["cells"].items():
+        if not isinstance(cell, dict) or set(cell) != {
+            "completed", "attempt_counts", "orphan_attempt_counts"
+        }:
+            raise ValueError(f"parent ledger cell is malformed: {name}")
+        completed_keys = []
+        for item in cell["completed"]:
+            if not isinstance(item, dict) or set(item) != {
+                "request_id", "repetition", "attempt", "attempt_id",
+                "result_file", "result_line", "result_sha256", "capture_file",
+                "capture_sha256", "manifest_sha256", "transport", "gpu_index",
+                "gpu_uuid",
+            }:
+                raise ValueError(f"parent completed entry is malformed: {name}")
+            completed_keys.append((item["request_id"], item["repetition"]))
+        if completed_keys != sorted(set(completed_keys)):
+            raise ValueError(f"parent completed keys are non-canonical: {name}")
+        total += len(completed_keys)
+        for field, key_name in (
+            ("attempt_counts", "request_id"),
+            ("orphan_attempt_counts", "job_id"),
+        ):
+            values = cell[field]
+            if not isinstance(values, list) or any(
+                not isinstance(item, dict)
+                or set(item)
+                != ({"request_id", "repetition", "count"} if key_name == "request_id" else {"job_id", "count"})
+                or not isinstance(item["count"], int)
+                or item["count"] < 1
+                for item in values
+            ):
+                raise ValueError(f"parent {field} is malformed: {name}")
+    if total != ledger["completed_calls"]:
+        raise ValueError("parent ledger completed-call total differs")
+
+
+def build_parent_ledger(
+    parent_root: Path, qa_manifest: Path, summary_manifest: Path
+) -> dict:
+    """Validate and snapshot accepted parent progress without modifying it."""
+    supplied_parent = parent_root.absolute()
+    parent_root = parent_root.resolve(strict=True)
+    if supplied_parent != parent_root:
+        raise ValueError("parent root path contains a symlink")
+    safe_directory(parent_root, 0)
+    parent_plan_path = parent_root / "RUN_PLAN.json"
+    topology_path = parent_root / "worker-topology.json"
+    plan = read_json(parent_plan_path)
+    topology = read_json(topology_path)
+    _validate_parent_plan(plan, topology)
+    if (
+        sha256_file(topology_path) != plan.get("worker_topology_sha256")
+    ):
+        raise ValueError("parent topology digest differs from run plan")
+    service_uid = plan["service_uid"]
+    expected_keys = {
+        "qa": _expected_manifest_keys(
+            qa_manifest, plan["qa_manifest_sha256"], service_uid
+        ),
+        "summary": _expected_manifest_keys(
+            summary_manifest, plan["summary_manifest_sha256"], service_uid
+        ),
+    }
+    if (
+        len(expected_keys["qa"]) != dict(WORKLOADS)["qa"] * CONDITIONS * REPETITIONS
+        or len(expected_keys["summary"])
+        != dict(WORKLOADS)["summary"] * CONDITIONS * REPETITIONS
+    ):
+        raise ValueError("manifest cardinality differs from the fixed matrix")
+
+    cells: dict[str, dict] = {}
+    all_completed = 0
+    for cell_plan in plan["cells"]:
+        network = cell_plan["network"]
+        workload = cell_plan["workload"]
+        transport = cell_plan["transport"]
+        name = f"{network}/{workload}/{transport}"
+        cell = cell_path(parent_root, network, workload, transport)
+        expected_set = set(expected_keys[workload])
+        completed: list[dict] = []
+        attempts: dict[tuple[str, int], int] = {}
+        seen_attempt_ids: set[str] = set()
+        seen_attempt_numbers: set[tuple[str, int, int]] = set()
+        referenced_captures: set[Path] = set()
+        if cell.exists() or cell.is_symlink():
+            if cell.resolve(strict=True) != cell:
+                raise ValueError(f"parent cell path contains a symlink: {cell}")
+            metadata = os.stat(cell, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid not in (0, service_uid)
+            ):
+                raise ValueError(f"unsafe parent cell directory: {cell}")
+        results = cell / "results.jsonl"
+        if results.exists() or results.is_symlink():
+            data = _stable_parent_bytes(results, service_uid)
+            for line_number, line in enumerate(data.decode("utf-8").splitlines(), 1):
+                if not line:
+                    continue
+                row = json.loads(line)
+                key = (str(row.get("request_id", "")), int(row.get("repetition", 0)))
+                if key not in expected_set:
+                    raise ValueError(f"parent result key is outside the frozen manifest: {key}")
+                attempt = int(row.get("attempt", 0))
+                attempt_id = row.get("attempt_id")
+                job_id = _job_id(*key)
+                attempt_key = (key[0], key[1], attempt)
+                if (
+                    not isinstance(attempt_id, str)
+                    or re.fullmatch(
+                        rf"{job_id}-attempt-{attempt:03d}-[0-9a-f]{{8}}", attempt_id
+                    ) is None
+                    or attempt_id in seen_attempt_ids
+                    or attempt_key in seen_attempt_numbers
+                    or attempt < 1
+                    or row.get("job_id") != job_id
+                    or row.get("manifest_sha256")
+                    != plan[f"{workload}_manifest_sha256"]
+                    or row.get("worker_count") != 1
+                    or row.get("worker_index") != 0
+                    or row.get("worker_gpu_index") != plan["gpu_index"]
+                    or row.get("worker_gpu_uuid") != plan["gpu_uuid"]
+                    or row.get("topology_worker_index") != 0
+                    or row.get("transport") != transport
+                    or row.get("connection_mode") != "warm"
+                    or row.get("backend_port")
+                    != (8443 if transport == "tls13" else 8444)
+                ):
+                    raise ValueError(
+                        f"parent result provenance mismatch at {results}:{line_number}"
+                    )
+                seen_attempt_ids.add(attempt_id)
+                seen_attempt_numbers.add(attempt_key)
+                attempts[key] = max(attempts.get(key, 0), attempt)
+
+                capture_value = row.get("capture_file")
+                capture = None
+                if capture_value is not None:
+                    capture = Path(str(capture_value))
+                    capture_root = cell / "captures"
+                    if (
+                        not capture.is_absolute()
+                        or capture.parent != capture_root
+                        or capture.resolve(strict=True) != capture
+                    ):
+                        raise ValueError(f"parent capture escapes its cell: {capture}")
+                    capture_data = _stable_parent_bytes(capture, service_uid)
+                    capture_sha = hashlib.sha256(capture_data).hexdigest()
+                    if capture_sha != row.get("capture_sha256"):
+                        raise ValueError(f"parent capture digest mismatch: {capture}")
+                    referenced_captures.add(capture)
+                if row.get("completed") is True:
+                    if any(
+                        item["request_id"] == key[0]
+                        and item["repetition"] == key[1]
+                        for item in completed
+                    ):
+                        raise ValueError(f"parent has multiple completed rows for {key}")
+                    if capture is None or capture.name != f"{attempt_id}.pcapng":
+                        raise ValueError(f"parent completed capture is non-canonical: {key}")
+                    completed.append(
+                        {
+                            "request_id": key[0],
+                            "repetition": key[1],
+                            "attempt": attempt,
+                            "attempt_id": attempt_id,
+                            "result_file": str(results),
+                            "result_line": line_number,
+                            "result_sha256": hashlib.sha256(canonical(row)).hexdigest(),
+                            "capture_file": str(capture),
+                            "capture_sha256": row["capture_sha256"],
+                            "manifest_sha256": plan[f"{workload}_manifest_sha256"],
+                            "transport": transport,
+                            "gpu_index": plan["gpu_index"],
+                            "gpu_uuid": plan["gpu_uuid"],
+                        }
+                    )
+
+        orphan_counts: dict[str, int] = {}
+        captures = cell / "captures"
+        if captures.exists() or captures.is_symlink():
+            metadata = os.stat(captures, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid not in (0, service_uid)
+            ):
+                raise ValueError(f"unsafe parent capture directory: {captures}")
+            valid_job_ids = {_job_id(*key) for key in expected_set}
+            for capture in captures.iterdir():
+                if capture in referenced_captures:
+                    continue
+                match = re.fullmatch(
+                    r"([0-9a-f]{24})-attempt-([0-9]{3})-[0-9a-f]{8}\.partial\.pcapng",
+                    capture.name,
+                )
+                if match is None or match.group(1) not in valid_job_ids:
+                    raise ValueError(f"unaccounted parent capture: {capture}")
+                _stable_parent_bytes(capture, service_uid)
+                orphan_counts[match.group(1)] = max(
+                    orphan_counts.get(match.group(1), 0), int(match.group(2))
+                )
+        completed.sort(key=lambda item: (item["request_id"], item["repetition"]))
+        all_completed += len(completed)
+        cells[name] = {
+            "completed": completed,
+            "attempt_counts": [
+                {"request_id": key[0], "repetition": key[1], "count": count}
+                for key, count in sorted(attempts.items())
+            ],
+            "orphan_attempt_counts": [
+                {"job_id": job_id, "count": count}
+                for job_id, count in sorted(orphan_counts.items())
+            ],
+        }
+    ledger = {
+        "schema": PARENT_LEDGER_SCHEMA,
+        "parent_root": str(parent_root),
+        "parent_run_plan_sha256": sha256_file(parent_plan_path),
+        "parent_repository_sha": plan["repository_sha"],
+        "parent_run_id": plan["run_id"],
+        "parent_gpu_index": plan["gpu_index"],
+        "parent_gpu_uuid": plan["gpu_uuid"],
+        "parent_service_uid": service_uid,
+        "parent_model": topology["model"],
+        "parent_served_model_name": topology["served_model_name"],
+        "parent_model_revision": topology["model_revision"],
+        "qa_manifest_sha256": plan["qa_manifest_sha256"],
+        "summary_manifest_sha256": plan["summary_manifest_sha256"],
+        "qa_manifest_path": str(qa_manifest.resolve(strict=True)),
+        "summary_manifest_path": str(summary_manifest.resolve(strict=True)),
+        "expected_keys": {
+            workload: [
+                {"request_id": key[0], "repetition": key[1]} for key in keys
+            ]
+            for workload, keys in expected_keys.items()
+        },
+        "completed_calls": all_completed,
+        "cells": cells,
+    }
+    validate_parent_ledger_shape(ledger)
+    return ledger
+
+
+def continuation_ledger(root: Path, plan: dict, *, revalidate_parent: bool) -> dict:
+    if plan.get("schema") != CONTINUATION_SCHEMA:
+        raise ValueError("run is not a continuation")
+    ledger_path = root / "PARENT_LEDGER.json"
+    ledger = read_json(ledger_path)
+    validate_parent_ledger_shape(ledger)
+    snapshot = plan.get("parent_snapshot")
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("ledger_path") != "PARENT_LEDGER.json"
+        or snapshot.get("ledger_sha256") != sha256_file(ledger_path)
+        or snapshot.get("run_plan_sha256") != ledger["parent_run_plan_sha256"]
+        or snapshot.get("gpu_index") != ledger["parent_gpu_index"]
+        or snapshot.get("gpu_uuid") != ledger["parent_gpu_uuid"]
+        or snapshot.get("completed_calls") != ledger["completed_calls"]
+        or snapshot.get("model") != ledger["parent_model"]
+        or snapshot.get("served_model_name") != ledger["parent_served_model_name"]
+        or snapshot.get("model_revision") != ledger["parent_model_revision"]
+        or plan.get("source_parent_repository_sha")
+        != ledger["parent_repository_sha"]
+        or plan.get("target_orchestration_repository_sha") != plan.get("repository_sha")
+    ):
+        raise ValueError("continuation ledger differs from run plan")
+    if revalidate_parent:
+        rebuilt = build_parent_ledger(
+            Path(ledger["parent_root"]),
+            Path(ledger["qa_manifest_path"]),
+            Path(ledger["summary_manifest_path"]),
+        )
+        if rebuilt != ledger:
+            raise ValueError("parent changed after immutable snapshot")
+    return ledger
+
+
+def validate_continuation_union(
+    rows: list[dict], ledger: dict, cell_name: str, workload: str
+) -> tuple[int, int]:
+    entry = ledger["cells"][cell_name]
+    parent_completed = {
+        (str(item["request_id"]), int(item["repetition"]))
+        for item in entry["completed"]
+    }
+    expected = {
+        (str(item["request_id"]), int(item["repetition"]))
+        for item in ledger["expected_keys"][workload]
+    }
+    if not parent_completed <= expected:
+        raise ValueError(f"parent completed keys escape manifest: {cell_name}")
+    target_completed: set[tuple[str, int]] = set()
+    parent_attempts = {
+        (str(item["request_id"]), int(item["repetition"])): int(item["count"])
+        for item in entry["attempt_counts"]
+    }
+    parent_orphans = {
+        str(item["job_id"]): int(item["count"])
+        for item in entry["orphan_attempt_counts"]
+    }
+    target_attempts: set[tuple[str, int, int]] = set()
+    for row in rows:
+        key = (str(row.get("request_id", "")), int(row.get("repetition", 0)))
+        if key not in expected:
+            raise ValueError(f"target result key escapes manifest: {key}")
+        if key in parent_completed:
+            raise ValueError(f"target result overlaps parent completed key: {key}")
+        prior_attempt = max(
+            parent_attempts.get(key, 0), parent_orphans.get(_job_id(*key), 0)
+        )
+        attempt = int(row.get("attempt", 0))
+        attempt_key = (key[0], key[1], attempt)
+        attempt_id = row.get("attempt_id")
+        job_id = _job_id(*key)
+        if (
+            attempt <= prior_attempt
+            or attempt_key in target_attempts
+            or row.get("job_id") != job_id
+            or not isinstance(attempt_id, str)
+            or re.fullmatch(
+                rf"{job_id}-attempt-{attempt:03d}-[0-9a-f]{{8}}", attempt_id
+            ) is None
+        ):
+            raise ValueError(f"target attempt does not continue parent ledger: {key}")
+        target_attempts.add(attempt_key)
+        if row.get("completed") is True:
+            target_completed.add(key)
+    if parent_completed & target_completed:
+        raise ValueError(f"parent/target successful keys overlap: {cell_name}")
+    if parent_completed | target_completed != expected:
+        raise ValueError(f"parent/target union is incomplete: {cell_name}")
+    return len(parent_completed), len(target_completed)
+
+
 def completed_rows(
     results: Path,
     manifest_sha: str,
@@ -696,15 +1339,29 @@ def inventory_tree(cell: Path, service_uid: int) -> list[dict]:
 
 def seal_cell(args: argparse.Namespace) -> None:
     root = args.root.resolve(strict=True)
-    read_json(root / "RUN_PLAN.json")
+    plan = read_json(root / "RUN_PLAN.json")
     original_cell = cell_path(root, args.network, args.workload, args.transport)
     safe_directory(original_cell, args.service_uid)
     original_marker = original_cell / "CELL_COMPLETE.json"
     if original_marker.exists() or original_marker.is_symlink():
         raise ValueError("cell completion marker already exists")
-    expected = dict(WORKLOADS)[args.workload] * CONDITIONS * REPETITIONS
+    full_expected = dict(WORKLOADS)[args.workload] * CONDITIONS * REPETITIONS
+    continuation = plan.get("schema") == CONTINUATION_SCHEMA
+    ledger = continuation_ledger(root, plan, revalidate_parent=False) if continuation else None
+    cell_name = f"{args.network}/{args.workload}/{args.transport}"
+    parent_completed = (
+        len(ledger["cells"][cell_name]["completed"]) if ledger is not None else 0
+    )
+    expected = full_expected - parent_completed
     results = original_cell / "results.jsonl"
-    completed_rows(
+    if expected == 0 and not results.exists() and not results.is_symlink():
+        descriptor = os.open(
+            results,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        os.close(descriptor)
+    rows = completed_rows(
         results,
         args.manifest_sha256,
         expected,
@@ -712,6 +1369,8 @@ def seal_cell(args: argparse.Namespace) -> None:
         args.gpu_index,
         args.gpu_uuid,
     )
+    if ledger is not None:
+        validate_continuation_union(rows, ledger, cell_name, args.workload)
     sealing_root = root / ".sealing"
     if not sealing_root.exists():
         sealing_root.mkdir(mode=0o700)
@@ -728,7 +1387,7 @@ def seal_cell(args: argparse.Namespace) -> None:
     cell = staged
     marker = cell / "CELL_COMPLETE.json"
     results = cell / "results.jsonl"
-    completed_rows(
+    rows = completed_rows(
         results,
         args.manifest_sha256,
         expected,
@@ -737,6 +1396,8 @@ def seal_cell(args: argparse.Namespace) -> None:
         args.gpu_uuid,
         capture_remap=(original_cell, cell),
     )
+    if ledger is not None:
+        validate_continuation_union(rows, ledger, cell_name, args.workload)
     inventory = inventory_tree(cell, args.service_uid)
     for directory, names, files in os.walk(cell, topdown=False, followlinks=False):
         current = Path(directory)
@@ -748,7 +1409,7 @@ def seal_cell(args: argparse.Namespace) -> None:
         os.chmod(current, 0o555, follow_symlinks=False)
     if inventory_tree(cell, 0) != inventory:
         raise ValueError("cell changed while ownership was being sealed")
-    completed_rows(
+    rows = completed_rows(
         results,
         args.manifest_sha256,
         expected,
@@ -757,13 +1418,15 @@ def seal_cell(args: argparse.Namespace) -> None:
         args.gpu_uuid,
         capture_remap=(original_cell, cell),
     )
+    if ledger is not None:
+        validate_continuation_union(rows, ledger, cell_name, args.workload)
     os.chmod(cell, 0o755, follow_symlinks=False)
     marker_value = {
-        "schema": CELL_SCHEMA,
+        "schema": CONTINUATION_CELL_SCHEMA if continuation else CELL_SCHEMA,
         "network": args.network,
         "workload": args.workload,
         "transport": args.transport,
-        "expected_calls": expected,
+        "expected_calls": full_expected,
         "manifest_sha256": args.manifest_sha256,
         "gpu_uuid": args.gpu_uuid,
         "attempt_rows": len(
@@ -771,6 +1434,19 @@ def seal_cell(args: argparse.Namespace) -> None:
         ),
         "inventory": inventory,
     }
+    if ledger is not None:
+        marker_value.update(
+            {
+                "parent_completed_calls": parent_completed,
+                "target_completed_calls": expected,
+                "parent_run_plan_sha256": ledger["parent_run_plan_sha256"],
+                "parent_ledger_sha256": sha256_file(root / "PARENT_LEDGER.json"),
+                "parent_gpu_index": ledger["parent_gpu_index"],
+                "parent_gpu_uuid": ledger["parent_gpu_uuid"],
+                "target_gpu_index": plan["gpu_index"],
+                "target_gpu_uuid": plan["gpu_uuid"],
+            }
+        )
     publish(marker, marker_value)
     os.chmod(cell, 0o555, follow_symlinks=False)
     marker_digest = sha256_file(marker)
@@ -797,7 +1473,9 @@ def verify_cell_marker(root: Path, plan: dict, cell_plan: dict) -> dict:
         if cell_plan["workload"] == "qa"
         else plan["summary_manifest_sha256"]
     )
-    if set(data) != {
+    continuation = plan.get("schema") == CONTINUATION_SCHEMA
+    ledger = continuation_ledger(root, plan, revalidate_parent=False) if continuation else None
+    expected_keys = {
         "schema",
         "network",
         "workload",
@@ -807,9 +1485,24 @@ def verify_cell_marker(root: Path, plan: dict, cell_plan: dict) -> dict:
         "gpu_uuid",
         "attempt_rows",
         "inventory",
-    } or any(
+    }
+    if continuation:
+        expected_keys |= {
+            "parent_completed_calls", "target_completed_calls",
+            "parent_run_plan_sha256", "parent_ledger_sha256",
+            "parent_gpu_index", "parent_gpu_uuid", "target_gpu_index",
+            "target_gpu_uuid",
+        }
+    cell_name = (
+        f'{cell_plan["network"]}/{cell_plan["workload"]}/{cell_plan["transport"]}'
+    )
+    parent_completed = (
+        len(ledger["cells"][cell_name]["completed"]) if ledger is not None else 0
+    )
+    if set(data) != expected_keys or any(
         (
-            data["schema"] != CELL_SCHEMA,
+            data["schema"]
+            != (CONTINUATION_CELL_SCHEMA if continuation else CELL_SCHEMA),
             data["network"] != cell_plan["network"],
             data["workload"] != cell_plan["workload"],
             data["transport"] != cell_plan["transport"],
@@ -820,6 +1513,19 @@ def verify_cell_marker(root: Path, plan: dict, cell_plan: dict) -> dict:
         )
     ):
         raise ValueError(f"cell marker identity differs from run plan: {marker}")
+    if continuation and any(
+        (
+            data["parent_completed_calls"] != parent_completed,
+            data["target_completed_calls"] != cell_plan["calls"] - parent_completed,
+            data["parent_run_plan_sha256"] != ledger["parent_run_plan_sha256"],
+            data["parent_ledger_sha256"] != sha256_file(root / "PARENT_LEDGER.json"),
+            data["parent_gpu_index"] != ledger["parent_gpu_index"],
+            data["parent_gpu_uuid"] != ledger["parent_gpu_uuid"],
+            data["target_gpu_index"] != plan["gpu_index"],
+            data["target_gpu_uuid"] != plan["gpu_uuid"],
+        )
+    ):
+        raise ValueError(f"continuation cell provenance differs: {marker}")
     expected_inventory = data.get("inventory")
     if not isinstance(expected_inventory, list):
         raise ValueError(f"cell inventory is malformed: {marker}")
@@ -860,20 +1566,24 @@ def verify_cell_marker(root: Path, plan: dict, cell_plan: dict) -> dict:
     if actual_inventory != expected_inventory:
         raise ValueError(f"sealed cell inventory digest/coverage mismatch: {cell}")
     results = cell / "results.jsonl"
-    completed_rows(
+    rows = completed_rows(
         results,
         manifest_sha,
-        cell_plan["calls"],
+        cell_plan["calls"] - parent_completed,
         cell_plan["transport"],
         plan["gpu_index"],
         plan["gpu_uuid"],
     )
+    if ledger is not None:
+        validate_continuation_union(rows, ledger, cell_name, cell_plan["workload"])
     return data
 
 
 def status(args: argparse.Namespace) -> None:
     root = args.root.resolve(strict=True)
     plan = read_json(root / "RUN_PLAN.json")
+    if plan.get("schema") == CONTINUATION_SCHEMA:
+        continuation_ledger(root, plan, revalidate_parent=False)
     sealing_root = root / ".sealing"
     if sealing_root.exists():
         safe_directory(sealing_root, 0)
@@ -919,13 +1629,39 @@ def verify_matrix_marker(root: Path, plan: dict) -> dict:
         expected_cells.append(
             {"path": str(path.relative_to(root)), "sha256": sha256_file(path)}
         )
+    continuation = plan.get("schema") == CONTINUATION_SCHEMA
+    ledger = continuation_ledger(root, plan, revalidate_parent=True) if continuation else None
     expected = {
-        "schema": COMPLETE_SCHEMA,
+        "schema": CONTINUATION_COMPLETE_SCHEMA if continuation else COMPLETE_SCHEMA,
         "run_plan_sha256": sha256_file(root / "RUN_PLAN.json"),
         "expected_calls": EXPECTED_CALLS,
         "cells": expected_cells,
         "service_generation_chain": service_generation_chain(root),
     }
+    if ledger is not None:
+        expected.update(
+            {
+                "parent_completed_calls": ledger["completed_calls"],
+                "target_completed_calls": EXPECTED_CALLS - ledger["completed_calls"],
+                "parent": {
+                    "run_root": ledger["parent_root"],
+                    "run_id": ledger["parent_run_id"],
+                    "repository_sha": ledger["parent_repository_sha"],
+                    "run_plan_sha256": ledger["parent_run_plan_sha256"],
+                    "ledger_sha256": sha256_file(root / "PARENT_LEDGER.json"),
+                    "gpu_index": ledger["parent_gpu_index"],
+                    "gpu_uuid": ledger["parent_gpu_uuid"],
+                },
+                "target": {
+                    "run_root": str(root),
+                    "run_id": plan["run_id"],
+                    "repository_sha": plan["repository_sha"],
+                    "run_plan_sha256": sha256_file(root / "RUN_PLAN.json"),
+                    "gpu_index": plan["gpu_index"],
+                    "gpu_uuid": plan["gpu_uuid"],
+                },
+            }
+        )
     if data != expected:
         raise ValueError("matrix completion marker differs from sealed inventories")
     return data
@@ -934,6 +1670,11 @@ def verify_matrix_marker(root: Path, plan: dict) -> dict:
 def seal_matrix(args: argparse.Namespace) -> None:
     root = args.root.resolve(strict=True)
     plan = read_json(root / "RUN_PLAN.json")
+    ledger = (
+        continuation_ledger(root, plan, revalidate_parent=True)
+        if plan.get("schema") == CONTINUATION_SCHEMA
+        else None
+    )
     marker = root / "MATRIX_COMPLETE.json"
     if marker.exists() or marker.is_symlink():
         raise ValueError("matrix completion marker already exists")
@@ -946,16 +1687,38 @@ def seal_matrix(args: argparse.Namespace) -> None:
         cells.append({"path": str(path.relative_to(root)), "sha256": sha256_file(path)})
         if data["expected_calls"] != cell["calls"]:
             raise ValueError(f"cell plan mismatch: {path}")
-    publish(
-        marker,
-        {
-            "schema": COMPLETE_SCHEMA,
-            "run_plan_sha256": sha256_file(root / "RUN_PLAN.json"),
-            "expected_calls": EXPECTED_CALLS,
-            "cells": cells,
-            "service_generation_chain": service_generation_chain(root),
-        },
-    )
+    value = {
+        "schema": CONTINUATION_COMPLETE_SCHEMA if ledger is not None else COMPLETE_SCHEMA,
+        "run_plan_sha256": sha256_file(root / "RUN_PLAN.json"),
+        "expected_calls": EXPECTED_CALLS,
+        "cells": cells,
+        "service_generation_chain": service_generation_chain(root),
+    }
+    if ledger is not None:
+        value.update(
+            {
+                "parent_completed_calls": ledger["completed_calls"],
+                "target_completed_calls": EXPECTED_CALLS - ledger["completed_calls"],
+                "parent": {
+                    "run_root": ledger["parent_root"],
+                    "run_id": ledger["parent_run_id"],
+                    "repository_sha": ledger["parent_repository_sha"],
+                    "run_plan_sha256": ledger["parent_run_plan_sha256"],
+                    "ledger_sha256": sha256_file(root / "PARENT_LEDGER.json"),
+                    "gpu_index": ledger["parent_gpu_index"],
+                    "gpu_uuid": ledger["parent_gpu_uuid"],
+                },
+                "target": {
+                    "run_root": str(root),
+                    "run_id": plan["run_id"],
+                    "repository_sha": plan["repository_sha"],
+                    "run_plan_sha256": sha256_file(root / "RUN_PLAN.json"),
+                    "gpu_index": plan["gpu_index"],
+                    "gpu_uuid": plan["gpu_uuid"],
+                },
+            }
+        )
+    publish(marker, value)
     verify_matrix_marker(root, plan)
     print(sha256_file(marker))
 
@@ -979,7 +1742,10 @@ def verify_generations(args: argparse.Namespace) -> None:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="action", required=True)
-    for action in ("create-plan", "verify-plan", "verify-legacy-plan"):
+    for action in (
+        "create-plan", "verify-plan", "verify-legacy-plan",
+        "create-continuation-plan", "verify-continuation-plan",
+    ):
         command = commands.add_parser(action)
         command.add_argument("--root", required=True, type=Path)
         command.add_argument("--repository-sha", required=True)
@@ -1003,6 +1769,10 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--legacy-release-files-sha256", required=True)
             command.add_argument("--legacy-config-sha256", required=True)
             command.add_argument("--legacy-admission-sha256", required=True)
+        if action in ("create-continuation-plan", "verify-continuation-plan"):
+            command.add_argument("--parent-root", required=True, type=Path)
+            command.add_argument("--qa-manifest", required=True, type=Path)
+            command.add_argument("--summary-manifest", required=True, type=Path)
     command = commands.add_parser("record-generation")
     command.add_argument("--root", required=True, type=Path)
     command.add_argument("--orchestration-repository-sha", required=True)
@@ -1034,6 +1804,9 @@ def parser() -> argparse.ArgumentParser:
     command = commands.add_parser("compare-measurement-payloads")
     command.add_argument("--legacy-release-root", required=True, type=Path)
     command.add_argument("--current-release-root", required=True, type=Path)
+    command = commands.add_parser("compare-continuation-payloads")
+    command.add_argument("--parent-release-root", required=True, type=Path)
+    command.add_argument("--current-release-root", required=True, type=Path)
     for action in ("status", "seal-matrix", "verify-generations"):
         command = commands.add_parser(action)
         command.add_argument("--root", required=True, type=Path)
@@ -1047,6 +1820,10 @@ def main() -> int:
             plan_action(args)
         elif args.action == "verify-legacy-plan":
             legacy_plan_action(args)
+        elif args.action in (
+            "create-continuation-plan", "verify-continuation-plan"
+        ):
+            continuation_plan_action(args)
         elif args.action == "record-generation":
             record_generation(args)
         elif args.action == "close-generation":
@@ -1057,6 +1834,8 @@ def main() -> int:
             seal_cell(args)
         elif args.action == "compare-measurement-payloads":
             compare_measurement_payloads(args)
+        elif args.action == "compare-continuation-payloads":
+            compare_continuation_payloads(args)
         elif args.action == "status":
             status(args)
         elif args.action == "verify-generations":
