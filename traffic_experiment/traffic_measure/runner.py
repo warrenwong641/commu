@@ -7,6 +7,7 @@ import random
 import re
 import socket
 import ssl
+import stat
 import statistics
 import subprocess
 import tempfile
@@ -139,6 +140,57 @@ def _attempt_counts(results_path: Path) -> dict[tuple[str, int], int]:
         recorded = row.get("attempt")
         attempt = int(recorded) if recorded is not None else counts.get(key, 0) + 1
         counts[key] = max(counts.get(key, 0), attempt)
+    return counts
+
+
+_CAPTURE_NAME_RE = re.compile(
+    r"(?P<job_id>[0-9a-f]{24})-attempt-(?P<attempt>[0-9]{3,})-"
+    r"(?P<run_id>[0-9a-f]{8})(?:\.partial)?\.pcapng"
+)
+
+
+def _capture_attempt_counts(captures_dir: Path) -> dict[str, int]:
+    """Return the highest capture-backed attempt for each local job.
+
+    A process can die after dumpcap creates a capture but before the result row
+    is appended. Both finalized and partial captures therefore reserve their
+    attempt number. The inventory is intentionally fail-closed: an entry that
+    cannot be attributed unambiguously must not be ignored during a resume.
+    """
+    try:
+        directory_stat = captures_dir.lstat()
+    except FileNotFoundError:
+        return {}
+    if stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(
+        directory_stat.st_mode
+    ):
+        raise ValueError(
+            f"capture inventory is not a regular directory: {captures_dir}"
+        )
+
+    counts: dict[str, int] = {}
+    seen: set[tuple[str, int]] = set()
+    with os.scandir(captures_dir) as entries:
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                raise ValueError(f"unsafe capture inventory entry: {entry.name!r}")
+            match = _CAPTURE_NAME_RE.fullmatch(entry.name)
+            if match is None:
+                raise ValueError(
+                    f"unrecognized capture inventory entry: {entry.name!r}"
+                )
+            job_id = match.group("job_id")
+            attempt_text = match.group("attempt")
+            attempt = int(attempt_text)
+            if attempt < 1 or attempt_text != f"{attempt:03d}":
+                raise ValueError(f"non-canonical capture attempt: {entry.name!r}")
+            identity = (job_id, attempt)
+            if identity in seen:
+                raise ValueError(
+                    f"duplicate capture attempt for job {job_id}: {attempt}"
+                )
+            seen.add(identity)
+            counts[job_id] = max(counts.get(job_id, 0), attempt)
     return counts
 
 
@@ -605,6 +657,7 @@ def run_experiment(settings: RunSettings) -> Path:
     captures_dir = output_dir / "captures"
     completed = _completed_keys(results_path)
     attempt_counts = _attempt_counts(results_path)
+    capture_attempt_counts = _capture_attempt_counts(captures_dir)
     prior_completed, prior_attempt_counts, prior_orphans = _prior_progress(
         settings.prior_ledger_path, settings.prior_ledger_cell
     )
@@ -692,7 +745,9 @@ def run_experiment(settings: RunSettings) -> Path:
             run_uuid = uuid.uuid4().hex
             job_id = _job_id(key[0], repetition)
             attempt = max(
-                attempt_counts.get(key, 0), prior_orphans.get(job_id, 0)
+                attempt_counts.get(key, 0),
+                prior_orphans.get(job_id, 0),
+                capture_attempt_counts.get(job_id, 0),
             ) + 1
             attempt_counts[key] = attempt
             attempt_id = f"{job_id}-attempt-{attempt:03d}-{run_uuid[:8]}"

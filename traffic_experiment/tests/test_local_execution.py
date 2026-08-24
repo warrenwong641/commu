@@ -23,6 +23,7 @@ from traffic_experiment.traffic_measure.prepare import (
 )
 from traffic_experiment.traffic_measure.runner import (
     RunSettings,
+    _capture_attempt_counts,
     _job_id,
     _request_once_curl,
     _request_once_http3,
@@ -515,6 +516,125 @@ def test_capture_failure_is_retried_as_distinct_preserved_attempt(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_interrupted_capture_without_result_row_advances_attempt(
+    tmp_path,
+    monkeypatch,
+):
+    request_id = "conversation-1::q1::no_compression"
+    job_id = _job_id(request_id, 1)
+    output_dir = tmp_path / "run"
+    captures_dir = output_dir / "captures"
+    captures_dir.mkdir(parents=True)
+    interrupted = captures_dir / f"{job_id}-attempt-001-1234abcd.partial.pcapng"
+    interrupted.write_bytes(b"interrupted-capture")
+    manifest = tmp_path / "manifest.jsonl"
+    write_jsonl(
+        manifest,
+        [
+            {
+                "request_id": request_id,
+                "sample_id": "conversation-1::q1",
+                "conversation_id": "conversation-1",
+                "question_id": "q1",
+                "condition": "no_compression",
+                "messages": [{"role": "user", "content": "Where?"}],
+                "messages_sha256": "a" * 64,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "traffic_experiment.traffic_measure.runner._request_once",
+        lambda *_args, **_kwargs: {
+            "response_text": "Taipei",
+            "elapsed_seconds": 0.1,
+            "usage": {"prompt_tokens": 12, "completion_tokens": 2},
+        },
+    )
+
+    results_path = run_experiment(
+        RunSettings(
+            manifest_path=manifest,
+            output_dir=output_dir,
+            base_url="http://127.0.0.1:9/v1",
+            model="test-model",
+            api_key="test-key",
+            sample_limit=1,
+            repetitions=1,
+            seed=42,
+            temperature=0,
+            max_output_tokens=16,
+            request_timeout_seconds=5,
+            observation_seconds=0,
+            capture_interface="",
+            capture_filter="",
+            capture_startup_delay_seconds=0,
+            no_capture=True,
+            no_wait_after_request=True,
+        )
+    )
+
+    result = read_jsonl(results_path)[0]
+    assert result["attempt"] == 2
+    assert f"{job_id}-attempt-002-" in result["attempt_id"]
+    assert interrupted.exists()
+
+
+def test_capture_inventory_counts_finalized_and_partial_files(tmp_path):
+    captures_dir = tmp_path / "captures"
+    captures_dir.mkdir()
+    first_job = "1" * 24
+    second_job = "2" * 24
+    (captures_dir / f"{first_job}-attempt-001-1234abcd.pcapng").write_bytes(
+        b"one"
+    )
+    (
+        captures_dir / f"{first_job}-attempt-003-2345bcde.partial.pcapng"
+    ).write_bytes(b"three")
+    (captures_dir / f"{second_job}-attempt-002-3456cdef.pcapng").write_bytes(
+        b"two"
+    )
+
+    assert _capture_attempt_counts(captures_dir) == {
+        first_job: 3,
+        second_job: 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "notes.txt",
+        f"{'1' * 24}-attempt-000-1234abcd.partial.pcapng",
+        f"{'1' * 24}-attempt-0001-1234abcd.pcapng",
+    ],
+)
+def test_capture_inventory_rejects_unrecognized_or_noncanonical_names(
+    tmp_path,
+    name,
+):
+    captures_dir = tmp_path / "captures"
+    captures_dir.mkdir()
+    (captures_dir / name).write_bytes(b"unsafe")
+
+    with pytest.raises(ValueError, match="capture (inventory entry|attempt)"):
+        _capture_attempt_counts(captures_dir)
+
+
+def test_capture_inventory_rejects_symlink(tmp_path):
+    captures_dir = tmp_path / "captures"
+    captures_dir.mkdir()
+    target = tmp_path / "elsewhere.pcapng"
+    target.write_bytes(b"outside")
+    link = captures_dir / f"{'1' * 24}-attempt-001-1234abcd.pcapng"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="unsafe capture inventory entry"):
+        _capture_attempt_counts(captures_dir)
 
 
 def test_capture_constructor_failure_is_recorded_without_observation_wait(

@@ -85,6 +85,10 @@ the weighted average is 5,250 input tokens per call.
   target as GPU blocks; do not rewrite or physically merge their result trees.
 - Keep compression outside the measurement window and reuse the same compressed
   prompt for repetitions.
+- On a same-root resume, exact finalized and `.partial.pcapng` capture names
+  reserve their attempt numbers even if no result row was appended. Unexpected,
+  non-canonical, or symlinked capture entries stop the resume rather than risk
+  silently reusing an attempt identity.
 - Verify the recorded negotiated HTTP version: `1.1` for the TLS/TCP profile and
   `3` for the QUIC profile. The QUIC client is implemented with aioquic, so it
   cannot silently fall back to TCP.
