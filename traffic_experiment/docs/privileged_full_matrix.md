@@ -202,6 +202,11 @@ parent/target union as a composite while retaining both GPU identities. Treat
 that composite as secondary/post-hoc and block analysis by GPU rather than
 claiming a single-GPU primary replicate.
 
+The target release verifies the GPU-specific protocol marker with the
+parent release's immutable admission stack, which is the stack that created
+the marker. The bridge separately proves that only the reviewed continuation
+ledger plumbing differs before using the target release's request runner.
+
 For a new run, the launcher derives a deterministic service-runtime directory
 from the full repository SHA, run ID, GPU index, and GPU UUID. Later segments
 therefore reproduce the same service-configuration digest while their service

@@ -230,6 +230,10 @@ def test_cross_gpu_continuation_uses_current_runner_and_read_only_parent_ledger(
     assert "compare-measurement-payloads" in bridge
     assert "compare-continuation-payloads" in bridge
     assert 'if [[ -n "${SOURCE_PARENT_REPOSITORY_SHA}" ]]; then' in bridge
+    assert (
+        'ADMISSION_SCRIPT_DIR="${LEGACY_RELEASE_ROOT}/repository/'
+        'traffic_experiment/scripts"'
+    ) in bridge
     assert "return 0" in bridge
     assert "MEASUREMENT_SCRIPT_DIR=" not in bridge.split(
         'if [[ -n "${SOURCE_PARENT_REPOSITORY_SHA}" ]]; then', 1
@@ -247,6 +251,13 @@ def test_cross_gpu_continuation_uses_current_runner_and_read_only_parent_ledger(
     )
     assert "PARENT_GPU_UUID" not in ordinary_new
     assert '[[ "${GPU_UUID}" != "${PARENT_GPU_UUID}" ]]' in continuation
+
+    admission = supervisor[
+        supervisor.index("verify_admission() {") :
+        supervisor.index("STATE_TOOL=", supervisor.index("verify_admission() {"))
+    ]
+    assert 'source "${ADMISSION_SCRIPT_DIR}/lib.sh"' in admission
+    assert 'source "${ADMISSION_SCRIPT_DIR}/protocol_admission.sh"' in admission
 
 
 def test_caddy_start_waits_for_namespaced_tls_and_http3_readiness() -> None:
@@ -865,7 +876,7 @@ def test_supervisor_binds_selected_gpu_to_output_plan_and_admission() -> None:
     assert 'OUTPUT_ROOT="${BASE_OUTPUT_ROOT}/${scope}"' in text
     assert 'PROTOCOL_ROOT="/var/lib/commu-protocol-pilots/${PILOT_REPOSITORY_SHA}/${scope}/runs/protocol_validation"' in text
     admission = text[text.index("verify_admission() {") : text.index("STATE_TOOL=")]
-    source_lib = admission.index('source "${MEASUREMENT_SCRIPT_DIR}/lib.sh"')
+    source_lib = admission.index('source "${ADMISSION_SCRIPT_DIR}/lib.sh"')
     rebase_runs = admission.index('RUNS_ROOT="${protocol_runs}"')
     rebase_manifest = admission.index('MANIFEST_PATH="${pilot_manifest}"')
     verify_marker = admission.index("verify_protocol_admission")

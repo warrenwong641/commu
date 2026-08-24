@@ -133,6 +133,7 @@ GENERATION_OPEN=0
 MEASUREMENT_SCRIPT_DIR="${SCRIPT_DIR}"
 MEASUREMENT_EXPERIMENT_ROOT="${EXPERIMENT_ROOT}"
 MEASUREMENT_REPOSITORY_ROOT="${REPOSITORY_ROOT}"
+ADMISSION_SCRIPT_DIR="${SCRIPT_DIR}"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 
@@ -504,6 +505,10 @@ configure_legacy_continuation() {
       --current-release-root "${RELEASE_ROOT}" ||
       die "parent/current continuation payload bridge was rejected"
     PILOT_REPOSITORY_SHA="${SOURCE_PARENT_REPOSITORY_SHA}"
+    # The protocol marker was created by the immutable parent release.  Verify
+    # its full stack digest with that release's admission implementation while
+    # retaining this release's ledger-aware request runner for target rows.
+    ADMISSION_SCRIPT_DIR="${LEGACY_RELEASE_ROOT}/repository/traffic_experiment/scripts"
     return 0
   fi
   /usr/bin/python3 -I "${STATE_TOOL}" compare-measurement-payloads \
@@ -516,6 +521,7 @@ configure_legacy_continuation() {
   MEASUREMENT_EXPERIMENT_ROOT="${LEGACY_RELEASE_ROOT}/repository/traffic_experiment"
   MEASUREMENT_REPOSITORY_ROOT="${LEGACY_RELEASE_ROOT}/repository"
   MEASUREMENT_SCRIPT_DIR="${MEASUREMENT_EXPERIMENT_ROOT}/scripts"
+  ADMISSION_SCRIPT_DIR="${MEASUREMENT_SCRIPT_DIR}"
   RUNNER_PYTHON="${MEASUREMENT_EXPERIMENT_ROOT}/.venv-runner/bin/python"
   CADDY="${MEASUREMENT_EXPERIMENT_ROOT}/.tools/caddy"
   CADDY_READINESS="${MEASUREMENT_SCRIPT_DIR}/caddy_readiness.py"
@@ -839,9 +845,11 @@ verify_admission() {
     export PROTOCOL_VALIDATION_ROOT="${PROTOCOL_ROOT}"
     export NETWORK_STATE_DIR="${NETWORK_STATE_ROOT}"
     unset LOCAL_VLLM_API_KEY PROTOCOL_VALIDATION_MARKER
-    # Both sourced files are inside the hash-verified, root-owned matrix release.
-    source "${MEASUREMENT_SCRIPT_DIR}/lib.sh"
-    source "${MEASUREMENT_SCRIPT_DIR}/protocol_admission.sh"
+    # Cross-GPU continuations verify the parent's marker with the parent's
+    # immutable admission stack; ordinary runs use the current measurement
+    # stack.  Both paths were release-manifest verified above.
+    source "${ADMISSION_SCRIPT_DIR}/lib.sh"
+    source "${ADMISSION_SCRIPT_DIR}/protocol_admission.sh"
     # Admission evidence belongs to the separately installed pilot release.
     # Rebase both paths that carry release-local provenance while retaining the
     # matrix config's independently verified content digests and fixed plan.
