@@ -52,12 +52,14 @@ def test_matrix_release_is_separate_from_pilot_launcher() -> None:
 def test_segment_launcher_has_gpu_portable_relative_lease_interface() -> None:
     text = SEGMENT_LAUNCHER.read_text()
     installer = INSTALLER.read_text()
-    assert "new|resume" in text
+    assert "new|resume|continue-on-gpu" in text
     assert "--gpu-index N" in text
     assert "--lease 20|115m|2h" in text
     assert "--deadline-epoch" not in text.split("Usage:", 1)[1].split("EOF", 1)[0]
     assert "--gpu-index is an assertion only" in text
     assert "A new run must use a new run ID" in text
+    assert "continue-on-gpu is the only cross-GPU path" in text
+    assert "--parent-run-id SAFE_ID --parent-source-repository-sha 40_HEX" in text
     assert "privileged_matrix_launch.py" in text
     assert "PROTOCOL_VALIDATION_OK" in text
     assert "matrix-caddy.state" in text
@@ -192,7 +194,7 @@ def test_installer_requires_existing_shared_lock_and_runtime_requires_admission(
 
 def test_supervisor_holds_locks_for_matrix_and_rechecks_each_cell() -> None:
     text = SUPERVISOR.read_text()
-    assert "{check|status|run|resume}" in text
+    assert "{check|status|run|resume|continue-on-gpu}" in text
     global_lock = text.index('exec 8<>"${GLOBAL_LOCK_FILE}"')
     state_lock = text.index('SERVICE_LOCK_DIR="${SERVICE_STATE}.lock.d"')
     loop = text.index("for network in baseline rtt realistic")
@@ -210,6 +212,41 @@ def test_supervisor_holds_locks_for_matrix_and_rechecks_each_cell() -> None:
     run_cell = text[text.index("run_cell()") : text.index("release_precheck\n")]
     assert run_cell.count('verify_cell_boundary "${network}"') == 3
     assert "seal-cell" in run_cell
+
+
+def test_cross_gpu_continuation_uses_current_runner_and_read_only_parent_ledger() -> None:
+    supervisor = SUPERVISOR.read_text()
+    launcher = SEGMENT_LAUNCHER.read_text()
+    assert "create-continuation-plan" in supervisor
+    assert "verify-continuation-plan" in supervisor
+    assert 'PRIOR_LEDGER="${MATRIX_ROOT}/PARENT_LEDGER.json"' in supervisor
+    assert '--prior-ledger "${19}" --prior-ledger-cell "${20}"' in supervisor
+    assert '"${network}/${workload}/${transport}"' in supervisor
+    assert 'PILOT_REPOSITORY_SHA="${SOURCE_PARENT_REPOSITORY_SHA}"' in supervisor
+    bridge = supervisor[
+        supervisor.index("configure_legacy_continuation() {") :
+        supervisor.index("check_base_output_hierarchy() {")
+    ]
+    assert "compare-measurement-payloads" in bridge
+    assert "compare-continuation-payloads" in bridge
+    assert 'if [[ -n "${SOURCE_PARENT_REPOSITORY_SHA}" ]]; then' in bridge
+    assert "return 0" in bridge
+    assert "MEASUREMENT_SCRIPT_DIR=" not in bridge.split(
+        'if [[ -n "${SOURCE_PARENT_REPOSITORY_SHA}" ]]; then', 1
+    )[1].split("return 0", 1)[0]
+    assert '--source-parent-repository-sha "${SERVICE_REPOSITORY_SHA}"' in launcher
+    assert 'MEASUREMENT_REPOSITORY_SHA="${REPOSITORY_SHA}"' in launcher
+    assert '"${RUNNER}" continue-on-gpu "${runner_args[@]}"' in launcher
+
+    launch_modes = launcher[
+        launcher.index('if [[ "${MODE}" == new ]]; then', launcher.index('PLAN=""')) :
+        launcher.index('SERVICE_REPOSITORY_SHA=', launcher.index('PLAN=""'))
+    ]
+    ordinary_new, continuation = launch_modes.split(
+        'elif [[ "${MODE}" == continue-on-gpu ]]; then', 1
+    )
+    assert "PARENT_GPU_UUID" not in ordinary_new
+    assert '[[ "${GPU_UUID}" != "${PARENT_GPU_UUID}" ]]' in continuation
 
 
 def test_caddy_start_waits_for_namespaced_tls_and_http3_readiness() -> None:

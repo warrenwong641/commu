@@ -32,9 +32,16 @@ MAX_SERVICE_CONFIG_BYTES = 1024 * 1024
 RUN_PLAN_SCHEMAS = {
     "commu-secure-single-matrix-plan-v1",
     "commu-secure-single-matrix-plan-v2",
+    "commu-secure-single-matrix-continuation-plan-v1",
 }
+CONTINUATION_PLAN_SCHEMA = "commu-secure-single-matrix-continuation-plan-v1"
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+MATRIX_RUN_ROOT = re.compile(
+    r"/var/lib/commu-secure-matrix/([0-9a-f]{40})/"
+    r"gpu-(0|[1-9][0-9]*)-(GPU-(?:[0-9A-Fa-f]+-)*[0-9A-Fa-f]+)/"
+    r"runs/([a-z0-9][a-z0-9._-]{0,63})"
+)
 SERVICE_STATIC_VALUES = {
     "VLLM_HOST": "127.0.0.1",
     "VLLM_PORT": "8000",
@@ -85,6 +92,8 @@ class RunIdentity:
     gpu_uuid: str
     active_config_sha256: str
     run_plan_sha256: str
+    parent_matrix_root: str | None
+    parent_repository_sha: str | None
 
 
 def parse_gpu_index(value: str) -> int:
@@ -409,6 +418,8 @@ def load_resume_identity(
     gpu_index = plan.get("gpu_index")
     gpu_uuid = plan.get("gpu_uuid")
     active_config_sha256 = plan.get("active_config_sha256")
+    parent_matrix_root: str | None = None
+    parent_repository_sha: str | None = None
     if schema not in RUN_PLAN_SCHEMAS:
         raise LaunchConfigError("RUN_PLAN.json has no recognized schema identity")
     if not isinstance(repository_sha, str) or re.fullmatch(
@@ -427,6 +438,25 @@ def load_resume_identity(
         raise LaunchConfigError(
             "RUN_PLAN.json has no valid active service configuration digest"
         )
+    if schema == CONTINUATION_PLAN_SCHEMA:
+        parent = plan.get("parent_snapshot")
+        if not isinstance(parent, dict):
+            raise LaunchConfigError("continuation RUN_PLAN.json has no parent snapshot")
+        parent_matrix_root = parent.get("run_root")
+        parent_repository_sha = parent.get("repository_sha")
+        parent_match = (
+            MATRIX_RUN_ROOT.fullmatch(parent_matrix_root)
+            if isinstance(parent_matrix_root, str)
+            else None
+        )
+        if (
+            not isinstance(parent_matrix_root, str)
+            or parent_match is None
+            or not isinstance(parent_repository_sha, str)
+            or SOURCE_SHA.fullmatch(parent_repository_sha) is None
+            or parent_match.group(1) != parent_repository_sha
+        ):
+            raise LaunchConfigError("continuation parent identity is unsafe")
 
     if (
         asserted_gpu_index is not None
@@ -446,6 +476,8 @@ def load_resume_identity(
         gpu_uuid=gpu_uuid,
         active_config_sha256=active_config_sha256,
         run_plan_sha256=hashlib.sha256(data).hexdigest(),
+        parent_matrix_root=parent_matrix_root,
+        parent_repository_sha=parent_repository_sha,
     )
 
 

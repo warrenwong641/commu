@@ -79,8 +79,10 @@ the weighted average is 5,250 input tokens per call.
   use one worker/GPU or two; each worker has its own server port, deterministic
   sample block, and port-specific capture so concurrent traffic is attributable.
 - Treat topology as immutable measurement input. Changing worker count, ordered
-  GPU mapping, or GPU UUIDs requires a new `RUNS_ROOT`; never resume or merge the
-  old worker shards under a new topology.
+  GPU mapping, or GPU UUIDs requires a new `RUNS_ROOT`; ordinary `resume` never
+  changes it. The privileged matrix's explicit cross-GPU continuation creates a
+  separate target root and immutable parent ledger. Analyze the parent and
+  target as GPU blocks; do not rewrite or physically merge their result trees.
 - Keep compression outside the measurement window and reuse the same compressed
   prompt for repetitions.
 - Verify the recorded negotiated HTTP version: `1.1` for the TLS/TCP profile and

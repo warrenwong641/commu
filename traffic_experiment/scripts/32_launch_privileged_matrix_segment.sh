@@ -56,9 +56,15 @@ Usage:
     --run-id SAFE_ID --lease 20|115m|2h \
     [--gpu-index N] [--source-repository-sha 40_HEX] \
     [--service-config-template POLICY_SCOPED_PATH]
+  32_launch_privileged_matrix_segment.sh continue-on-gpu \
+    --parent-run-id SAFE_ID --parent-source-repository-sha 40_HEX \
+    --run-id NEW_SAFE_ID --gpu-index N --lease 20|115m|2h \
+    [--service-config-template POLICY_SCOPED_PATH]
 
 For resume, --gpu-index is an assertion only. The immutable RUN_PLAN.json
 selects the GPU. A new run must use a new run ID.
+continue-on-gpu is the only cross-GPU path: it creates a separate target root,
+snapshots the immutable parent ledger, and never writes the parent run.
 EOF
   exit 2
 }
@@ -200,16 +206,54 @@ import json, sys
 identity = json.loads(sys.argv[1])
 for name in ("repository_sha", "gpu_index", "gpu_uuid", "active_config_sha256", "run_plan_sha256"):
     sys.stdout.buffer.write(str(identity[name]).encode("ascii") + b"\0")
+for name in ("parent_matrix_root", "parent_repository_sha"):
+    value = identity[name]
+    sys.stdout.buffer.write(("" if value is None else str(value)).encode("ascii") + b"\0")
 PY
   )
-  [[ "${#plan_fields[@]}" -eq 5 ]] || die "incomplete run-plan identity"
+  [[ "${#plan_fields[@]}" -eq 7 ]] || die "incomplete run-plan identity"
   RUN_REPOSITORY_SHA="${plan_fields[0]}"
   GPU_INDEX="${plan_fields[1]}"
   GPU_UUID="${plan_fields[2]}"
   PLAN_ACTIVE_CONFIG_SHA256="${plan_fields[3]}"
   PLAN_SHA256="${plan_fields[4]}"
+  PARENT_MATRIX_ROOT="${plan_fields[5]}"
+  PARENT_SOURCE_REPOSITORY_SHA="${plan_fields[6]}"
   [[ -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" == "${RUN_REPOSITORY_SHA}" ]] ||
     die "source repository assertion differs from RUN_PLAN.json"
+}
+
+find_parent_plan() {
+  local -a candidates=() parent_fields=()
+  local candidate parent identity_json
+  while IFS= read -r -d '' candidate; do
+    parent="$(/usr/bin/basename -- "$(/usr/bin/dirname -- "${candidate}")")"
+    [[ "${parent}" == "${PARENT_RUN_ID}" ]] || continue
+    case "${candidate}" in
+      "/var/lib/commu-secure-matrix/${PARENT_SOURCE_REPOSITORY_SHA}/"*/runs/"${PARENT_RUN_ID}"/RUN_PLAN.json) ;;
+      *) continue ;;
+    esac
+    candidates+=("${candidate}")
+  done < <(/usr/bin/find -P /var/lib/commu-secure-matrix -mindepth 5 -maxdepth 5 -type f -name RUN_PLAN.json -print0)
+  [[ "${#candidates[@]}" -eq 1 ]] ||
+    die "continuation requires exactly one immutable parent RUN_PLAN.json; found ${#candidates[@]}"
+  PARENT_PLAN="${candidates[0]}"
+  regular_root_file "${PARENT_PLAN}" && [[ "$(/usr/bin/stat -c %a -- "${PARENT_PLAN}")" == 444 ]] ||
+    die "parent RUN_PLAN.json is not immutable root-owned release state"
+  identity_json="$(/usr/bin/python3 -I "${LAUNCH_HELPER}" resume-identity --plan "${PARENT_PLAN}")" ||
+    die "could not read immutable parent identity"
+  mapfile -d '' -t parent_fields < <(/usr/bin/python3 -I - "${identity_json}" <<'PY'
+import json, sys
+identity = json.loads(sys.argv[1])
+for name in ("repository_sha", "run_id", "gpu_index", "gpu_uuid"):
+    sys.stdout.buffer.write(str(identity[name]).encode("ascii") + b"\0")
+PY
+  )
+  [[ "${#parent_fields[@]}" -eq 4 && "${parent_fields[0]}" == "${PARENT_SOURCE_REPOSITORY_SHA}" &&
+    "${parent_fields[1]}" == "${PARENT_RUN_ID}" ]] || die "parent run/source assertion differs from RUN_PLAN.json"
+  PARENT_GPU_INDEX="${parent_fields[2]}"
+  PARENT_GPU_UUID="${parent_fields[3]}"
+  PARENT_MATRIX_ROOT="$(/usr/bin/dirname -- "${PARENT_PLAN}")"
 }
 
 resolve_gpu() {
@@ -271,17 +315,31 @@ load_record() {
   GPU_INDEX="$(record_value gpu_index)"; GPU_UUID="$(record_value gpu_uuid)"
   RUN_REPOSITORY_SHA="$(record_value run_repository_sha)"
   SERVICE_REPOSITORY_SHA="$(record_value service_repository_sha)"
+  MEASUREMENT_REPOSITORY_SHA="$(record_value measurement_repository_sha)"
+  PARENT_MATRIX_ROOT="$(record_value parent_matrix_root)"
   MEASUREMENT_CONFIG="$(record_value measurement_config)"
   HARD_DEADLINE_EPOCH="$(record_value hard_deadline_epoch)"
   SERVICE_REPOSITORY_ROOT="$(record_value service_repository_root)"
   MATRIX_ROOT="/var/lib/commu-secure-matrix/${RUN_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/${RUN_ID}"
   [[ "${RECORD_ID}" == "${id}" && "${SESSION}" == "commu-matrix-${id}" && "${TIMER_BASE}" == "${SESSION}-expiry" &&
-    "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ && "${MODE}" =~ ^(new|resume)$ &&
+    "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ && "${MODE}" =~ ^(new|resume|continue-on-gpu)$ &&
     "${GPU_INDEX}" =~ ^(0|[1-9][0-9]*)$ && "${GPU_UUID}" =~ ^GPU-[0-9A-Fa-f-]+$ &&
     "${RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ && "${SERVICE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
-    "${HARD_DEADLINE_EPOCH}" =~ ^[0-9]+$ && "${MEASUREMENT_CONFIG}" == "/opt/commu-secure-matrix/releases/${RUN_REPOSITORY_SHA}/config/server.env" &&
+    "${MEASUREMENT_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
+    "${HARD_DEADLINE_EPOCH}" =~ ^[0-9]+$ && "${MEASUREMENT_CONFIG}" == "/opt/commu-secure-matrix/releases/${MEASUREMENT_REPOSITORY_SHA}/config/server.env" &&
     "${MATRIX_ROOT}" == "/var/lib/commu-secure-matrix/${RUN_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/${RUN_ID}" ]] ||
     die "segment record contains unsafe values"
+  if [[ "${PARENT_MATRIX_ROOT}" == none ]]; then
+    [[ "${MODE}" != continue-on-gpu ]] || die "continuation record has no parent"
+  else
+    case "${PARENT_MATRIX_ROOT}" in
+      "/var/lib/commu-secure-matrix/${SERVICE_REPOSITORY_SHA}"/gpu-[0-9]*-GPU-*/runs/*) ;;
+      *) die "segment record has an unsafe parent matrix root" ;;
+    esac
+    [[ "${MODE}" != new && "${RUN_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" &&
+      "${MEASUREMENT_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" ]] ||
+      die "continuation segment release identities are inconsistent"
+  fi
 }
 
 stop_service() {
@@ -314,8 +372,8 @@ udp_port_closed() { [[ -z "$(/usr/bin/ss -H -lun "sport = :$1" 2>/dev/null)" ]];
 stop_caddy_exact() {
   local state="$1" expected_caddy expected_config schema pid ticks exe config live_ticks live_state
   local -a args=() expected=()
-  expected_caddy="/opt/commu-secure-matrix/releases/${RUN_REPOSITORY_SHA}/repository/traffic_experiment/.tools/caddy"
-  expected_config="/opt/commu-secure-matrix/releases/${RUN_REPOSITORY_SHA}/repository/traffic_experiment/configs/Caddyfile.single"
+  expected_caddy="/opt/commu-secure-matrix/releases/${MEASUREMENT_REPOSITORY_SHA}/repository/traffic_experiment/.tools/caddy"
+  expected_config="/opt/commu-secure-matrix/releases/${MEASUREMENT_REPOSITORY_SHA}/repository/traffic_experiment/configs/Caddyfile.single"
   if [[ ! -e "${state}" && ! -L "${state}" ]]; then
     tcp_port_closed 8443 && udp_port_closed 8444 && tcp_port_closed 8543 && udp_port_closed 8544
     return
@@ -381,7 +439,7 @@ cleanup_owned_resources() {
   fi
   caddy_state="/var/lib/commu-secure-matrix/${RUN_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/caddy/matrix-caddy.state"
   stop_caddy_exact "${caddy_state}"
-  network_script="/opt/commu-secure-matrix/releases/${RUN_REPOSITORY_SHA}/repository/traffic_experiment/scripts/11_network_condition.sh"
+  network_script="/opt/commu-secure-matrix/releases/${MEASUREMENT_REPOSITORY_SHA}/repository/traffic_experiment/scripts/11_network_condition.sh"
   network_state="/var/lib/commu-secure-matrix/${RUN_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/network_state/llm-client.llmhost0.state"
   if [[ -f "${network_state}" && ! -L "${network_state}" ]]; then
     regular_root_file "${network_script}" || die "unsafe network cleanup script"
@@ -497,11 +555,22 @@ segment_main() {
     --config "${SERVICE_CONFIG}" --log "${VLLM_LOG}" \
     --deadline-epoch "${HARD_DEADLINE_EPOCH}" --timeout 600
   runner_args=(--service-state "${STATE}" --run-id "${RUN_ID}")
-  if [[ "${RUN_REPOSITORY_SHA}" != "${REPOSITORY_SHA}" ]]; then
-    runner_args+=(--legacy-run-repository-sha "${RUN_REPOSITORY_SHA}")
+  if [[ "${PARENT_MATRIX_ROOT}" != none ]]; then
+    runner_args+=(--source-parent-repository-sha "${SERVICE_REPOSITORY_SHA}" \
+      --parent-matrix-root "${PARENT_MATRIX_ROOT}")
+  elif [[ "${SERVICE_REPOSITORY_SHA}" != "${REPOSITORY_SHA}" ]]; then
+    runner_args+=(--legacy-run-repository-sha "${SERVICE_REPOSITORY_SHA}")
   fi
-  "${RUNNER}" check "${runner_args[@]}"
-  if [[ "${MODE}" == new ]]; then "${RUNNER}" run "${runner_args[@]}"; else "${RUNNER}" resume "${runner_args[@]}"; fi
+  if [[ "${PARENT_MATRIX_ROOT}" == none ]]; then
+    "${RUNNER}" check "${runner_args[@]}"
+  fi
+  if [[ "${MODE}" == new ]]; then
+    "${RUNNER}" run "${runner_args[@]}"
+  elif [[ "${MODE}" == continue-on-gpu ]]; then
+    "${RUNNER}" continue-on-gpu "${runner_args[@]}"
+  else
+    "${RUNNER}" resume "${runner_args[@]}"
+  fi
   printf 'FULL_MATRIX_COMPLETED\n'
 }
 
@@ -535,24 +604,33 @@ case "${ACTION}" in
     if [[ "${ACTION}" == _segment ]]; then segment_main "$2"; else expire_main "$2"; fi
     exit
     ;;
-  new|resume) MODE="${ACTION}" ;;
+  new|resume|continue-on-gpu) MODE="${ACTION}" ;;
   *) usage ;;
 esac
 
 RUN_ID=""; LEASE=""; GPU_INDEX_ASSERTION=""; SOURCE_REPOSITORY_SHA=""; SERVICE_CONFIG_REQUESTED=""
+PARENT_RUN_ID=""; PARENT_SOURCE_REPOSITORY_SHA=""; PARENT_MATRIX_ROOT=""
 while (($#)); do
   case "$1" in
     --run-id) [[ $# -ge 2 && -z "${RUN_ID}" ]] || usage; RUN_ID="$2"; shift 2 ;;
     --lease) [[ $# -ge 2 && -z "${LEASE}" ]] || usage; LEASE="$2"; shift 2 ;;
     --gpu-index) [[ $# -ge 2 && -z "${GPU_INDEX_ASSERTION}" ]] || usage; GPU_INDEX_ASSERTION="$2"; shift 2 ;;
     --source-repository-sha) [[ $# -ge 2 && -z "${SOURCE_REPOSITORY_SHA}" ]] || usage; SOURCE_REPOSITORY_SHA="$2"; shift 2 ;;
+    --parent-run-id) [[ $# -ge 2 && -z "${PARENT_RUN_ID}" ]] || usage; PARENT_RUN_ID="$2"; shift 2 ;;
+    --parent-source-repository-sha) [[ $# -ge 2 && -z "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || usage; PARENT_SOURCE_REPOSITORY_SHA="$2"; shift 2 ;;
     --service-config-template) [[ $# -ge 2 && -z "${SERVICE_CONFIG_REQUESTED}" ]] || usage; SERVICE_CONFIG_REQUESTED="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ && "${LEASE}" =~ ^(0|[1-9][0-9]*)(m|h)?$ &&
   ( -z "${GPU_INDEX_ASSERTION}" || "${GPU_INDEX_ASSERTION}" =~ ^(0|[1-9][0-9]*)$ ) &&
-  ( -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || usage
+  ( -z "${SOURCE_REPOSITORY_SHA}" || "${SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) &&
+  ( -z "${PARENT_RUN_ID}" || "${PARENT_RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ) &&
+  ( -z "${PARENT_SOURCE_REPOSITORY_SHA}" || "${PARENT_SOURCE_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || usage
+if [[ "${MODE}" != continue-on-gpu &&
+  ( -n "${PARENT_RUN_ID}" || -n "${PARENT_SOURCE_REPOSITORY_SHA}" ) ]]; then
+  usage
+fi
 
 PLAN=""; PLAN_SHA256=""; PLAN_ACTIVE_CONFIG_SHA256=""; RUN_REPOSITORY_SHA=""
 if [[ "${MODE}" == new ]]; then
@@ -561,13 +639,31 @@ if [[ "${MODE}" == new ]]; then
   GPU_INDEX="${GPU_INDEX_ASSERTION}"
   resolve_gpu
   RUN_REPOSITORY_SHA="${REPOSITORY_SHA}"
+elif [[ "${MODE}" == continue-on-gpu ]]; then
+  [[ -n "${GPU_INDEX_ASSERTION}" && -n "${PARENT_RUN_ID}" &&
+    -n "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || die "continue-on-gpu requires parent run/source and target GPU"
+  [[ -z "${SOURCE_REPOSITORY_SHA}" ]] || die "use --parent-source-repository-sha for continue-on-gpu"
+  [[ "${RUN_ID}" != "${PARENT_RUN_ID}" ]] || die "target run ID must differ from parent run ID"
+  find_parent_plan
+  GPU_INDEX="${GPU_INDEX_ASSERTION}"
+  resolve_gpu
+  [[ "${GPU_UUID}" != "${PARENT_GPU_UUID}" ]] || die "target GPU must differ from the immutable parent GPU"
+  RUN_REPOSITORY_SHA="${REPOSITORY_SHA}"
 else
+  [[ -z "${PARENT_RUN_ID}" && -z "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || usage
   find_resume_plan
   live_plan_uuid="${GPU_UUID}"
   resolve_gpu
   [[ "${GPU_UUID}" == "${live_plan_uuid}" ]] || die "physical GPU UUID differs from immutable RUN_PLAN.json"
 fi
-SERVICE_REPOSITORY_SHA="${RUN_REPOSITORY_SHA}"
+if [[ "${MODE}" == continue-on-gpu ]]; then
+  SERVICE_REPOSITORY_SHA="${PARENT_SOURCE_REPOSITORY_SHA}"
+elif [[ -n "${PARENT_MATRIX_ROOT}" ]]; then
+  [[ -n "${PARENT_SOURCE_REPOSITORY_SHA}" ]] || die "continuation plan has no parent source identity"
+  SERVICE_REPOSITORY_SHA="${PARENT_SOURCE_REPOSITORY_SHA}"
+else
+  SERVICE_REPOSITORY_SHA="${RUN_REPOSITORY_SHA}"
+fi
 if [[ "${MODE}" == new ]]; then
   [[ "${SERVICE_REPOSITORY_SHA}" == "${REPOSITORY_SHA}" && "${PILOT_SHA}" == "${REPOSITORY_SHA}" ]] ||
     die "a new run requires a matrix release whose pilot policy is the same current commit"
@@ -577,7 +673,17 @@ fi
 if [[ "${MODE}" == new ]]; then
   verify_measurement_source "${SERVICE_REPOSITORY_SHA}"
 fi
-ADMISSION="/var/lib/commu-protocol-pilots/${RUN_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/protocol_validation/PROTOCOL_VALIDATION_OK"
+MEASUREMENT_REPOSITORY_SHA="${SERVICE_REPOSITORY_SHA}"
+if [[ -n "${PARENT_MATRIX_ROOT}" ]]; then
+  # Continue with this release's ledger-aware request runner.  The supervisor
+  # independently proves its measurement payload is byte-identical to the
+  # immutable parent release before touching the target root.
+  MEASUREMENT_REPOSITORY_SHA="${REPOSITORY_SHA}"
+  MEASUREMENT_RELEASE_ROOT="${RELEASE_ROOT}"
+  MEASUREMENT_CONFIG="${RELEASE_ROOT}/config/server.env"
+  MEASUREMENT_CONFIG_SHA256="$(sha256_file "${MEASUREMENT_CONFIG}")"
+fi
+ADMISSION="/var/lib/commu-protocol-pilots/${SERVICE_REPOSITORY_SHA}/gpu-${GPU_INDEX}-${GPU_UUID}/runs/protocol_validation/PROTOCOL_VALIDATION_OK"
 [[ -f "${ADMISSION}" && ! -L "${ADMISSION}" &&
   "$(/usr/bin/stat -c %u:%a:%h -- "${ADMISSION}")" == 0:444:1 ]] ||
   die "selected source/GPU has no safe protocol admission marker; run the pilot first"
@@ -651,11 +757,11 @@ SERVICE_CONFIG="${ATTEMPT_DIR}/service.env"
 materialize_args=(
   --template "${SERVICE_TEMPLATE}" --output "${SERVICE_CONFIG}"
   --gpu-index "${GPU_INDEX}" --gpu-uuid "${GPU_UUID}"
-  --source-repository-sha "${RUN_REPOSITORY_SHA}"
+  --source-repository-sha "${SERVICE_REPOSITORY_SHA}"
   --expected-vllm-bin "${EXPECTED_API_VLLM}"
   --expected-ld-library-path "${EXPECTED_API_LD_LIBRARY_PATH}"
   --measurement-config "${MEASUREMENT_CONFIG}"
-  --measurement-repository-sha "${RUN_REPOSITORY_SHA}"
+  --measurement-repository-sha "${MEASUREMENT_REPOSITORY_SHA}"
   --service-runtime-root "${SERVICE_RUNTIME_ROOT}"
 )
 if [[ "${MODE}" == resume ]]; then
@@ -675,6 +781,8 @@ RECORD="${RECORD_DIR}/record.state"
 {
   printf 'schema=commu-matrix-segment-record-v1\nrecord_id=%s\nsession=%s\ntimer_base=%s\n' "${RECORD_ID}" "${SESSION}" "${TIMER_BASE}"
   printf 'release_repository_sha=%s\nrun_repository_sha=%s\nservice_repository_sha=%s\nrun_id=%s\nmode=%s\n' "${REPOSITORY_SHA}" "${RUN_REPOSITORY_SHA}" "${SERVICE_REPOSITORY_SHA}" "${RUN_ID}" "${MODE}"
+  printf 'parent_matrix_root=%s\n' "${PARENT_MATRIX_ROOT:-none}"
+  printf 'measurement_repository_sha=%s\n' "${MEASUREMENT_REPOSITORY_SHA}"
   printf 'gpu_index=%s\ngpu_uuid=%s\nplan_sha256=%s\n' "${GPU_INDEX}" "${GPU_UUID}" "${PLAN_SHA256:-none}"
   printf 'service_repository_root=%s\nservice_config=%s\nservice_config_sha256=%s\nservice_state=%s\n' "${SERVICE_REPOSITORY_ROOT}" "${SERVICE_CONFIG}" "${SERVICE_CONFIG_SHA256}" "${STATE}"
   printf 'service_runtime_root=%s\n' "${SERVICE_RUNTIME_ROOT}"

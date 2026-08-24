@@ -24,6 +24,10 @@ guidance, and preregistered design.
   capture filters prevent cross-worker packet attribution.
 - GPU/worker identity recorded as a blocking factor; results never pooled
   without reporting the block.
+- Resource-driven GPU changes use a separately rooted continuation whose
+  immutable ledger references the parent completed keys. The composite is a
+  secondary/post-hoc analysis, with GPU identity retained as a blocking factor;
+  it is not presented as a single-GPU primary replicate.
 
 ## Repetitions & Blocking
 

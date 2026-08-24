@@ -58,25 +58,41 @@ shift || true
 SERVICE_STATE_REQUESTED=""
 RUN_ID=""
 LEGACY_RUN_REPOSITORY_SHA=""
+PARENT_MATRIX_ROOT_REQUESTED=""
+SOURCE_PARENT_REPOSITORY_SHA=""
 while (($#)); do
   case "$1" in
     --service-state) [[ $# -ge 2 && -z "${SERVICE_STATE_REQUESTED}" ]] || break; SERVICE_STATE_REQUESTED="$2"; shift 2 ;;
     --run-id) [[ $# -ge 2 && -z "${RUN_ID}" ]] || break; RUN_ID="$2"; shift 2 ;;
     --legacy-run-repository-sha) [[ $# -ge 2 && -z "${LEGACY_RUN_REPOSITORY_SHA}" ]] || break; LEGACY_RUN_REPOSITORY_SHA="$2"; shift 2 ;;
+    --parent-matrix-root) [[ $# -ge 2 && -z "${PARENT_MATRIX_ROOT_REQUESTED}" ]] || break; PARENT_MATRIX_ROOT_REQUESTED="$2"; shift 2 ;;
+    --source-parent-repository-sha) [[ $# -ge 2 && -z "${SOURCE_PARENT_REPOSITORY_SHA}" ]] || break; SOURCE_PARENT_REPOSITORY_SHA="$2"; shift 2 ;;
     *) break ;;
   esac
 done
-case "${ACTION}" in check|status|run|resume) ;;
+case "${ACTION}" in check|status|run|resume|continue-on-gpu) ;;
   *) ACTION="" ;;
 esac
 if [[ -z "${ACTION}" || -z "${SERVICE_STATE_REQUESTED}" ||
   ! "${RUN_ID}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ || $# -ne 0 ]]; then
-  printf 'usage: %s {check|status|run|resume} --service-state /absolute/path/to/service.state --run-id SAFE_ID [--legacy-run-repository-sha 40_HEX]\n' "$0" >&2
+  printf 'usage: %s {check|status|run|resume|continue-on-gpu} --service-state /absolute/path/to/service.state --run-id SAFE_ID [--legacy-run-repository-sha 40_HEX] [--parent-matrix-root /var/lib/commu-secure-matrix/SHA/gpu-N-GPU-UUID/runs/PARENT_ID --source-parent-repository-sha 40_HEX]\n' "$0" >&2
   exit 2
 fi
 [[ -z "${LEGACY_RUN_REPOSITORY_SHA}" ||
   ( "${ACTION}" != run && "${LEGACY_RUN_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ ) ]] || {
   printf 'ERROR: legacy continuation is valid only for an existing non-run action\n' >&2
+  exit 2
+}
+[[ ( "${ACTION}" == continue-on-gpu && -n "${PARENT_MATRIX_ROOT_REQUESTED}" ) ||
+  ( "${ACTION}" == resume ) ||
+  ( -z "${PARENT_MATRIX_ROOT_REQUESTED}" ) ]] || {
+  printf 'ERROR: parent matrix root is required for continue-on-gpu and otherwise valid only for resume\n' >&2
+  exit 2
+}
+[[ ( -n "${PARENT_MATRIX_ROOT_REQUESTED}" && "${SOURCE_PARENT_REPOSITORY_SHA}" =~ ^[0-9a-f]{40}$ &&
+      -z "${LEGACY_RUN_REPOSITORY_SHA}" ) ||
+  ( -z "${PARENT_MATRIX_ROOT_REQUESTED}" && -z "${SOURCE_PARENT_REPOSITORY_SHA}" ) ]] || {
+  printf 'ERROR: continuation parent root/source must be supplied together and cannot use legacy resume mode\n' >&2
   exit 2
 }
 
@@ -451,9 +467,10 @@ load_policy() {
 }
 
 configure_legacy_continuation() {
-  local legacy_metadata legacy_manifest legacy_policy
-  [[ -n "${LEGACY_RUN_REPOSITORY_SHA}" ]] || return 0
-  LEGACY_RELEASE_ROOT="/opt/commu-secure-matrix/releases/${LEGACY_RUN_REPOSITORY_SHA}"
+  local legacy_metadata legacy_manifest legacy_policy bridge_sha
+  bridge_sha="${SOURCE_PARENT_REPOSITORY_SHA:-${LEGACY_RUN_REPOSITORY_SHA}}"
+  [[ -n "${bridge_sha}" ]] || return 0
+  LEGACY_RELEASE_ROOT="/opt/commu-secure-matrix/releases/${bridge_sha}"
   legacy_metadata="${LEGACY_RELEASE_ROOT}/RELEASE_METADATA"
   legacy_manifest="${LEGACY_RELEASE_ROOT}/RELEASE_FILES.sha256"
   legacy_policy="${LEGACY_RELEASE_ROOT}/policy/service.state"
@@ -471,14 +488,24 @@ configure_legacy_continuation() {
     /usr/bin/sha256sum --check --strict --quiet RELEASE_FILES.sha256
     /usr/bin/sha256sum --check --strict --quiet INSTALLED_RUNTIME_FILES.sha256
   ) || die "legacy release file digest verification failed"
-  [[ "$(/usr/bin/awk -F= '$1 == "repository_sha" {print $2}' "${legacy_metadata}")" == "${LEGACY_RUN_REPOSITORY_SHA}" &&
-    "$(/usr/bin/awk -F= '$1 == "repository_sha" {print $2}' "${legacy_policy}")" == "${LEGACY_RUN_REPOSITORY_SHA}" &&
-    "$(/usr/bin/awk -F= '$1 == "pilot_repository_sha" {print $2}' "${legacy_policy}")" == "${LEGACY_RUN_REPOSITORY_SHA}" ]] ||
+  [[ "$(/usr/bin/awk -F= '$1 == "repository_sha" {print $2}' "${legacy_metadata}")" == "${bridge_sha}" &&
+    "$(/usr/bin/awk -F= '$1 == "repository_sha" {print $2}' "${legacy_policy}")" == "${bridge_sha}" &&
+    "$(/usr/bin/awk -F= '$1 == "pilot_repository_sha" {print $2}' "${legacy_policy}")" == "${bridge_sha}" ]] ||
     die "legacy release metadata/policy identity mismatch"
 
   # Compare the selected projection of each already-verified release manifest.
   # Interpreter caches are deliberately outside that projection because their
   # embedded source paths differ even when the pinned source is identical.
+  if [[ -n "${SOURCE_PARENT_REPOSITORY_SHA}" ]]; then
+    # The new target executes this release's continuation-aware runner.  Only
+    # its admitted service/pilot source is inherited from the parent release.
+    /usr/bin/python3 -I "${STATE_TOOL}" compare-continuation-payloads \
+      --parent-release-root "${LEGACY_RELEASE_ROOT}" \
+      --current-release-root "${RELEASE_ROOT}" ||
+      die "parent/current continuation payload bridge was rejected"
+    PILOT_REPOSITORY_SHA="${SOURCE_PARENT_REPOSITORY_SHA}"
+    return 0
+  fi
   /usr/bin/python3 -I "${STATE_TOOL}" compare-measurement-payloads \
     --legacy-release-root "${LEGACY_RELEASE_ROOT}" \
     --current-release-root "${RELEASE_ROOT}" ||
@@ -827,6 +854,8 @@ verify_admission() {
 STATE_TOOL="${SCRIPT_DIR}/privileged_matrix_state.py"
 REQUEST_TOOL="${MEASUREMENT_SCRIPT_DIR}/privileged_matrix_request.py"
 MATRIX_ROOT=""
+PARENT_MATRIX_ROOT=""
+PRIOR_LEDGER=""
 NETWORK_OWNED=0
 CADDY_OWNED=0
 CADDY_PID=""
@@ -1136,6 +1165,34 @@ verify_selected_plan() {
     die "service-generation ledger is not safely resumable"
 }
 
+verify_parent_matrix_root() {
+  local resolved parent_plan
+  [[ -n "${PARENT_MATRIX_ROOT_REQUESTED}" ]] || return 0
+  resolved="$(/usr/bin/readlink -e -- "${PARENT_MATRIX_ROOT_REQUESTED}")" ||
+    die "parent matrix root does not exist"
+  case "${resolved}" in
+    "/var/lib/commu-secure-matrix/${SOURCE_PARENT_REPOSITORY_SHA}"/gpu-[0-9]*-GPU-*/runs/*) ;;
+    *) die "parent matrix root is outside the selected source/GPU hierarchy" ;;
+  esac
+  [[ "${resolved}" != "${MATRIX_ROOT}" && -d "${resolved}" && ! -L "${resolved}" &&
+    "$(/usr/bin/stat -c %u:%g:%a -- "${resolved}")" == "0:${SERVICE_GID}:710" ]] ||
+    die "parent matrix root is unsafe or equals the target"
+  parent_plan="${resolved}/RUN_PLAN.json"
+  regular_root_file "${parent_plan}" && [[ "$(/usr/bin/stat -c %a -- "${parent_plan}")" == 444 ]] ||
+    die "parent RUN_PLAN.json is not immutable root-owned state"
+  PARENT_MATRIX_ROOT="${resolved}"
+}
+
+continuation_state_args() {
+  local qa_manifest summary_manifest
+  qa_manifest="${MEASUREMENT_EXPERIMENT_ROOT}/$(config_value "${CONFIG}" MANIFEST_PATH)"
+  summary_manifest="${MEASUREMENT_EXPERIMENT_ROOT}/$(config_value "${CONFIG}" SUMMARY_MANIFEST_PATH)"
+  printf '%s\0' \
+    --parent-root "${PARENT_MATRIX_ROOT}" \
+    --qa-manifest "${qa_manifest}" \
+    --summary-manifest "${summary_manifest}"
+}
+
 open_service_generation() {
   /usr/bin/python3 -I "${STATE_TOOL}" record-generation \
     --root "${MATRIX_ROOT}" \
@@ -1194,6 +1251,12 @@ run_cell() {
     "${MATRIX_ROOT}/cells" "${MATRIX_ROOT}/cells/${network}" \
     "${MATRIX_ROOT}/cells/${network}/${workload}"
   /usr/bin/install -d -o "${SERVICE_UID}" -g "${SERVICE_GID}" -m 0700 "${cell}"
+  if [[ -n "${PRIOR_LEDGER}" && ! -e "${cell}/results.jsonl" && ! -L "${cell}/results.jsonl" ]]; then
+    # A parent-complete cell has no target requests, but an explicit empty
+    # target ledger keeps sealing deterministic without copying parent data.
+    /usr/bin/install -o "${SERVICE_UID}" -g "${SERVICE_GID}" -m 0600 \
+      /dev/null "${cell}/results.jsonl"
+  fi
   if [[ "${transport}" == tls13 ]]; then
     filter=tcp
     secure_port=8443
@@ -1204,12 +1267,17 @@ run_cell() {
   verify_cell_boundary "${network}"
   /usr/sbin/ip netns exec llm-client /usr/bin/bash -p -c '
       exec 8>&-
+      prior_args=()
+      if [[ -n "${19}" ]]; then
+        prior_args=(--prior-ledger "${19}" --prior-ledger-cell "${20}")
+      fi
       exec /usr/bin/setpriv --reuid "$1" --regid "$2" --groups "${18}" \
         /usr/bin/env -i HOME=/tmp LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
         PATH=/usr/sbin:/usr/bin PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
         PYTHONSAFEPATH=1 PYTHONPATH="$3" \
         "$4" -P "$5" --controller-pid "$6" --controller-start-ticks "$7" -- run \
         --manifest "$8" --output-dir "$9" \
+        "${prior_args[@]}" \
         --backend local_vllm --base-url "https://10.200.0.1:${16}/v1" \
         --model "${10}" --samples "${11}" --repetitions 3 --seed 42 \
         --max-output-tokens 4096 --request-timeout-seconds 900 \
@@ -1223,7 +1291,8 @@ run_cell() {
       "${manifest}" "${cell}" \
       "$(config_value "${CONFIG}" VLLM_SERVED_MODEL_NAME)" "${samples}" \
       "${filter}" "${EXPECTED_GPU_UUID}" "${transport}" "${CA_FILE}" \
-      "${secure_port}" "${EXPECTED_GPU_INDEX}" "${DUMPCAP_GID}" ||
+      "${secure_port}" "${EXPECTED_GPU_INDEX}" "${DUMPCAP_GID}" \
+      "${PRIOR_LEDGER}" "${network}/${workload}/${transport}" ||
     child_status=$?
   [[ "${child_status:-0}" -eq 0 ]] ||
     die "measurement cell failed; append-only attempts remain in ${cell}"
@@ -1239,6 +1308,12 @@ run_cell() {
 release_precheck
 load_policy
 configure_legacy_continuation
+# A cross-GPU continuation measures with the parent's frozen release but owns a
+# new target root under this reviewed orchestration release.  This separation
+# keeps the parent tree read-only and makes the changed GPU an explicit block.
+if [[ -n "${PARENT_MATRIX_ROOT_REQUESTED}" ]]; then
+  RUN_REPOSITORY_SHA="${REPOSITORY_SHA}"
+fi
 check_base_output_hierarchy
 acquire_service_lock
 pin_service_state
@@ -1259,7 +1334,8 @@ if [[ ! -e "${MATRIX_ROOT}" && ! -L "${MATRIX_ROOT}" ]]; then
     printf '{"completed_cells":[],"state":"not-started","total_cells":12}\n'
     exit 0
   fi
-  [[ "${ACTION}" == run ]] || die "fresh matrix root is absent; use run, not resume"
+  [[ "${ACTION}" == run || "${ACTION}" == continue-on-gpu ]] ||
+    die "fresh matrix root is absent; use run or continue-on-gpu, not resume"
   /usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${MATRIX_ROOT}"
 fi
 [[ -d "${MATRIX_ROOT}" && ! -L "${MATRIX_ROOT}" &&
@@ -1267,9 +1343,25 @@ fi
   die "unsafe matrix root"
 
 mapfile -d '' -t PLAN_ARGS < <(state_args)
+if [[ -n "${PARENT_MATRIX_ROOT_REQUESTED}" ]]; then
+  verify_parent_matrix_root
+  PRIOR_LEDGER="${MATRIX_ROOT}/PARENT_LEDGER.json"
+  mapfile -d '' -t CONTINUATION_ARGS < <(continuation_state_args)
+fi
 if [[ "${ACTION}" == run ]]; then
   [[ ! -e "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] || die "matrix is already complete"
   /usr/bin/python3 -I "${STATE_TOOL}" create-plan "${PLAN_ARGS[@]}"
+elif [[ "${ACTION}" == continue-on-gpu ]]; then
+  [[ ! -e "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] || die "target matrix is already complete"
+  /usr/bin/python3 -I "${STATE_TOOL}" create-continuation-plan \
+    "${PLAN_ARGS[@]}" "${CONTINUATION_ARGS[@]}"
+elif [[ -n "${PARENT_MATRIX_ROOT}" ]]; then
+  /usr/bin/python3 -I "${STATE_TOOL}" verify-continuation-plan \
+    "${PLAN_ARGS[@]}" "${CONTINUATION_ARGS[@]}" >/dev/null ||
+    die "continuation plan or immutable parent snapshot differs"
+  /usr/bin/python3 -I "${STATE_TOOL}" verify-generations \
+    --root "${MATRIX_ROOT}" >/dev/null ||
+    die "service-generation ledger is not safely resumable"
 else
   verify_selected_plan
 fi
@@ -1284,7 +1376,8 @@ if [[ "${ACTION}" == status ]]; then
   /usr/bin/python3 -I "${STATE_TOOL}" status --root "${MATRIX_ROOT}"
   exit 0
 fi
-[[ "${ACTION}" == run || "${ACTION}" == resume ]] || die "invalid matrix action"
+[[ "${ACTION}" == run || "${ACTION}" == resume || "${ACTION}" == continue-on-gpu ]] ||
+  die "invalid matrix action"
 [[ ! -e "${MATRIX_ROOT}/MATRIX_COMPLETE.json" ]] ||
   die "matrix is already immutably complete"
 open_service_generation

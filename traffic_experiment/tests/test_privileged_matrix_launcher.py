@@ -195,6 +195,48 @@ def test_resume_loads_pinned_identity_and_digest(tmp_path: Path) -> None:
     assert identity.gpu_uuid == "GPU-2783a59c-9574-d4f6-1d4b-bfb505341383"
     assert identity.active_config_sha256 == "e" * 64
     assert identity.run_plan_sha256 == hashlib.sha256(encoded).hexdigest()
+    assert identity.parent_matrix_root is None
+    assert identity.parent_repository_sha is None
+
+
+def test_resume_loads_cross_gpu_continuation_parent_identity(tmp_path: Path) -> None:
+    launch = load_module()
+    plan_path = tmp_path / "RUN_PLAN.json"
+    parent_sha = "b" * 40
+    parent_root = (
+        f"/var/lib/commu-secure-matrix/{parent_sha}/"
+        "gpu-3-GPU-2783a59c-9574-d4f6-1d4b-bfb505341383/"
+        "runs/main-20260822t1203z"
+    )
+    write_plan(
+        plan_path,
+        schema="commu-secure-single-matrix-continuation-plan-v1",
+        parent_snapshot={
+            "run_root": parent_root,
+            "repository_sha": parent_sha,
+        },
+    )
+
+    identity = launch.load_resume_identity(plan_path)
+
+    assert identity.parent_matrix_root == parent_root
+    assert identity.parent_repository_sha == parent_sha
+
+
+def test_resume_rejects_noncanonical_continuation_parent_root(tmp_path: Path) -> None:
+    launch = load_module()
+    plan_path = tmp_path / "RUN_PLAN.json"
+    parent_sha = "b" * 40
+    write_plan(
+        plan_path,
+        schema="commu-secure-single-matrix-continuation-plan-v1",
+        parent_snapshot={
+            "run_root": f"/var/lib/commu-secure-matrix/{parent_sha}/../escape",
+            "repository_sha": parent_sha,
+        },
+    )
+    with pytest.raises(launch.LaunchConfigError, match="parent identity"):
+        launch.load_resume_identity(plan_path)
 
 
 def test_resume_rejects_gpu_override_mismatch(tmp_path: Path) -> None:

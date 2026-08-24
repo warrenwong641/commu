@@ -59,9 +59,10 @@ record under `SERVICE_GENERATIONS/`. Cleanup publishes a closure record. A new
 generation is rejected while the prior generation is open, and final sealing
 binds the closed ledger head. The final successful generation closes as
 `ready-to-seal`; only `MATRIX_COMPLETE.json` means the entire experiment is
-complete. This prevents accidental mixing of results from a
-different GPU, topology, code revision, manifest, model, or admission while
-allowing an expired lease to resume the same append-only experiment.
+complete. This prevents accidental mixing of results from a different GPU,
+topology, code revision, manifest, model, or admission while allowing an
+expired lease to resume the same append-only experiment. A deliberate GPU
+change uses the separate continuation workflow below, never ordinary `resume`.
 
 The older v1 plan format pinned its first service-state file directly. It is
 never rewritten. A reviewed bridge release can continue such an incomplete
@@ -177,14 +178,29 @@ sudo "$LAUNCHER" new \
 sudo "$LAUNCHER" resume \
   --run-id main-YYYYMMDDThhmmssZ \
   --lease 115m
+
+# Continue missing keys on another admitted GPU in a new target root.
+sudo "$LAUNCHER" continue-on-gpu \
+  --parent-run-id main-YYYYMMDDThhmmssZ \
+  --parent-source-repository-sha SOURCE_COMMIT \
+  --run-id main-YYYYMMDDThhmmssZ-gpu4-continuation \
+  --gpu-index 4 \
+  --lease 115m
 ```
 
 Accepted leases are 20 minutes through two hours (`20`, `115m`, or `2h`).
 Cleanup begins ten minutes before the hard deadline. Starting another segment
 does not repeat completed request keys: the matrix generation ledger closes the
 old lease and `resume` appends a new generation. A GPU assertion may be supplied
-on resume, but it must match the immutable plan. To use a different GPU, choose
-a new run ID and keep its output root and analysis separate.
+on resume, but it must match the immutable plan. `continue-on-gpu` requires a
+new target run ID, a different GPU with its own protocol admission and service
+configuration, and the exact parent run/source identity. It snapshots the
+parent's completed and attempted request keys into root-owned
+`PARENT_LEDGER.json`; the request runner executes only missing keys in the
+target tree. Parent files are never writable. Cell and matrix markers seal the
+parent/target union as a composite while retaining both GPU identities. Treat
+that composite as secondary/post-hoc and block analysis by GPU rather than
+claiming a single-GPU primary replicate.
 
 For a new run, the launcher derives a deterministic service-runtime directory
 from the full repository SHA, run ID, GPU index, and GPU UUID. Later segments
