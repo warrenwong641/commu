@@ -25,6 +25,7 @@ from traffic_experiment.traffic_measure.runner import (
     RunSettings,
     _capture_attempt_counts,
     _job_id,
+    _prior_progress,
     _request_once_curl,
     _request_once_http3,
     _trial_rows,
@@ -1076,7 +1077,13 @@ def test_runner_filters_to_one_compression_condition(tmp_path):
         server.server_close()
 
 
-def test_parent_ledger_skips_completed_and_counts_orphan_attempt(tmp_path):
+@pytest.mark.parametrize(
+    "ledger_schema",
+    ["commu-matrix-parent-ledger-v1", "commu-matrix-parent-ledger-v2"],
+)
+def test_parent_ledger_skips_completed_and_counts_orphan_attempt(
+    tmp_path, ledger_schema
+):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _VllmLikeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1106,7 +1113,7 @@ def test_parent_ledger_skips_completed_and_counts_orphan_attempt(tmp_path):
         ledger.write_text(
             json.dumps(
                 {
-                    "schema": "commu-matrix-parent-ledger-v1",
+                    "schema": ledger_schema,
                     "cells": {
                         "rtt/qa/tls13": {
                             "completed": [
@@ -1161,7 +1168,27 @@ def test_parent_ledger_skips_completed_and_counts_orphan_attempt(tmp_path):
         server.server_close()
 
 
-def test_parent_ledger_rejects_target_completed_overlap(tmp_path):
+def test_parent_ledger_rejects_unknown_schema(tmp_path):
+    ledger = tmp_path / "PARENT_LEDGER.json"
+    ledger.write_text(
+        json.dumps(
+            {
+                "schema": "commu-matrix-parent-ledger-v3",
+                "cells": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported schema"):
+        _prior_progress(ledger, "baseline/qa/tls13")
+
+
+@pytest.mark.parametrize(
+    "ledger_schema",
+    ["commu-matrix-parent-ledger-v1", "commu-matrix-parent-ledger-v2"],
+)
+def test_parent_ledger_rejects_target_completed_overlap(tmp_path, ledger_schema):
     manifest = tmp_path / "manifest.jsonl"
     request_id = "conversation-1::q1::no_compression"
     write_jsonl(
@@ -1188,7 +1215,7 @@ def test_parent_ledger_rejects_target_completed_overlap(tmp_path):
     ledger.write_text(
         json.dumps(
             {
-                "schema": "commu-matrix-parent-ledger-v1",
+                "schema": ledger_schema,
                 "cells": {
                     "baseline/qa/tls13": {
                         "completed": [{"request_id": request_id, "repetition": 1}],

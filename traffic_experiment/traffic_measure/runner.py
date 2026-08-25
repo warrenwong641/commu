@@ -33,6 +33,12 @@ from .common import append_jsonl, read_jsonl, sha256_file, sha256_json, utc_now
 from .http3_client import PersistentHttp3Client, post_http3
 
 
+_SUPPORTED_PARENT_LEDGER_SCHEMAS = {
+    "commu-matrix-parent-ledger-v1",
+    "commu-matrix-parent-ledger-v2",
+}
+
+
 @dataclass(frozen=True)
 class RunSettings:
     manifest_path: Path
@@ -203,7 +209,10 @@ def _prior_progress(
     if path is None or cell is None:
         raise ValueError("prior ledger path and cell must be supplied together")
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("schema") != "commu-matrix-parent-ledger-v1":
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") not in _SUPPORTED_PARENT_LEDGER_SCHEMAS
+    ):
         raise ValueError("prior ledger has an unsupported schema")
     cells = value.get("cells")
     if not isinstance(cells, dict) or cell not in cells:
