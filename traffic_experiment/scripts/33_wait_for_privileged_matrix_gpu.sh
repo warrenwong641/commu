@@ -137,7 +137,7 @@ LAUNCH_HELPER="${SCRIPT_DIR}/privileged_matrix_launch.py"
 STATE_TOOL="${SCRIPT_DIR}/privileged_matrix_state.py"
 
 release_precheck() {
-  local executable path mode
+  local executable path mode resolved
   case "${RELEASE_ROOT}" in /opt/commu-secure-matrix/releases/[0-9a-f][0-9a-f]*) ;; *) die "waiter is outside the fixed release root" ;; esac
   for path in /opt /opt/commu-secure-matrix /opt/commu-secure-matrix/releases \
     "${RELEASE_ROOT}" "${REPOSITORY_ROOT}" "${EXPERIMENT_ROOT}" "${SCRIPT_DIR}"; do
@@ -169,9 +169,13 @@ release_precheck() {
     /usr/bin/ip /usr/bin/mkdir /usr/bin/mv /usr/bin/nvidia-smi /usr/bin/openssl /usr/bin/python3 \
     /usr/bin/readlink /usr/bin/rm /usr/bin/seq /usr/bin/sha256sum /usr/bin/sleep /usr/bin/ss \
     /usr/bin/stat /usr/bin/systemctl /usr/bin/systemd-run /usr/bin/timeout /usr/bin/tmux; do
-    [[ -x "${executable}" && "$(/usr/bin/stat -c %u -- "${executable}")" == 0 ]] ||
+    resolved="$(/usr/bin/readlink -e -- "${executable}")" ||
+      die "cannot resolve required executable: ${executable}"
+    case "${resolved}" in /usr/bin/*|/usr/sbin/*) ;; *) die "required executable resolves outside system paths: ${executable}" ;; esac
+    [[ -f "${resolved}" && -x "${resolved}" &&
+      "$(/usr/bin/stat -c %u:%h -- "${resolved}")" == 0:1 ]] ||
       die "unsafe or missing required executable: ${executable}"
-    mode="$(/usr/bin/stat -c %a -- "${executable}")" || die "cannot inspect ${executable}"
+    mode="$(/usr/bin/stat -c %a -- "${resolved}")" || die "cannot inspect ${executable}"
     (( (8#${mode} & 8#022) == 0 )) || die "required executable is group/world writable: ${executable}"
   done
 }

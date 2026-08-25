@@ -164,6 +164,8 @@ def test_gpu_waiter_is_bounded_detached_and_pinned_to_the_run_plan() -> None:
     assert "MATRIX_WAIT_RESUME_FINISHED_EARLY" in text
     assert '/usr/bin/install -d -o root -g "${SERVICE_GID}" -m 0710 "${WAITERS_ROOT}"' in text
     assert '/usr/bin/install -o root -g "${SERVICE_GID}" -m 0640 /dev/null "${WAIT_LOG}"' in text
+    assert 'resolved="$(/usr/bin/readlink -e -- "${executable}")"' in text
+    assert 'stat -c %a -- "${resolved}"' in text
     assert 'WAIT_LAUNCHER="${RELEASE}/repository/traffic_experiment/scripts/33_wait_for_privileged_matrix_gpu.sh"' in installer
     assert '/usr/bin/chmod 0555 "${WAIT_LAUNCHER}"' in installer
     assert '[[ -f "${WAIT_LAUNCHER}" && -x "${WAIT_LAUNCHER}" ]]' in installer
